@@ -35,7 +35,7 @@ pub(crate) enum TreeCursorStep {
     Visible,
 }
 pub(crate) struct CursorChildIterator<'tree> {
-    pub parent: &'tree Subtree,
+    pub children: &'tree [Subtree],
     pub position: Length,
     pub child_index: u32,
     pub structural_child_index: u32,
@@ -57,6 +57,10 @@ pub(crate) fn ts_tree_cursor_is_entry_visible(cursor: &TreeCursor<'_>, index: u3
     index == 0 || cursor.stack[index as usize].visible
 }
 
+// These C-static-inline helpers pass large iterator/entry records. Keep them
+// inside traversal loops so unused state updates and record copies disappear;
+// ordinary inline hints leave both helpers out of line in release profiles.
+#[inline(always)]
 pub(crate) fn ts_tree_cursor_iterate_children<'tree>(
     cursor: &TreeCursor<'tree>,
 ) -> CursorChildIterator<'tree> {
@@ -65,14 +69,16 @@ pub(crate) fn ts_tree_cursor_iterate_children<'tree>(
 
 // Iterating a prefix of the stack lets sibling traversal preserve its original
 // entries on failure, just as C restores the array's size after popping entries.
+#[inline(always)]
 fn iterate_children_at<'tree>(
     cursor: &TreeCursor<'tree>,
     index: usize,
 ) -> CursorChildIterator<'tree> {
     let entry = &cursor.stack[index];
-    if ts_subtree_child_count(entry.subtree) == 0 {
+    let children = ts_subtree_children(entry.subtree);
+    if children.is_empty() {
         return CursorChildIterator {
-            parent: &Subtree::Null,
+            children: &[],
             position: length_zero(),
             child_index: 0,
             structural_child_index: 0,
@@ -94,7 +100,7 @@ fn iterate_children_at<'tree>(
                 index as u32,
             )));
     CursorChildIterator {
-        parent: entry.subtree,
+        children,
         position: entry.position,
         child_index: 0,
         structural_child_index: 0,
@@ -125,14 +131,12 @@ impl CursorChildIterator<'_> {
     }
 }
 
+#[inline(always)]
 pub(crate) fn ts_tree_cursor_child_iterator_next<'tree>(
     iterator: &mut CursorChildIterator<'tree>,
 ) -> Option<(TreeCursorEntry<'tree>, bool)> {
-    let children = ts_subtree_children(iterator.parent);
-    if iterator.parent.is_null() || iterator.child_index as usize == children.len() {
-        return None;
-    }
-    let child = &children[iterator.child_index as usize];
+    let children = iterator.children;
+    let child = children.get(iterator.child_index as usize)?;
     let (alias, field_id, visible) = iterator.edge_metadata(child);
     let entry = TreeCursorEntry {
         alias,
@@ -173,14 +177,15 @@ pub(crate) fn length_backtrack(a: Length, b: Length) -> Length {
     }
 }
 
+#[inline]
 pub(crate) fn ts_tree_cursor_child_iterator_previous<'tree>(
     iterator: &mut CursorChildIterator<'tree>,
 ) -> Option<(TreeCursorEntry<'tree>, bool)> {
     // Preserve the C int8_t sentinel test, including its truncation to eight bits.
-    if iterator.parent.is_null() || iterator.child_index as i8 == -1 {
+    if iterator.children.is_empty() || iterator.child_index as i8 == -1 {
         return None;
     }
-    let children = ts_subtree_children(iterator.parent);
+    let children = iterator.children;
     let child = &children[iterator.child_index as usize];
     let (alias, field_id, visible) = iterator.edge_metadata(child);
     let entry = TreeCursorEntry {
@@ -242,6 +247,7 @@ pub(crate) fn ts_tree_cursor_delete(cursor: &mut TreeCursor<'_>) {
     cursor.stack = Vec::new();
 }
 
+#[inline(always)]
 pub(crate) fn ts_tree_cursor_goto_first_child_internal(
     cursor: &mut TreeCursor<'_>,
 ) -> TreeCursorStep {
@@ -382,7 +388,7 @@ fn ts_tree_cursor_goto_sibling_internal<const REVERSE: bool>(
                 .wrapping_add(ts_subtree_visible_descendant_count(entry.subtree))
                 .wrapping_add(u32::from(entry.visible));
             iterator.position = length_add(entry.position, ts_subtree_size(entry.subtree));
-            if let Some(next) = ts_subtree_children(iterator.parent).get(iterator.child_index as usize) {
+            if let Some(next) = iterator.children.get(iterator.child_index as usize) {
                 iterator.position = length_add(iterator.position, ts_subtree_padding(next));
             }
         }
@@ -722,7 +728,7 @@ mod tests {
         aliases: &'static [Symbol],
     ) -> CursorChildIterator<'tree> {
         CursorChildIterator {
-            parent,
+            children: ts_subtree_children(parent),
             position: length_zero(),
             child_index: 0,
             structural_child_index: 0,
