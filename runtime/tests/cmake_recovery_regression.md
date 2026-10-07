@@ -102,14 +102,16 @@ unsafe code, or generated-file changes are introduced.
 
 ## ERROR range bucket `e0b0bff8`
 
-Reverified at `d5608ec`: all five reported inputs already pass on the starting
+Reverified at `61e4869`: all five reported inputs already pass on the starting
 checkout with the merged scanner initialization/reset correction above. Direct
 comparison with the current C scanner confirms that no additional implementation
 change is needed: creation uses `ts_calloc`, and invalid-length deserialization
-resets both `level` and `token` to zero. All checks listed below were rerun,
-including the existing parser regressions with chunked input, reused scanners,
-and incremental EOF edits. This follow-up only refreshes the verification record;
-it does not change runtime behavior or duplicate existing tests. Recovery from
+resets both `level` and `token` to zero. Token zero is `BRACKET_ARGUMENT_OPEN`,
+not an inert sentinel, so recovery can emit bracket content without an opener.
+All checks listed below were rerun, including the existing parser regressions
+with chunked input, reused scanners, and incremental EOF edits. This follow-up
+only refreshes the verification record; it does not change runtime behavior or
+duplicate existing tests. Recovery from
 byte 5 of `E_sleep-no-args-stderr.cmake` emits bracket content through byte 72,
 including the final newline. The enclosing ERROR therefore reaches EOF, rather
 than ending at byte 71 with only the initial identifier as a visible child.
