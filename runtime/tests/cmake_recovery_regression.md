@@ -102,8 +102,11 @@ unsafe code, or generated-file changes are introduced.
 
 ## ERROR range bucket `e0b0bff8`
 
-Reverified at `adc3fd3`: all five reported inputs already pass with the merged
-scanner initialization/reset correction above. In particular, recovery from
+Reverified at `6a480c1`: all five reported inputs already pass with the merged
+scanner initialization/reset correction above. Direct comparison with the
+current C scanner confirms that no additional implementation change is needed.
+All checks listed below were rerun, including the parser regressions with
+chunked input, reused scanners, and incremental EOF edits. In particular, recovery from
 byte 5 of `E_sleep-no-args-stderr.cmake` emits bracket content through byte 72,
 including the final newline. The enclosing ERROR therefore reaches EOF, rather
 than ending at byte 71 with only the initial identifier as a visible child.
