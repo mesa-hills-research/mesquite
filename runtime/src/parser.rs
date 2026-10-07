@@ -1031,19 +1031,22 @@ pub(crate) fn ts_parser__reduce(
     end_of_non_terminal_extra: bool,
     replace_version: bool,
 ) -> StackVersion {
+    // A committed reduction on the only active version needs neither a
+    // temporary version nor a slice worklist. Keep this path separate from the
+    // general reduction's grouping, selection, and version-merging machinery.
     if replace_version
         && let Some(mut children) = ts_stack_pop_count_in_place(&mut parser.stack, count)
     {
-        // The sole, committed reduction has already replaced head zero. It has
-        // no competing slices or versions to select, merge, or renumber.
         let language = parser.language.unwrap();
         ts_subtree_array_remove_trailing_extras(&mut children, &mut parser.trailing_extras);
         let state = ts_stack_state(&parser.stack, version);
-        let next_state = parser
-            .parse_table_cache
-            .next_state(&language, state, symbol);
-        let parent =
-            ts_subtree_new_node_with(symbol, children, production_id as u32, &language, |data| {
+        let next_state = parser.parse_table_cache.next_state(&language, state, symbol);
+        let parent = ts_subtree_new_node_with(
+            symbol,
+            children,
+            production_id as u32,
+            &language,
+            |data| {
                 if end_of_non_terminal_extra && next_state == state {
                     data.extra = true;
                 }
@@ -1058,7 +1061,8 @@ pub(crate) fn ts_parser__reduce(
                     unreachable!("a reduced node has branch data");
                 };
                 branch.dynamic_precedence += dynamic_precedence;
-            });
+            },
+        );
         ts_stack_push(
             &mut parser.stack,
             &mut parser.tree_pool,
@@ -1991,7 +1995,18 @@ pub(crate) fn ts_parser__advance(
     }
 }
 
+#[inline]
 pub(crate) fn ts_parser__condense_stack(parser: &mut Parser) -> u32 {
+    // An active sole version cannot merge, be pruned, or need resuming. Keep
+    // the version-status read: it also lowers the saved error node baseline.
+    if ts_stack_version_count(&parser.stack) == 1 && ts_stack_is_active(&parser.stack, 0) {
+        let status = ts_parser__version_status(parser, 0);
+        return if status.is_in_error { u32::MAX } else { status.cost };
+    }
+    ts_parser__condense_stack_general(parser)
+}
+
+fn ts_parser__condense_stack_general(parser: &mut Parser) -> u32 {
     let mut made_changes = false;
     let mut min_error_cost = u32::MAX;
     let mut i = 0;
@@ -2777,66 +2792,112 @@ mod parser3_tests {
     }
 
     #[test]
-    fn direct_reduction_matches_general_for_empty_and_nonterminal_extra() {
+    fn committed_reductions_match_general_reductions_including_empty_extras() {
         let language = reduction_language();
-        let symbol = (language.tables.token_count as Symbol
-            ..language.tables.symbol_count as Symbol)
-            .find(|&symbol| ts_language_next_state(&language, 0, symbol) == 0)
-            .expect("an absent nonterminal in the error-state row");
-        for count in [0, 1] {
-            for fragile in [false, true] {
-                for end_of_extra in [false, true] {
-                    let reduce = |replace_version| {
+        let symbol = language.tables.token_count as Symbol;
+        for state in [ERROR_STATE, 1] {
+            for count in [0, 1, 3] {
+                for fragile in [false, true] {
+                    for end_of_extra in [false, true] {
+                        let mut snapshots = Vec::new();
+                        for replace_version in [false, true] {
+                            let mut parser = ts_parser_new();
+                            parser.language = Some(language);
+                            // Leave a prefix below the reduction, including a
+                            // valid link when reducing in the error state.
+                            ts_stack_push(
+                                &mut parser.stack,
+                                &mut parser.tree_pool,
+                                0,
+                                Subtree::Null,
+                                false,
+                                state,
+                            );
+                            for i in 0..count {
+                                for flags in [VISIBLE | NAMED, EXTRA, EXTRA] {
+                                    ts_stack_push(
+                                        &mut parser.stack,
+                                        &mut parser.tree_pool,
+                                        0,
+                                        Subtree::Inline(InlineLeaf {
+                                            symbol: (i + 1) as u8,
+                                            size_bytes: 1,
+                                            flags,
+                                            ..InlineLeaf::default()
+                                        }),
+                                        false,
+                                        state,
+                                    );
+                                }
+                            }
+                            let version = ts_parser__reduce(
+                                &mut parser,
+                                0,
+                                symbol,
+                                count,
+                                -3,
+                                0,
+                                fragile,
+                                end_of_extra,
+                                replace_version,
+                            );
+                            ts_stack_renumber_version(
+                                &mut parser.stack,
+                                &mut parser.tree_pool,
+                                version,
+                                0,
+                            );
+                            let final_state = ts_stack_state(&parser.stack, 0);
+                            let slices = ts_stack_pop_all(&mut parser.stack, &mut parser.tree_pool, 0);
+                            // Debug includes every subtree header/branch field
+                            // recursively, not Arc addresses or arena indices.
+                            snapshots.push((final_state, format!("{:?}", slices[0].subtrees)));
+                            ts_parser_reset(&mut parser);
+                        }
+                        assert_eq!(snapshots[0], snapshots[1]);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn condense_single_active_version_preserves_error_baseline_updates() {
+        for state in [ERROR_STATE, 1, 2] {
+            for null in [false, true] {
+                for baseline in [0, 17] {
+                    let mut snapshots = Vec::new();
+                    for fast in [false, true] {
                         let mut parser = ts_parser_new();
-                        parser.language = Some(language);
+                        let tree = if null {
+                            Subtree::Null
+                        } else {
+                            Subtree::Inline(InlineLeaf {
+                                flags: VISIBLE,
+                                size_bytes: 1,
+                                ..InlineLeaf::default()
+                            })
+                        };
                         ts_stack_push(
                             &mut parser.stack,
                             &mut parser.tree_pool,
                             0,
-                            Subtree::Inline(InlineLeaf {
-                                symbol: 1,
-                                size_bytes: 3,
-                                flags: VISIBLE | NAMED,
-                                ..InlineLeaf::default()
-                            }),
+                            tree,
                             false,
-                            0,
+                            state,
                         );
-                        let version = ts_parser__reduce(
-                            &mut parser,
-                            0,
-                            symbol,
-                            count,
-                            -3,
-                            0,
-                            fragile,
-                            end_of_extra,
-                            replace_version,
-                        );
-                        ts_stack_renumber_version(
-                            &mut parser.stack,
-                            &mut parser.tree_pool,
-                            version,
-                            0,
-                        );
-                        let node = parser.stack.heads[0].node;
-                        let tree = &parser.stack.arena.nodes[node.0].as_ref().unwrap().links[0]
-                            .as_ref()
-                            .unwrap()
-                            .subtree;
-                        if count == 0 {
-                            assert_eq!(ts_subtree_extra(tree), end_of_extra);
-                        }
-                        (
-                            format!("{tree:?}"),
-                            ts_stack_state(&parser.stack, 0),
-                            ts_stack_position(&parser.stack, 0),
-                            ts_stack_error_cost(&parser.stack, 0),
-                            ts_stack_node_count_since_error(&mut parser.stack, 0),
-                            ts_stack_dynamic_precedence(&parser.stack, 0),
-                        )
-                    };
-                    assert_eq!(reduce(true), reduce(false));
+                        parser.stack.heads[0].node_count_at_last_error = baseline;
+                        let cost = if fast {
+                            ts_parser__condense_stack(&mut parser)
+                        } else {
+                            ts_parser__condense_stack_general(&mut parser)
+                        };
+                        snapshots.push((cost, parser.stack.heads[0].node_count_at_last_error));
+                        assert_eq!(ts_stack_version_count(&parser.stack), 1);
+                        assert!(ts_stack_is_active(&parser.stack, 0));
+                        ts_parser_reset(&mut parser);
+                    }
+                    assert_eq!(snapshots[0], snapshots[1]);
                 }
             }
         }

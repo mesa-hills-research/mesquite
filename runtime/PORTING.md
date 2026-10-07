@@ -131,7 +131,7 @@ nodes there is no need to free each unused index after the 50-node cache limit.
 `Stack` does not borrow its owner's subtree pool. Every operation needing it
 accepts `&mut SubtreePool` explicitly. At parser call sites split borrows of
 `parser.stack` and `parser.tree_pool`. Version remains u32 and NONE is u32::MAX.
-General pop APIs return owned Vec<StackSlice>; do not leave aliases to scratch slice storage.
+Pop APIs return owned Vec<StackSlice>; do not leave aliases to scratch slice storage.
 `stack__iter` accepts a closure over typed callback state plus an immutable arena
 view, replacing void* payloads. Pop-error captures `&mut bool`; summary captures
 `SummarizeStackSession`; callbacks inspect predecessor nodes through the arena.
@@ -141,15 +141,14 @@ For a sole reduce action on the sole active version, the parser may fuse the pop
 with the immediately following replacement of the original head.
 `ts_stack_pop_count_in_place` first verifies that every removed node is uniquely
 owned and has one predecessor; failure leaves the stack untouched for the normal
-traversal. On success it returns the owned child Vec directly and transfers the
+traversal. On success it moves child handles into the slice and transfers the
 last predecessor reference back to head 0, avoiding transient retains, a second
-head, and the subsequent release walk. Preserve the head's scanner token, error
+head, and the subsequent release walk. This committed path returns its child Vec
+directly, without constructing a slice worklist; the parser builds and pushes
+its one parent separately from the general grouping/merging reduction. Preserve
+the head's scanner token, error
 baseline and summary. Never use this path for speculative reductions or multiple
 actions/versions: those still need the original head for alternatives and merges.
-The committed reduction finishes directly from that child Vec, without wrapping
-it in a slice or entering general version-selection/merge bookkeeping. Preserve
-normal header initialization, trailing-extra order, and the caller's progress
-checkpoints on this path; fallback reductions retain the full algorithm.
 
 ## Parser, input, lexer, scanner and progress
 
@@ -183,8 +182,20 @@ Empty chunks mean EOF according to the C lexer. `LexerState.current_range_end`
 caches the current nonempty included range's end byte (zero at EOF), avoiding
 per-character Vec lookups. Refresh it on goto, range transitions, and empty reads;
 empty included ranges must still be visited in order when crossing a boundary.
-Never retain a chunk reference across another read. Decode malformed UTF-8 exactly as C, including consumed bytes
-and -1 lookahead; lexer also owns the three unicode decoding helper stubs.
+A 128-byte ASCII window copies only bytes inside the current chunk and included
+range. Non-ASCII values (0x80 for unused slots) force the full-chunk decoder path;
+this lets ordinary advances bypass virtual chunk access and boundary checks.
+Invalidate the window on every chunk read/clear and when goto changes the range
+end. Refilling the window must not call the input callback. Never retain a chunk
+reference across another read. Decode malformed UTF-8 exactly as C, including
+consumed bytes and -1 lookahead.
+
+Scalar-column state stores a wrapping offset from the current absolute byte
+position, rather than eagerly incrementing a second counter for every ASCII
+byte. Adjust that offset for multibyte characters/BOM, reset it on newlines, and
+preserve the scalar value across included-range jumps (including goto's same-byte
+relocation). Invalid column state still reads as zero until get_column replays
+the line. Parser scanner rollback saves/restores the offset with its byte position.
 
 `ParseContext<'input,'options>` holds the borrowed Input and ParseOptions. Functions
 that lex/check progress/advance/balance explicitly receive this context. Neither
