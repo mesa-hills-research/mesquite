@@ -263,28 +263,37 @@ mod tests {
     }
 
     #[test]
-    fn recovery_content_preserves_callback_order_before_and_after_reset() {
+    fn fresh_scanner_accepts_bracket_content_during_recovery() {
         let mut scanner = create();
-        for reset in [false, true] {
-            if reset {
-                // The previous scan left the token at BRACKET_ARGUMENT_CONTENT.
-                scanner.deserialize(&[]);
-            }
-            let mut lexer = TestLexer::new(")\n");
-            assert!(scanner.scan(&mut lexer, &[true; 7]));
-            assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
-            assert_eq!(lexer.end, Some(2));
-            assert_eq!(
-                lexer.events,
-                [
-                    Event::Advance(0, false),
-                    Event::MarkEnd(1),
-                    Event::Advance(1, false),
-                    Event::MarkEnd(2),
-                    Event::Symbol(BRACKET_ARGUMENT_CONTENT as u16),
-                ]
-            );
-        }
+        let mut snapshot = [0xff; STATE_SIZE];
+        assert_eq!(scanner.serialize(&mut snapshot), STATE_SIZE);
+        assert_eq!(snapshot, [0; STATE_SIZE]);
+
+        // Zero is BRACKET_ARGUMENT_OPEN, so recovery can scan content even
+        // without an opener. Normal lexing does not enable the content symbol.
+        let mut lexer = TestLexer::new("text)");
+        assert!(!scanner.scan(&mut lexer, &valid(&[BRACKET_ARGUMENT_OPEN])));
+        assert!(lexer.events.is_empty());
+        assert!(scanner.scan(&mut lexer, &[true; 7]));
+        assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
+        assert_eq!(lexer.end, Some(5));
+    }
+
+    #[test]
+    fn empty_snapshot_resets_token_and_delimiter_level() {
+        let mut scanner = Scanner::default();
+        let mut opener = TestLexer::new("#[==[");
+        assert!(scanner.scan(&mut opener, &valid(&[BRACKET_COMMENT_OPEN])));
+        assert_eq!(scanner.level, 2);
+        assert_eq!(scanner.token, BRACKET_COMMENT_OPEN as u32);
+
+        scanner.deserialize(&[]);
+        let mut content = TestLexer::new("text]]tail");
+        assert!(scanner.scan(&mut content, &[true; 7]));
+        assert_eq!(content.symbol, BRACKET_ARGUMENT_CONTENT as u16);
+        assert_eq!(content.end, Some(4));
+        assert_eq!(content.position, 5);
+        assert_eq!(scanner.level, 0);
     }
 
     #[test]
@@ -296,7 +305,8 @@ mod tests {
 
         // Recovery enables every external symbol. C's zero token allows a
         // content token even when there has not been an opening bracket.
-        for input in ["text", "", "text"] {
+        // Embedded NULs remain content rather than being mistaken for EOF.
+        for input in ["text\\\0\nmore", "", "text", "text\\\0\nmore"] {
             let mut lexer = TestLexer::new(input);
             assert!(scanner.scan(&mut lexer, &[true; 7]));
             assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
@@ -309,6 +319,25 @@ mod tests {
             assert_eq!(scanner.serialize(&mut snapshot), STATE_SIZE);
             assert_eq!(snapshot, [0; STATE_SIZE]);
         }
+    }
+
+    #[test]
+    fn empty_snapshot_clears_bracket_comment_state_during_recovery() {
+        let mut scanner = create();
+        let mut comment = TestLexer::new("#[=[");
+        assert!(scanner.scan(&mut comment, &valid(&[BRACKET_COMMENT_OPEN])));
+        scanner.deserialize(&[]);
+
+        let mut snapshot = [0xff; STATE_SIZE];
+        assert_eq!(scanner.serialize(&mut snapshot), STATE_SIZE);
+        assert_eq!(snapshot, [0; STATE_SIZE]);
+
+        // Resetting a nonzero bracket level and comment token must restore
+        // BRACKET_ARGUMENT_OPEN, even without scanning an argument opener.
+        let mut lexer = TestLexer::new("text");
+        assert!(scanner.scan(&mut lexer, &[true; 7]));
+        assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
+        assert_eq!(lexer.end, Some(4));
     }
 
     #[test]
@@ -475,17 +504,44 @@ mod tests {
         restored.deserialize(&buffer[..8]);
         assert_eq!(restored.level, scanner.level);
         assert_eq!(restored.token, scanner.token);
-        for length in [0, 1, 7, 9, 16] {
-            restored.level = 42;
-            restored.token = scanner.token;
-            restored.deserialize(&buffer[..length]);
-            assert_eq!(restored.level, 0);
-            assert_eq!(restored.token, BRACKET_ARGUMENT_OPEN as u32);
+        for token in [BRACKET_COMMENT_OPEN as u32, scanner.token] {
+            for length in [0, 1, 7, 9, 16] {
+                restored.level = 42;
+                restored.token = token;
+                restored.deserialize(&buffer[..length]);
+                assert_eq!(restored.level, 0);
+                assert_eq!(restored.token, BRACKET_ARGUMENT_OPEN as u32);
 
-            let mut lexer = TestLexer::new("text");
-            assert!(restored.scan(&mut lexer, &[true; 7]));
+                let mut lexer = TestLexer::new("text");
+                assert!(restored.scan(&mut lexer, &[true; 7]));
+                assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
+                assert_eq!(lexer.end, Some(4));
+            }
+        }
+    }
+
+    #[test]
+    fn recovery_content_preserves_callback_order_before_and_after_reset() {
+        let mut scanner = create();
+        for reset in [false, true] {
+            if reset {
+                // The previous scan left the token at BRACKET_ARGUMENT_CONTENT.
+                scanner.deserialize(&[]);
+            }
+            let mut lexer = TestLexer::new(")\n");
+            assert!(scanner.scan(&mut lexer, &[true; 7]));
             assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
-            assert_eq!(lexer.end, Some(4));
+            assert_eq!(lexer.end, Some(2));
+            assert_eq!(
+                lexer.events,
+                [
+                    Event::Advance(0, false),
+                    Event::MarkEnd(1),
+                    Event::Advance(1, false),
+                    Event::MarkEnd(2),
+                    Event::Symbol(BRACKET_ARGUMENT_CONTENT as u16),
+                ]
+            );
         }
     }
 }
