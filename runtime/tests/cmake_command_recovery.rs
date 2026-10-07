@@ -25,7 +25,23 @@ fn malformed_variable_references_recover_as_top_level_errors() {
                 assert!(!tree.root_node().has_error());
             }
 
-            let tree = parser.parse(source, None).unwrap();
+            // These short recoveries do not reach C's progress checkpoint.
+            // Count callbacks as well as checking the resulting error tree:
+            // a different recovery path can produce the same node shape.
+            let mut progress_calls = 0;
+            let mut progress = |_: &ParseState| {
+                progress_calls += 1;
+                false
+            };
+            let tree = parser
+                .parse_with_options(
+                    &mut |offset, _| source.as_bytes().get(offset..).unwrap_or_default(),
+                    None,
+                    Some(ParseOptions::new().progress_callback(&mut progress)),
+                )
+                .unwrap();
+            assert_eq!(progress_calls, 0, "{source:?}");
+
             let root = tree.root_node();
             assert_eq!(root.kind(), "source_file", "{source:?}");
             assert!(root.has_error());

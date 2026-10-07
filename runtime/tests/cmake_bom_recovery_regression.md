@@ -48,12 +48,12 @@ All checks were rerun for this task with the correction already merged:
 This follow-up adds parser-level regression coverage: no deviations from C, no
 unsafe code, and no host-owned generated files changed.
 
-## Reverification after merges `6a25441` and `2d1d5ac`
+## Reverification after merges `6a25441`, `2d1d5ac`, and `9045390`
 
 On reassignment of bucket `548436bf`, its four inputs already passed before any
 changes. Rechecked the current read-only C scanner against Rust: zero-initialized
 creation and resetting both fields on invalid-length deserialization still match.
-Reran every verification command above on both merged baselines: bucket 4/4,
+Reran every verification command above on all three merged baselines: bucket 4/4,
 CMake gate 270/270, fresh CMake 9,878/9,878, all 24 scanner tests and the parser BOM
 regression pass. Workspace all-target checking and both targeted strict clippy
 commands also pass, with only the unchanged generated YAML warning during the
@@ -69,3 +69,15 @@ incremental and query checks), fresh CMake 9,878/9,878, all 24 scanner tests, an
 the extended BOM regression pass. Workspace all-target checking and targeted
 strict clippy pass; the only workspace warning remains the host-owned YAML lexer
 unused assignment noted above.
+
+## Reverification on merged baseline `ddcce0a`
+
+Bucket `548436bf` was already resolved when reassigned on this baseline. Compared
+scanner creation, reset, and bracket-content scanning against the current C source;
+the merged implementation still matches, including consuming embedded NULs until
+actual EOF. Reran the bucket (4/4), all CMake oracle inputs (gate 270/270 with
+incremental/query checks; fresh repository 9,878/9,878), all 24 scanner tests, and
+the parser-level BOM regression. Workspace all-target checking and both targeted
+strict clippy commands above pass; the pre-existing host-owned YAML lexer warning
+is unchanged. This verification-only follow-up adds no behavior changes or duplicate
+tests; the existing correction and regressions already cover the assigned inputs.
