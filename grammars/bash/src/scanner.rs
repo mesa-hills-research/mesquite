@@ -42,6 +42,7 @@ const ALPHA: u8 = 2;
 const DIGIT: u8 = 4;
 const CONCAT_END: u8 = 8;
 const IDENTIFIER: u8 = 16;
+const SPECIAL_VARIABLE: u8 = 32;
 
 // C-locale classes shared by the token tests at each input position.
 fn character_class(c: i32) -> u8 {
@@ -63,6 +64,9 @@ fn character_class(c: i32) -> u8 {
             }
             if c == 0x5f {
                 classes[c] |= IDENTIFIER;
+            }
+            if matches!(c, 0x2a | 0x40 | 0x3f | 0x2d | 0x30 | 0x5f) {
+                classes[c] |= SPECIAL_VARIABLE;
             }
             c += 1;
         }
@@ -131,14 +135,38 @@ impl<'a> ScannerLexer<'a> {
         self.class = character_class(c);
     }
 
-    // After the numeric prefix, later digits cannot make a name numeric again.
+    // Most attempts begin with a name, not a number. Keep numeric-prefix
+    // handling out of this loop so it does not carry numeric state or the
+    // digit-loop setup through every ordinary identifier character.
     #[inline(always)]
     fn scan_identifier(&mut self) -> Option<bool> {
-        let mut c = self.lookahead;
+        let mut c;
         let mut class = self.class;
         if class & IDENTIFIER == 0 {
             return None;
         }
+        if class & DIGIT != 0 {
+            return Some(self.scan_numeric_identifier());
+        }
+        loop {
+            self.inner.advance(false);
+            c = self.inner.lookahead();
+            class = character_class(c);
+            if class & IDENTIFIER == 0 {
+                break;
+            }
+        }
+        self.lookahead = c;
+        self.class = class;
+        Some(false)
+    }
+
+    // After the numeric prefix, later digits cannot make a name numeric again.
+    #[cold]
+    #[inline(never)]
+    fn scan_numeric_identifier(&mut self) -> bool {
+        let mut c = self.lookahead;
+        let mut class = self.class;
         while class & DIGIT != 0 {
             self.inner.advance(false);
             c = self.inner.lookahead();
@@ -152,7 +180,7 @@ impl<'a> ScannerLexer<'a> {
         }
         self.lookahead = c;
         self.class = class;
-        Some(is_number)
+        is_number
     }
 
     fn mark_end(&mut self) {
@@ -645,9 +673,7 @@ impl Scanner {
                 }
             }
 
-            if !valid[EXPANSION_WORD]
-                && matches!(lexer.lookahead(), 0x2a | 0x40 | 0x3f | 0x2d | 0x30 | 0x5f)
-            {
+            if !valid[EXPANSION_WORD] && lexer.class & SPECIAL_VARIABLE != 0 {
                 lexer.mark_end();
                 advance(lexer);
                 if matches!(
@@ -1448,6 +1474,10 @@ mod tests {
             assert_eq!(
                 class & IDENTIFIER != 0,
                 is_alpha(c) || is_digit(c) || c == 0x5f
+            );
+            assert_eq!(
+                class & SPECIAL_VARIABLE != 0,
+                matches!(c, 0x2a | 0x40 | 0x3f | 0x2d | 0x30 | 0x5f)
             );
             assert_eq!(
                 class & CONCAT_END != 0,
