@@ -425,6 +425,9 @@ impl Scanner {
 }
 
 impl Scanner {
+    // The concat-only grammar state can return immediately after the first
+    // branch. Specializing this same implementation avoids both the full scan
+    // frame and the remaining token tests, without duplicating C control flow.
     #[inline(never)]
     fn scan_inner<const ONLY_CONCAT: bool>(
         &mut self,
@@ -755,10 +758,12 @@ impl ExternalScanner for Scanner {
     }
 
     fn serialize(&mut self, buffer: &mut [u8]) -> usize {
-        buffer[0] = self.last_glob_paren_depth;
-        buffer[1] = u8::from(self.ext_was_in_double_quote);
-        buffer[2] = u8::from(self.ext_saw_outside_quote);
-        buffer[3] = self.heredocs.len() as u8;
+        buffer[..4].copy_from_slice(&[
+            self.last_glob_paren_depth,
+            u8::from(self.ext_was_in_double_quote),
+            u8::from(self.ext_saw_outside_quote),
+            self.heredocs.len() as u8,
+        ]);
         let mut size = 4;
         for heredoc in &self.heredocs {
             if size + 3 + 4 + heredoc.delimiter.len() >= SERIALIZATION_BUFFER_SIZE {
@@ -1494,6 +1499,35 @@ mod tests {
             inner.events,
             (0..5).map(|_| Event::Advance(true)).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn concat_only_specialization_matches_full_scanner_callbacks() {
+        let valid = valid(&[CONCAT]);
+        let mut scanner = Scanner::default();
+        let mut check = |input: &str| {
+            let mut full = TestLexer::new(input);
+            let mut specialized = TestLexer::new(input);
+            let full_result = scanner.scan_inner::<false>(&mut full, &valid);
+            let specialized_result = scanner.scan_inner::<true>(&mut specialized, &valid);
+            assert_eq!(full_result, specialized_result, "{input:?}");
+            assert_eq!(full.position, specialized.position, "{input:?}");
+            assert_eq!(full.end, specialized.end, "{input:?}");
+            assert_eq!(full.symbol, specialized.symbol, "{input:?}");
+            assert_eq!(full.events, specialized.events, "{input:?}");
+            assert_eq!(
+                full.lookahead_calls.get(),
+                specialized.lookahead_calls.get()
+            );
+        };
+        for c in 0..=127 {
+            check(&char::from(c).to_string());
+        }
+        for input in [
+            "é", "Ł", "`b` ", "`b`x", "`b", "`\0` ", "\\", "\\x", "\\\n", "\\\\", "\\\"", "\\'",
+        ] {
+            check(input);
+        }
     }
 
     #[test]
