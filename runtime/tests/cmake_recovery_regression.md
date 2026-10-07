@@ -255,7 +255,7 @@ changes are introduced.
 
 ## Unterminated-call bucket `7f8795fb`
 
-Reverified at `d0eac7b` (previously at `7212094`): all three
+Reverified at `1550ea4` (previously at `d0eac7b` and `7212094`): all three
 reported inputs already pass on the starting checkout with the merged scanner
 initialization/reset correction above. The current C scanner uses
 `ts_calloc` and clears both fields on empty or invalid-length snapshots, matching
@@ -273,17 +273,21 @@ input chunks. The earlier verification note incorrectly described all three coun
 as zero; the existing tests already assert the correct counts. No additional
 behavior change or duplicate test is needed.
 
-Validation rerun for this bucket at `d0eac7b`:
+The C source and Rust scanner were compared directly again at this revision.
+Both still use zero-valued creation/reset, and all three parser regressions were
+already present. No additional behavior change or duplicate test is warranted.
+
+Validation rerun for this bucket at `1550ea4`:
 
 - `run_oracle(inputs = "bucket:7f8795fb")`: 3/3 pass.
 - `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs
   (including incremental and query checks) and 9878/9878 fresh inputs pass.
 - `cargo check --workspace --all-targets`: passes, with only the existing warning
   in host-owned `grammars/yaml/src/lex.rs:20` noted above.
-- `cargo test -p ts_port_cmake`: 24 tests pass.
-- `cargo test -p ts_port --test cmake_unterminated_call_recovery`: all three
-  tests pass, asserting each direct ERROR child's kind, symbol id, range,
-  flags, child count, and the exact progress-callback counts.
+- `cargo test -p ts_port_cmake -p ts_port`: all 24 CMake tests, 212 runtime
+  unit tests, and all integration/doc tests pass. This includes all three
+  `cmake_unterminated_call_recovery` tests, asserting each direct ERROR child's
+  kind, symbol id, range, flags, child count, and exact progress-callback counts.
 - `cargo clippy -p ts_port -p ts_port_cmake --all-targets -- -D warnings`: passes.
 - Prior workspace-wide clippy validation was blocked by the
   pre-existing unused-assignment warning in host-owned `grammars/yaml/src/lex.rs:20`.
