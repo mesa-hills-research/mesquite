@@ -67,7 +67,7 @@ bucket failures remain.
 
 ## Registry-query bucket `4d6cc948`
 
-Reverified again at `b34de06` (latest assigned baseline, after `b130253`): the assigned
+Reverified at `e5772de` (current assigned baseline, superseding `b34de06`): the assigned
 `Tests/RunCMake/find_package/Registry-query.cmake` already passes on the starting
 checkout. Its malformed `${CMAKE_ CURRENT_SOURCE_DIR}/${FILE_DIR}` reference
 exercised the same incorrect scanner initialization/reset described above:
