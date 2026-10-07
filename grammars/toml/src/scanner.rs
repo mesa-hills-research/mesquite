@@ -50,55 +50,80 @@ fn scan_multiline_string_end(
     true
 }
 
-impl ExternalScanner for Scanner {
-    fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
-        let Some(valid_symbols) = valid_symbols.first_chunk::<5>() else {
-            return false;
-        };
-        let mut lookahead = lexer.lookahead();
-        match lookahead {
-            0x22 if valid_symbols[MULTILINE_BASIC_STRING_END as usize] => {
-                return scan_multiline_string_end(
+// Newline and NUL need no advancement. Keep the whitespace and quote-run
+// bookkeeping in a separate path rather than set up its loop on every scan.
+#[inline(never)]
+fn scan_delimiter_or_whitespace(
+    lexer: &mut dyn Lexer,
+    valid_symbols: &[bool; 5],
+    mut lookahead: i32,
+) -> bool {
+    match lookahead {
+        0x22 => {
+            return valid_symbols[MULTILINE_BASIC_STRING_END as usize]
+                && scan_multiline_string_end(
                     lexer,
                     lookahead,
                     MULTILINE_BASIC_STRING_CONTENT,
                     MULTILINE_BASIC_STRING_END,
                 );
-            }
-            0x27 if valid_symbols[MULTILINE_LITERAL_STRING_END as usize] => {
-                return scan_multiline_string_end(
+        }
+        0x27 => {
+            return valid_symbols[MULTILINE_LITERAL_STRING_END as usize]
+                && scan_multiline_string_end(
                     lexer,
                     lookahead,
                     MULTILINE_LITERAL_STRING_CONTENT,
                     MULTILINE_LITERAL_STRING_END,
                 );
-            }
-            _ => {}
         }
+        _ => {}
+    }
 
-        if !valid_symbols[LINE_ENDING_OR_EOF as usize]
-            || !matches!(lookahead, 0 | 0x09 | 0x0a | 0x0d | 0x20)
-        {
+    // Dispatch has already limited non-quote starts to space, tab, or CR.
+    if !valid_symbols[LINE_ENDING_OR_EOF as usize] {
+        return false;
+    }
+    while matches!(lookahead, 0x20 | 0x09) {
+        lexer.advance(true);
+        lookahead = lexer.lookahead();
+    }
+    let accepted = if lookahead == 0x0d {
+        lexer.advance(true);
+        lexer.lookahead() == i32::from(b'\n')
+    } else {
+        // C treats an embedded NUL as EOF here.
+        matches!(lookahead, 0 | 0x0a)
+    };
+    if accepted {
+        // The parser ignores result_symbol on failure. Defer the write
+        // so whitespace-prefixed failed scans do not make a virtual call
+        // solely to produce an unused symbol.
+        lexer.set_result_symbol(LINE_ENDING_OR_EOF);
+    }
+    accepted
+}
+
+impl ExternalScanner for Scanner {
+    fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
+        let Some(valid_symbols) = valid_symbols.first_chunk::<5>() else {
             return false;
-        }
-        while matches!(lookahead, 0x20 | 0x09) {
-            lexer.advance(true);
-            lookahead = lexer.lookahead();
-        }
-        let accepted = if lookahead == 0x0d {
-            lexer.advance(true);
-            lexer.lookahead() == i32::from(b'\n')
-        } else {
-            // C treats an embedded NUL as EOF here.
-            matches!(lookahead, 0 | 0x0a)
         };
-        if accepted {
-            // The parser ignores result_symbol on failure. Defer the write
-            // so whitespace-prefixed failed scans do not make a virtual call
-            // solely to produce an unused symbol.
-            lexer.set_result_symbol(LINE_ENDING_OR_EOF);
+        let lookahead = lexer.lookahead();
+        match lookahead {
+            0 | 0x0a => {
+                let accepted = valid_symbols[LINE_ENDING_OR_EOF as usize];
+                if accepted {
+                    // Like C, accept embedded NUL without consulting eof().
+                    lexer.set_result_symbol(LINE_ENDING_OR_EOF);
+                }
+                accepted
+            }
+            0x09 | 0x0d | 0x20 | 0x22 | 0x27 => {
+                scan_delimiter_or_whitespace(lexer, valid_symbols, lookahead)
+            }
+            _ => false,
         }
-        accepted
     }
 
     fn serialize(&mut self, _buffer: &mut [u8]) -> usize {
@@ -423,6 +448,26 @@ mod tests {
                 };
                 assert_eq!(accepted, expected_accepted, "first {first}, mask {mask}");
                 assert_eq!(lexer.events, expected_events, "first {first}, mask {mask}");
+            }
+        }
+    }
+
+    #[test]
+    fn dispatch_does_not_truncate_line_break_or_delimiter_code_points() {
+        for upper_bits in [0x100, 0x10000, 0x10ff00, i32::MIN] {
+            for low_byte in [0, 0x09, 0x0a, 0x0d, 0x20, 0x22, 0x27] {
+                let first = upper_bits | low_byte;
+                for mask in 0..32 {
+                    let valid: [bool; 5] = std::array::from_fn(|i| mask & (1 << i) != 0);
+                    let mut lexer = TestLexer::new("x\n");
+                    lexer.input[0] = first;
+                    assert!(
+                        !Scanner.scan(&mut lexer, &valid),
+                        "first {first}, mask {mask}"
+                    );
+                    assert!(lexer.events.is_empty(), "first {first}, mask {mask}");
+                    assert_eq!(lexer.lookahead_calls.get(), 1);
+                }
             }
         }
     }
