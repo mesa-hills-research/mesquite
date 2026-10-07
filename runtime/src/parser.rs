@@ -486,12 +486,21 @@ pub(crate) fn ts_parser__can_reuse_first_leaf(
     current_lex_mode.external_lex_state == 0 && table_entry.is_reusable()
 }
 
-pub(crate) fn ts_parser__lex(
+pub(crate) fn ts_parser__lex<const LOGGING: bool>(
     parser: &mut Parser,
     context: &mut ParseContext<'_, '_>,
     version: StackVersion,
     parse_state: StateId,
 ) -> Subtree {
+    macro_rules! parser_log {
+        ($parser:expr, $($arg:tt)*) => {
+            if LOGGING && ($parser.logger.is_some() || $parser.dot_graph.is_some()) {
+                $parser.lexer.debug_buffer = parser_log_buffer(format!($($arg)*));
+                ts_parser__log($parser);
+            }
+        };
+    }
+
     let language = parser.language.expect("parser language");
     let mut lex_mode = ts_language_lex_mode_for_state(&language, parse_state);
     if lex_mode.lex_state == StateId::MAX {
@@ -688,11 +697,13 @@ pub(crate) fn ts_parser__lex(
             },
         )
     };
+    if LOGGING {
     parser_log_lookahead!(
         parser,
         ts_language_symbol_name(&language, ts_subtree_symbol(&result)).unwrap_or(""),
         ts_subtree_total_size(&result).bytes
     );
+    }
     result
 }
 
@@ -1781,12 +1792,20 @@ pub(crate) fn ts_parser__check_progress(
     true
 }
 
-pub(crate) fn ts_parser__advance(
+pub(crate) fn ts_parser__advance<const LOGGING: bool>(
     parser: &mut Parser,
     context: &mut ParseContext<'_, '_>,
     version: StackVersion,
     allow_node_reuse: bool,
 ) -> bool {
+    macro_rules! parser3_log {
+        ($parser:expr, $message:expr $(,)?) => {
+            if LOGGING && ($parser.logger.is_some() || $parser.dot_graph.is_some()) {
+                parser3_log_message($parser, $message);
+            }
+        };
+    }
+
     use ts_port_tables::{BUILTIN_SYM_END, ParseAction};
     let language = parser.language.expect("parser language");
     let mut state = ts_stack_state(&parser.stack, version);
@@ -1798,7 +1817,7 @@ pub(crate) fn ts_parser__advance(
     let mut lookahead = Subtree::Null;
     let mut table_entry = TableEntry::default();
 
-    if allow_node_reuse {
+    if allow_node_reuse && !parser.reusable_node.stack.is_empty() {
         lookahead = ts_parser__reuse_node(
             parser,
             version,
@@ -1821,7 +1840,7 @@ pub(crate) fn ts_parser__advance(
     loop {
         if needs_lex {
             needs_lex = false;
-            lookahead = ts_parser__lex(parser, context, version, state);
+            lookahead = ts_parser__lex::<LOGGING>(parser, context, version, state);
             if parser.has_scanner_error {
                 return false;
             }
@@ -1933,7 +1952,7 @@ pub(crate) fn ts_parser__advance(
                 last_reduction_version,
                 version,
             );
-            parser3_log_stack(parser);
+            if LOGGING { parser3_log_stack(parser); }
             state = ts_stack_state(&parser.stack, version);
             if lookahead.is_null() {
                 needs_lex = true;
@@ -2319,6 +2338,18 @@ pub(crate) fn ts_parser_parse(
     old_tree: Option<&Tree>,
     context: &mut ParseContext<'_, '_>,
 ) -> Option<Tree> {
+    if parser.logger.is_some() || parser.dot_graph.is_some() {
+        parse_with_logging::<true>(parser, old_tree, context)
+    } else {
+        parse_with_logging::<false>(parser, old_tree, context)
+    }
+}
+
+fn parse_with_logging<const LOGGING: bool>(
+    parser: &mut Parser,
+    old_tree: Option<&Tree>,
+    context: &mut ParseContext<'_, '_>,
+) -> Option<Tree> {
     let language = parser.language?;
 
     // Input is a trait object with a required read method, so C's null-read
@@ -2336,7 +2367,7 @@ pub(crate) fn ts_parser_parse(
     };
 
     let resume_balancing = if ts_parser_has_outstanding_parse(parser) {
-        if parser.logger.is_some() || parser.dot_graph.is_some() {
+        if LOGGING && (parser.logger.is_some() || parser.dot_graph.is_some()) {
             parser.lexer.debug_buffer = "resume_parsing".into();
             ts_parser__log(parser);
         }
@@ -2359,16 +2390,16 @@ pub(crate) fn ts_parser_parse(
                 &mut parser.reusable_node,
                 old_tree.root.as_ref().clone(),
             );
-            if parser.logger.is_some() || parser.dot_graph.is_some() {
+            if LOGGING && (parser.logger.is_some() || parser.dot_graph.is_some()) {
                 parser.lexer.debug_buffer = "parse_after_edit".into();
                 ts_parser__log(parser);
             }
-            if let Some(output) = parser.dot_graph.as_mut() {
+            if LOGGING && let Some(output) = parser.dot_graph.as_mut() {
                 let _ = ts_subtree_print_dot_graph(&parser.old_tree, &language, output);
                 let _ = output.write_all(b"\n");
             }
             for i in 0..parser.included_range_differences.len() {
-                if parser.logger.is_some() || parser.dot_graph.is_some() {
+                if LOGGING && (parser.logger.is_some() || parser.dot_graph.is_some()) {
                     let range = &parser.included_range_differences[i];
                     parser.lexer.debug_buffer = format!(
                         "different_included_range {} - {}",
@@ -2379,7 +2410,7 @@ pub(crate) fn ts_parser_parse(
             }
         } else {
             crate::reusable_node::reusable_node_clear(&mut parser.reusable_node);
-            if parser.logger.is_some() || parser.dot_graph.is_some() {
+            if LOGGING && (parser.logger.is_some() || parser.dot_graph.is_some()) {
                 parser.lexer.debug_buffer = "new_parse".into();
                 ts_parser__log(parser);
             }
@@ -2402,7 +2433,7 @@ pub(crate) fn ts_parser_parse(
                 }
                 let allow_node_reuse = version_count == 1;
                 while ts_stack_is_active(&parser.stack, version) {
-                    if parser.logger.is_some() || parser.dot_graph.is_some() {
+                    if LOGGING && (parser.logger.is_some() || parser.dot_graph.is_some()) {
                         let point = ts_stack_position(&parser.stack, version).extent;
                         parser.lexer.debug_buffer = format!(
                             "process version:{}, version_count:{}, state:{}, row:{}, col:{}",
@@ -2415,7 +2446,8 @@ pub(crate) fn ts_parser_parse(
                         ts_parser__log(parser);
                     }
 
-                    if !ts_parser__advance(parser, context, version, allow_node_reuse) {
+                    let advanced = ts_parser__advance::<LOGGING>(parser, context, version, allow_node_reuse);
+                    if !advanced {
                         if parser.has_scanner_error {
                             ts_parser_reset(parser);
                         }
@@ -2424,7 +2456,7 @@ pub(crate) fn ts_parser_parse(
                         return None;
                     }
 
-                    if let Some(output) = parser.dot_graph.as_mut() {
+                    if LOGGING && let Some(output) = parser.dot_graph.as_mut() {
                         let _ = ts_stack_print_dot_graph(&mut parser.stack, &language, output);
                         let _ = output.write_all(b"\n\n");
                     }
@@ -2469,11 +2501,11 @@ pub(crate) fn ts_parser_parse(
         return None;
     }
     parser.canceled_balancing = false;
-    if parser.logger.is_some() || parser.dot_graph.is_some() {
+    if LOGGING && (parser.logger.is_some() || parser.dot_graph.is_some()) {
         parser.lexer.debug_buffer = "done".into();
         ts_parser__log(parser);
     }
-    if let Some(output) = parser.dot_graph.as_mut() {
+    if LOGGING && let Some(output) = parser.dot_graph.as_mut() {
         let _ = ts_subtree_print_dot_graph(&parser.finished_tree, &language, output);
         let _ = output.write_all(b"\n");
     }
