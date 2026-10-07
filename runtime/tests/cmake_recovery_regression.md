@@ -59,13 +59,13 @@ This follow-up changes only this verification note; it introduces no deviation
 from C and no new unsafe code.
 
 
-### Revalidation of `4d6cc948` at `cabce01`
+### Revalidation of `4d6cc948` at `3e39027`
 
 The assigned Registry-query input still passes before any new changes, as it did
-at `9c27be8` and `88489b8`. Direct comparison with the current C scanner confirms
+at `cabce01`, `9c27be8`, and `88489b8`. Direct comparison with the current C scanner confirms
 that the merged zero-valued creation/reset behavior above is the required
 correction; no additional runtime change is warranted. The checks below were
-rerun at `cabce01`,
+rerun at `3e39027`,
 including the parser regression with both fresh and reused scanner state,
 single-byte input chunks, and incremental repair/restoration. The reduced
 Registry-query expression is already present in both scanner and parser tests;
@@ -181,10 +181,10 @@ lexer warning noted above. This change only strengthens regression coverage;
 there are no runtime changes, C deviations, new unsafe code, or generated-file
 changes.
 
-### ERROR-range revalidation at `5f3aee6`
+### ERROR-range revalidation at `ce616cb`
 
 Rechecked the previously resolved bucket at this starting revision; all checks
-below were rerun, rather than relying on the earlier verification at `512817f`.
+below were rerun, rather than relying on the earlier verification at `5f3aee6`.
 Bucket `e0b0bff8` already passes on this starting checkout. Comparing the current
 C scanner with Rust confirms the merged zero-valued creation/reset fix remains
 correct; no new implementation change or duplicate regression is needed.
@@ -208,7 +208,8 @@ new unsafe code, warnings, or generated-file modifications are introduced.
 
 ## Empty recovery-content bucket `f5e2762e`
 
-Reverified at `4949d42`: all 16 reported inputs already pass. The merged scanner
+Reverified at `6a16e7c` (previously at `4949d42`): all 16 reported inputs
+already pass on the starting checkout. The merged scanner
 initialization/reset correction above allows `bracket_argument_content` at EOF
 without an opener, including after `a` and after skipping the newline in `if(\n`.
 This zero-width token is a real scanner token, not an inserted missing node.
@@ -235,7 +236,7 @@ The current C source was compared directly with the Rust scanner: creation uses
 The matching implementation and all regression cases were already present at
 this starting revision, so no duplicate test or behavior change was warranted.
 
-Checks rerun for this bucket at `4949d42`:
+Checks rerun for this bucket at `6a16e7c`:
 
 - `run_oracle(inputs = "bucket:f5e2762e")`: 16/16 pass.
 - `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs
@@ -254,8 +255,8 @@ changes are introduced.
 
 ## Unterminated-call bucket `7f8795fb`
 
-Reverified at `b5edaa9` (also previously at `40208fa` and `a4425c2`): all
-three reported inputs already pass on the starting checkout with the merged scanner
+Reverified at `9a8563b`: all three reported inputs already pass on the starting
+checkout with the merged scanner
 initialization/reset correction above. The current C scanner uses
 `ts_calloc` and clears both fields on empty or invalid-length snapshots, matching
 the Rust implementation. This allows recovery content without an opener:
@@ -272,7 +273,7 @@ input chunks. The earlier verification note incorrectly described all three coun
 as zero; the existing tests already assert the correct counts. No additional
 behavior change or duplicate test is needed.
 
-Validation rerun for this bucket at `b5edaa9`:
+Validation rerun for this bucket at `9a8563b`:
 
 - `run_oracle(inputs = "bucket:7f8795fb")`: 3/3 pass.
 - `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs
@@ -281,7 +282,7 @@ Validation rerun for this bucket at `b5edaa9`:
   in host-owned `grammars/yaml/src/lex.rs:20` noted above.
 - `cargo test -p ts_port_cmake`: 24 tests pass.
 - `cargo test -p ts_port`: all unit and integration tests pass, including the
-  three `cmake_unterminated_call_recovery` tests, which now also assert each
+  three `cmake_unterminated_call_recovery` tests, which also assert each
   direct ERROR child's kind, symbol id, range, flags, and child count.
 - `cargo clippy -p ts_port -p ts_port_cmake --all-targets -- -D warnings`: passes.
 - `cargo clippy --workspace --all-targets -- -D warnings`: blocked by the
