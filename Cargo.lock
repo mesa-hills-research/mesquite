@@ -62,7 +62,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ts_port_bash"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
 name = "ts_port_c"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
+name = "ts_port_c_sharp"
 version = "0.1.0"
 dependencies = [
  "ts_port_tables",
@@ -76,7 +90,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ts_port_css"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
 name = "ts_port_go"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
+name = "ts_port_html"
 version = "0.1.0"
 dependencies = [
  "ts_port_tables",
@@ -97,7 +125,63 @@ dependencies = [
 ]
 
 [[package]]
+name = "ts_port_json"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
+name = "ts_port_kotlin"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
+name = "ts_port_lua"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
+name = "ts_port_markdown"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
+name = "ts_port_markdown_inline"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
+name = "ts_port_php"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
+name = "ts_port_php_only"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
 name = "ts_port_python"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
+name = "ts_port_ruby"
 version = "0.1.0"
 dependencies = [
  "ts_port_tables",
@@ -111,8 +195,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ts_port_swift"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
 name = "ts_port_tables"
 version = "0.1.0"
+
+[[package]]
+name = "ts_port_toml"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
 
 [[package]]
 name = "ts_port_tsx"
@@ -123,6 +221,20 @@ dependencies = [
 
 [[package]]
 name = "ts_port_typescript"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
+name = "ts_port_yaml"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
+name = "ts_port_zig"
 version = "0.1.0"
 dependencies = [
  "ts_port_tables",
