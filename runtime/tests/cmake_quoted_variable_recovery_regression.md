@@ -124,10 +124,10 @@ No bucket work remains. The broader oracle was not rerun in this stop-time
 verification; the all-input results above belong to their stated earlier
 revisions. No deviations from C, unsafe code, or generated-file edits were made.
 
-## Current verification at `4bb9729`
+## Current verification at `fd8d80a`
 
 Rechecked the reassigned bucket on the current merged baseline against the C
-scanner source, superseding the verification at `cbb1cdc`. The initialization/reset
+scanner source, superseding the verification at `4bb9729`. The initialization/reset
 correction and regression tests are already present, so no further behavior
 change or duplicate test is needed. The current C implementation still uses
 `ts_calloc` and resets both `level` and `token` on invalid-length snapshots;
