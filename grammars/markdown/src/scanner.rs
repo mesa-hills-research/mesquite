@@ -1,5 +1,7 @@
 //! The Markdown block scanner, translated from tree-sitter-markdown/src/scanner.c.
 
+use std::sync::OnceLock;
+
 use ts_port_tables::{ExternalScanner, Lexer};
 
 // Indices in the grammar's external-token array.
@@ -214,7 +216,7 @@ pub(crate) struct Scanner {
     // 0..=4 is the inline block count; 5 means use spilled_blocks.len().
     inline_count: u8,
     simulate: bool,
-    text_symbols: &'static [bool; 47],
+    modes: &'static ModeSymbols,
 }
 
 impl Default for Scanner {
@@ -224,7 +226,7 @@ impl Default for Scanner {
             spilled_blocks: Vec::new(),
             inline_count: 0,
             simulate: false,
-            text_symbols: &TEXT_FLAGS,
+            modes: &DEFAULT_MODES,
         }
     }
 }
@@ -255,18 +257,62 @@ fn is_punctuation(c: i32) -> bool {
     matches!(c as u8, b'!'..=b'/' | b':'..=b'@' | b'['..=b'`' | b'{'..=b'~')
 }
 
-// All 47 real flags fit below this sentinel. The common paragraph state and
-// the scanner's fixed paragraph-interruption lookahead each get one specialized
-// dispatcher; all other token sets share the dynamic implementation.
+// All 47 real flags fit below this sentinel. Common text, fenced-code and
+// block-line states, plus fixed paragraph-interruption lookahead, each get a
+// specialized dispatcher. Other token sets share the dynamic implementation.
 const DYNAMIC_SYMBOLS: u64 = u64::MAX;
 const TEXT_SYMBOLS: u64 = (1 << LINE_ENDING) | (1 << SOFT_LINE_ENDING) | (1 << TOKEN_EOF);
-static TEXT_FLAGS: [bool; 47] = {
+const CODE_SYMBOLS: u64 = (1 << LINE_ENDING) | (1 << BLOCK_CLOSE)
+    | (1 << FENCED_CODE_BLOCK_END_BACKTICK);
+const BLOCK_LINE_SYMBOLS: u64 = (1 << LINE_ENDING) | (1 << BLOCK_CLOSE);
+
+const fn flags_for(mask: u64) -> [bool; 47] {
     let mut flags = [false; 47];
-    flags[LINE_ENDING] = true;
-    flags[SOFT_LINE_ENDING] = true;
-    flags[TOKEN_EOF] = true;
+    let mut i = 0;
+    while i < flags.len() {
+        flags[i] = mask & (1 << i) != 0;
+        i += 1;
+    }
     flags
+}
+
+static TEXT_FLAGS: [bool; 47] = flags_for(TEXT_SYMBOLS);
+static CODE_FLAGS: [bool; 47] = flags_for(CODE_SYMBOLS);
+static BLOCK_LINE_FLAGS: [bool; 47] = flags_for(BLOCK_LINE_SYMBOLS);
+
+struct ModeSymbols {
+    text: &'static [bool; 47],
+    code: &'static [bool; 47],
+    block_line: &'static [bool; 47],
+}
+
+static DEFAULT_MODES: ModeSymbols = ModeSymbols {
+    text: &TEXT_FLAGS,
+    code: &CODE_FLAGS,
+    block_line: &BLOCK_LINE_FLAGS,
 };
+static GRAMMAR_MODES: OnceLock<ModeSymbols> = OnceLock::new();
+
+impl ModeSymbols {
+    fn new() -> Self {
+        let rows = crate::language()
+            .external_scanner
+            .as_ref()
+            .unwrap()
+            .states
+            .as_chunks::<47>()
+            .0;
+        let find = |flags: &'static [bool; 47]| {
+            rows.iter().find(|row| *row == flags).unwrap_or(flags)
+        };
+        Self {
+            text: find(&TEXT_FLAGS),
+            code: find(&CODE_FLAGS),
+            block_line: find(&BLOCK_LINE_FLAGS),
+        }
+    }
+}
+
 const PARAGRAPH_SYMBOLS: u64 = {
     let mut flags = 0;
     let mut i = 0;
@@ -296,12 +342,15 @@ impl<const FLAGS: u64> Symbols<'_, FLAGS> {
 impl ExternalScanner for Scanner {
     fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
         self.simulate = false;
-        // Most calls inside text allow only line endings and EOF. Specialize
-        // the existing C control flow, rather than skipping invalid handlers:
-        // stars, underscores and fences still perform their original advances
-        // and marks even when no token can be returned.
-        if std::ptr::eq(self.text_symbols.as_slice(), valid_symbols) {
+        // Specialize the common line-oriented states, rather than skipping
+        // invalid handlers: stars, underscores and fences still perform their
+        // original advances and marks even when no token can be returned.
+        if std::ptr::eq(self.modes.text.as_slice(), valid_symbols) {
             self.scan_mode::<TEXT_SYMBOLS>(lexer, Symbols(valid_symbols))
+        } else if std::ptr::eq(self.modes.code.as_slice(), valid_symbols) {
+            self.scan_mode::<CODE_SYMBOLS>(lexer, Symbols(valid_symbols))
+        } else if std::ptr::eq(self.modes.block_line.as_slice(), valid_symbols) {
+            self.scan_mode::<BLOCK_LINE_SYMBOLS>(lexer, Symbols(valid_symbols))
         } else {
             self.scan_mode::<DYNAMIC_SYMBOLS>(lexer, Symbols(valid_symbols))
         }
@@ -370,20 +419,13 @@ impl ExternalScanner for Scanner {
 }
 
 pub(crate) fn create() -> Box<dyn ExternalScanner> {
-    // This reference comes from the grammar's immutable static table, so pointer
-    // equality later proves the token set without caching arbitrary caller data.
-    // Other rows (including any duplicate row) safely use dynamic dispatch.
-    let text_symbols = crate::language()
-        .external_scanner
-        .as_ref()
-        .unwrap()
-        .states
-        .as_chunks::<47>()
-        .0
-        .iter()
-        .find(|flags| **flags == TEXT_FLAGS)
-        .unwrap_or(&TEXT_FLAGS);
-    Box::new(Scanner { text_symbols, ..Scanner::default() })
+    // These references come from the grammar's immutable static table, so
+    // pointer equality proves each token set without caching arbitrary data.
+    // Other rows (including duplicates) safely use dynamic dispatch.
+    Box::new(Scanner {
+        modes: GRAMMAR_MODES.get_or_init(ModeSymbols::new),
+        ..Scanner::default()
+    })
 }
 
 /// A scan-local copy of C's `TSLexer.lookahead` field. All tests of the current
@@ -1514,7 +1556,8 @@ impl Scanner {
             // Within text, a single space is much more common than a run.
             // Perform the same first advance inline, leaving tabs and longer
             // runs to the shared helper without adding setup to other modes.
-            if FLAGS == TEXT_SYMBOLS && lexer.lookahead() == i32::from(b' ') {
+            if matches!(FLAGS, TEXT_SYMBOLS | CODE_SYMBOLS | BLOCK_LINE_SYMBOLS)
+                && lexer.lookahead() == i32::from(b' ') {
                 self.snapshot[INDENTATION] =
                     self.snapshot[INDENTATION].wrapping_add(self.advance(lexer));
             }
@@ -1820,7 +1863,7 @@ mod tests {
     fn fixed_text_row_is_immutable_and_foreign_flags_remain_dynamic() {
         let rows = &crate::language().external_scanner.as_ref().unwrap().states;
         let text = rows.as_chunks::<47>().0.iter().find(|flags| **flags == TEXT_FLAGS).unwrap();
-        let mut scanner = Scanner { text_symbols: text, ..Scanner::default() };
+        let mut scanner = Scanner { modes: GRAMMAR_MODES.get_or_init(ModeSymbols::new), ..Scanner::default() };
         for _ in 0..2 {
             let mut lexer = TestLexer::new("word");
             assert!(!scanner.scan(&mut lexer, text));
@@ -1889,9 +1932,9 @@ mod tests {
                     state, 0, indentation, column, 3,
                 ]);
                 let snapshot = serialized(&mut fixture);
-                // The final row has the exact identity selected by Default,
-                // so this exercises the text entry as well as foreign slices.
-                for symbols in symbol_sets.iter().chain(std::iter::once(&TEXT_FLAGS)) {
+                // The final rows have the exact identities selected by Default,
+                // so this exercises fixed entries as well as foreign slices.
+                for symbols in symbol_sets.iter().chain([&TEXT_FLAGS, &CODE_FLAGS, &BLOCK_LINE_FLAGS]) {
                     let mut fast = Scanner::default();
                     fast.deserialize(&snapshot);
                     fast.simulate = true; // scan must clear this even on rejection
@@ -1939,21 +1982,26 @@ mod tests {
             assert_eq!(serialized(&mut fixed), serialized(&mut dynamic), "{input:?}");
             assert_eq!(fixed.simulate, dynamic.simulate, "{input:?}");
         }
+        let wrapped_fence = format!("{} \n", "`".repeat(260));
         for input in [
             "***\n", "*  ** text\n", "_ _ _\r\n", "~~~ info\n", "```info\n",
             "````info`\n", "- item\n", "+ item\n", "123. item\n", "# Heading\n",
             "<script>\n", "<custom a='b'>\n", "a|b\n-|-\n", "a\0|b\n-|-\n",
             "\ncontinued text\n", "\r\n> quote\n", "\n~~~ info\n", "\n* list\n",
             " text\n", "    text\n", " \ttext\n", " ",
-            "\t text\n", "\t", "", "\0",
+            "\t text\n", "\t", "", "\0", "``` \n", "~~~\n", &wrapped_fence,
         ] {
             for state in 0..=(STATE_CLOSE_BLOCK | STATE_WAS_SOFT_LINE_BREAK | STATE_MATCHING) {
-                let mut fixture = Scanner::with_blocks([Block::QUOTE, Block::list_item(0)]);
-                fixture.snapshot[..HEADER_SIZE].copy_from_slice(&[state, 0, 4, 3, 3]);
-                let snapshot = serialized(&mut fixture);
-                for simulate in [false, true] {
-                    check::<TEXT_SYMBOLS>(input, &snapshot, simulate);
-                    check::<PARAGRAPH_SYMBOLS>(input, &snapshot, simulate);
+                for indentation in [0, 4] {
+                    let mut fixture = Scanner::with_blocks([Block::QUOTE, Block::list_item(0)]);
+                    fixture.snapshot[..HEADER_SIZE].copy_from_slice(&[state, 0, indentation, 3, 3]);
+                    let snapshot = serialized(&mut fixture);
+                    for simulate in [false, true] {
+                        check::<TEXT_SYMBOLS>(input, &snapshot, simulate);
+                        check::<CODE_SYMBOLS>(input, &snapshot, simulate);
+                        check::<BLOCK_LINE_SYMBOLS>(input, &snapshot, simulate);
+                        check::<PARAGRAPH_SYMBOLS>(input, &snapshot, simulate);
+                    }
                 }
             }
         }
