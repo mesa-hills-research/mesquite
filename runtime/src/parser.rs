@@ -104,7 +104,7 @@ macro_rules! parser_log_stack {
     ($parser:expr) => {
         if let Some(output) = $parser.dot_graph.as_mut() {
             let _ = ts_stack_print_dot_graph(
-                &$parser.stack,
+                &mut $parser.stack,
                 $parser.language.as_ref().expect("parser language"),
                 output.as_mut(),
             );
@@ -318,7 +318,7 @@ fn compare_error_statuses(a: ErrorStatus, b: ErrorStatus) -> ErrorComparison {
     }
 }
 
-pub(crate) fn ts_parser__version_status(parser: &Parser, version: StackVersion) -> ErrorStatus {
+pub(crate) fn ts_parser__version_status(parser: &mut Parser, version: StackVersion) -> ErrorStatus {
     let mut cost = ts_stack_error_cost(&parser.stack, version);
     let is_paused = ts_stack_is_paused(&parser.stack, version);
     if is_paused {
@@ -326,14 +326,14 @@ pub(crate) fn ts_parser__version_status(parser: &Parser, version: StackVersion) 
     }
     ErrorStatus {
         cost,
-        node_count: ts_stack_node_count_since_error(&parser.stack, version),
+        node_count: ts_stack_node_count_since_error(&mut parser.stack, version),
         dynamic_precedence: ts_stack_dynamic_precedence(&parser.stack, version),
         is_in_error: is_paused || ts_stack_state(&parser.stack, version) == ERROR_STATE,
     }
 }
 
 pub(crate) fn ts_parser__better_version_exists(
-    parser: &Parser,
+    parser: &mut Parser,
     version: StackVersion,
     is_in_error: bool,
     cost: u32,
@@ -346,7 +346,7 @@ pub(crate) fn ts_parser__better_version_exists(
         cost,
         is_in_error,
         dynamic_precedence: ts_stack_dynamic_precedence(&parser.stack, version),
-        node_count: ts_stack_node_count_since_error(&parser.stack, version),
+        node_count: ts_stack_node_count_since_error(&mut parser.stack, version),
     };
     for i in 0..ts_stack_version_count(&parser.stack) {
         if i == version
