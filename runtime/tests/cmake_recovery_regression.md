@@ -6,7 +6,7 @@ an exposed `(` in the port, around byte 3335 in a malformed quoted variable
 reference.
 
 The bucket already passed at revision `9b5a105` and was reverified after the
-merged fixes through `4390c9d`. The scanner initialization/reset correction is
+merged fixes through `029b957`. The scanner initialization/reset correction is
 already merged; no additional runtime or scanner behavior change is needed.
 
 ## Root cause and existing correction
@@ -31,7 +31,7 @@ scanners.
 
 ## Verification
 
-All checks below were rerun at `4390c9d`; the assigned input passed before
+All checks below were rerun at `029b957`; the assigned input passed before
 any changes. Existing scanner and parser regressions already cover the reduced
 Registry-query expression, including single-byte input chunks and incremental
 repair/restoration, so no duplicate test or further behavior change was needed.
@@ -105,7 +105,7 @@ unsafe code, or generated-file changes are introduced.
 
 ## ERROR range bucket `e0b0bff8`
 
-Reverified at `61e4869`: all five reported inputs already pass on the starting
+Reverified at `3cb8c98`: all five reported inputs already pass on the starting
 checkout with the merged scanner initialization/reset correction above. Direct
 comparison with the current C scanner confirms that no additional implementation
 change is needed: creation uses `ts_calloc`, and invalid-length deserialization
@@ -126,7 +126,7 @@ checks both recovery starting after an identifier and recovery starting at byte
 zero, before and after an empty-snapshot reset. The differential oracle checks
 the complete resulting trees and progress callbacks for all five bucket inputs.
 
-Checks rerun for this bucket:
+Checks rerun for this bucket at `3cb8c98` (before this documentation-only update):
 
 - `run_oracle(inputs = "bucket:e0b0bff8")`: 5/5 pass.
 - `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs
