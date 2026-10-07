@@ -655,6 +655,18 @@ pub(crate) fn ts_subtree_new_node(
     production_id: u32,
     language: &Language,
 ) -> Subtree {
+    ts_subtree_new_node_with(symbol, children, production_id, language, |_| {})
+}
+
+/// Initialize a reduction's header while it is exclusively owned, before Arc
+/// introduces the need for copy-on-write uniqueness checks.
+pub(crate) fn ts_subtree_new_node_with(
+    symbol: Symbol,
+    children: Vec<Subtree>,
+    production_id: u32,
+    language: &Language,
+    initialize: impl FnOnce(&mut SubtreeHeapData),
+) -> Subtree {
     let metadata = ts_language_symbol_metadata(language, symbol);
     let fragile = symbol == BUILTIN_SYM_ERROR || symbol == BUILTIN_SYM_ERROR_REPEAT;
     // Spell out the header rather than using a struct-update default: this
@@ -687,6 +699,7 @@ pub(crate) fn ts_subtree_new_node(
     // Initialize before sharing: summarizing a fresh header needs no atomic
     // uniqueness check or copy-on-write machinery.
     summarize_children(&mut result, language);
+    initialize(&mut result);
     Subtree::Heap(Arc::new(result))
 }
 
