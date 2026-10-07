@@ -211,7 +211,9 @@ returns a Vec<internal Range>; API maps these to public Range and an ExactSizeIt
 Always use C's included-range difference merging and visible-state comparisons.
 
 API methods retain the binding's exact generic and lifetime signatures, including
-opaque iterator returns and mutable cursor borrows. Children/FieldChildren are
+opaque iterator returns and mutable cursor borrows. Rust 2024 precise `use<...>`
+capture bounds prevent accidentally retaining the temporary Node/self reference
+that the original edition-2021 binding did not capture. Children/FieldChildren are
 concrete backing types, not eager Vec collections. Their Iterator methods belong
 to api. A temporary local `todo` macro in api.rs expands to literal const-compatible
 panics; typed arms provide backing iterator types for otherwise uninferable opaque

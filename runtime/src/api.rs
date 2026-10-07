@@ -227,7 +227,7 @@ impl Tree {
     pub fn walk(&self) -> TreeCursor<'_> {
         todo!("api: Tree::walk")
     }
-    pub fn changed_ranges(&self, other: &Self) -> impl ExactSizeIterator<Item = Range> {
+    pub fn changed_ranges(&self, other: &Self) -> impl ExactSizeIterator<Item = Range> + use<> {
         todo!("api: Tree::changed_ranges")
     }
     pub fn included_ranges(&self) -> Vec<Range> {
@@ -323,27 +323,27 @@ impl<'tree> Node<'tree> {
     pub fn children<'cursor>(
         &self,
         cursor: &'cursor mut TreeCursor<'tree>,
-    ) -> impl ExactSizeIterator<Item = Node<'tree>> + 'cursor {
+    ) -> impl ExactSizeIterator<Item = Node<'tree>> + 'cursor + use<'cursor, 'tree> {
         todo!("api: Node::children")
     }
     pub fn named_children<'cursor>(
         &self,
         cursor: &'cursor mut TreeCursor<'tree>,
-    ) -> impl ExactSizeIterator<Item = Node<'tree>> + 'cursor {
+    ) -> impl ExactSizeIterator<Item = Node<'tree>> + 'cursor + use<'cursor, 'tree> {
         todo!("api: Node::named_children")
     }
     pub fn children_by_field_name<'cursor>(
         &self,
         field_name: &str,
         cursor: &'cursor mut TreeCursor<'tree>,
-    ) -> impl Iterator<Item = Node<'tree>> + 'cursor {
+    ) -> impl Iterator<Item = Node<'tree>> + 'cursor + use<'cursor, 'tree> {
         todo!("api: Node::children_by_field_name")
     }
     pub fn children_by_field_id<'cursor>(
         &self,
         field_id: FieldId,
         cursor: &'cursor mut TreeCursor<'tree>,
-    ) -> impl Iterator<Item = Node<'tree>> + 'cursor {
+    ) -> impl Iterator<Item = Node<'tree>> + 'cursor + use<'cursor, 'tree> {
         todo!("api: Node::children_by_field_id")
     }
     pub fn parent(&self) -> Option<Self> {
