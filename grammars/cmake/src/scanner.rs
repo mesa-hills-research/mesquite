@@ -1,6 +1,6 @@
 //! The CMake external scanner, translated from `src/scanner.c`.
 
-use ts_port_tables::{ExternalScanner, Lexer};
+use tree_sitter_language::{ExternalScanner, Lexer};
 
 const BRACKET_ARGUMENT_OPEN: usize = 0;
 const BRACKET_ARGUMENT_CONTENT: usize = 1;

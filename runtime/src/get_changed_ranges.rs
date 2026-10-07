@@ -390,7 +390,7 @@ pub(crate) fn iterator_compare(
     let new_error_cost = ts_subtree_error_cost(new_tree);
 
     if old_start != new_start
-        || old_symbol == ts_port_tables::BUILTIN_SYM_ERROR
+        || old_symbol == tree_sitter_language::BUILTIN_SYM_ERROR
         || old_size != new_size
         || old_state == TS_TREE_STATE_NONE
         || new_state == TS_TREE_STATE_NONE
@@ -568,7 +568,7 @@ fn take_cursor<'tree>(cursor: &mut TreeCursor<'tree>) -> TreeCursor<'tree> {
 mod tests {
     use super::*;
     use std::sync::LazyLock;
-    use ts_port_tables::LanguageTables;
+    use tree_sitter_language::LanguageTables;
 
     fn length(bytes: u32) -> Length {
         Length {

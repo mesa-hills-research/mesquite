@@ -1,6 +1,6 @@
 //! Ruby's external scanner, translated from `src/scanner.c`.
 
-use ts_port_tables::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE};
+use tree_sitter_language::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE};
 
 // Indices in the grammar's external-token array, in C TokenType order.
 const LINE_BREAK: usize = 0;

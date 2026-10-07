@@ -1,7 +1,7 @@
 //! The R external scanner, translated from `src/scanner.c`.
 
 use std::ffi::c_char;
-use ts_port_tables::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE};
+use tree_sitter_language::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE};
 
 const START: usize = 0;
 const NEWLINE: usize = 1;

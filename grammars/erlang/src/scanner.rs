@@ -1,6 +1,6 @@
 //! Erlang's stateless triple-quoted string scanner, translated from `scanner.c`.
 
-use ts_port_tables::{ExternalScanner, Lexer};
+use tree_sitter_language::{ExternalScanner, Lexer};
 
 const TQ_STRING: u16 = 0;
 const TQ_SIGIL_STRING: u16 = 1;

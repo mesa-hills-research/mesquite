@@ -18,6 +18,457 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "mhr_tree_sitter"
+version = "0.25.10"
+dependencies = [
+ "mhr_tree_sitter_cmake",
+ "mhr_tree_sitter_language",
+ "regex",
+ "streaming-iterator",
+]
+
+[[package]]
+name = "mhr_tree_sitter_bash"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_c"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_c_sharp"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_cmake"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_cpp"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_css"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_cuda"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_dart"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_dtd"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_elixir"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_elm"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_embedded_template"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_erlang"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_fortran"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_fsharp"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_glsl"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_go"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_haskell"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_hcl"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_html"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_java"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_javascript"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_json"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_julia"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_kotlin"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_language"
+version = "0.1.0"
+
+[[package]]
+name = "mhr_tree_sitter_lua"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_make"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_markdown"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+ "mhr_tree_sitter_markdown_inline",
+]
+
+[[package]]
+name = "mhr_tree_sitter_markdown_inline"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_objc"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_ocaml"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+ "mhr_tree_sitter_ocaml_interface",
+]
+
+[[package]]
+name = "mhr_tree_sitter_ocaml_interface"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_odin"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_perl"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_php"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+ "mhr_tree_sitter_php_only",
+]
+
+[[package]]
+name = "mhr_tree_sitter_php_only"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_powershell"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_proto"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_python"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_r"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_ruby"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_rust"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_scala"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_solidity"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_sql"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_svelte"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_swift"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_toml"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_tsx"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_typescript"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+ "mhr_tree_sitter_tsx",
+]
+
+[[package]]
+name = "mhr_tree_sitter_verilog"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_xml"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_dtd",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_yaml"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_zig"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
 name = "regex"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -51,395 +502,3 @@ name = "streaming-iterator"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b2231b7c3057d5e4ad0156fb3dc807d900806020c5ffa3ee6ff2c8c76fb8520"
-
-[[package]]
-name = "ts_port"
-version = "0.25.10"
-dependencies = [
- "regex",
- "streaming-iterator",
- "ts_port_cmake",
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_bash"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_c"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_c_sharp"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_cmake"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_cpp"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_css"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_cuda"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_dart"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_dtd"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_elixir"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_elm"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_embedded_template"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_erlang"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_fortran"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_fsharp"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_glsl"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_go"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_haskell"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_hcl"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_html"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_java"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_javascript"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_json"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_julia"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_kotlin"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_lua"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_make"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_markdown"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_markdown_inline"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_objc"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_ocaml"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_ocaml_interface"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_odin"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_perl"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_php"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_php_only"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_powershell"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_proto"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_python"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_r"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_ruby"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_rust"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_scala"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_solidity"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_sql"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_svelte"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_swift"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_tables"
-version = "0.1.0"
-
-[[package]]
-name = "ts_port_toml"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_tsx"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_typescript"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_verilog"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_xml"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_yaml"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]
-
-[[package]]
-name = "ts_port_zig"
-version = "0.1.0"
-dependencies = [
- "ts_port_tables",
-]

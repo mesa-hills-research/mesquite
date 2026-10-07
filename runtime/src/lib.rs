@@ -1,5 +1,6 @@
 //! A safe Rust translation of the tree-sitter 0.25.10 runtime.
 //! See `runtime/PORTING.md` for the translation contract.
+#![forbid(unsafe_code)]
 // Temporary skeleton allowances; remove unused allowances as units land.
 #![allow(dead_code, unused_imports, unused_variables, unused_macros)]
 // Preserve C private/public helper distinctions (e.g. __child versus _child).
@@ -17,6 +18,7 @@ mod error_costs;
 mod get_changed_ranges;
 mod host;
 mod language;
+mod language_fn;
 mod length;
 mod lexer;
 mod node;
@@ -42,4 +44,4 @@ pub use query_api::*;
 pub use streaming_iterator::{StreamingIterator, StreamingIteratorMut};
 pub use tree::Tree;
 pub use tree_cursor::TreeCursor;
-pub use ts_port_tables::LanguageMetadata;
+pub use tree_sitter_language::LanguageMetadata;

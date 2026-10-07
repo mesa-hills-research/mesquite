@@ -1,6 +1,6 @@
 //! The C++ raw-string external scanner, translated from `src/scanner.c`.
 
-use ts_port_tables::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE, Symbol};
+use tree_sitter_language::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE, Symbol};
 
 const RAW_STRING_DELIMITER: Symbol = 0;
 const RAW_STRING_CONTENT: Symbol = 1;

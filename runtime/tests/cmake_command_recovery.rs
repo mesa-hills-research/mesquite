@@ -1,10 +1,10 @@
 //! Regressions for CMake oracle bucket 6c68c51b.
 
-use ts_port::{InputEdit, Language, ParseOptions, ParseState, Parser, Point};
+use tree_sitter::{InputEdit, Language, ParseOptions, ParseState, Parser, Point};
 
 #[test]
 fn malformed_variable_references_recover_as_top_level_errors() {
-    let language = Language::from(ts_port_cmake::language());
+    let language = Language::from(tree_sitter_cmake::language());
 
     // Expected shapes and ranges come from the C oracle. In particular, these
     // must not become normal_command nodes with a nested argument-list error.
@@ -87,7 +87,7 @@ fn malformed_variable_references_recover_as_top_level_errors() {
 
 #[test]
 fn multiline_command_errors_preserve_recovery_boundaries() {
-    let language = Language::from(ts_port_cmake::language());
+    let language = Language::from(tree_sitter_cmake::language());
 
     // CommandError0 and ParenInVarName0 from the CMake syntax tests. These
     // oracle-verified cases cover whitespace before the recovery token and a
@@ -177,7 +177,7 @@ fn multiline_command_errors_preserve_recovery_boundaries() {
 
 #[test]
 fn repairing_and_restoring_variable_references_restores_top_level_errors() {
-    let language = Language::from(ts_port_cmake::language());
+    let language = Language::from(tree_sitter_cmake::language());
     for (source, content_start) in [
         ("set(var \"${\")\n", 11),
         ("message(${var\twith\ttab})\n", 14),

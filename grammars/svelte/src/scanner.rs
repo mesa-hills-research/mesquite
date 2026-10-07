@@ -1,6 +1,6 @@
 //! The Svelte external scanner, translated from `src/scanner.c` and `src/tag.h`.
 
-use ts_port_tables::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE};
+use tree_sitter_language::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE};
 
 // External token indices, in the order of the C TokenType enum.
 const START_TAG_NAME: usize = 0;

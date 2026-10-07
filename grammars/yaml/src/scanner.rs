@@ -1,7 +1,7 @@
 //! YAML's external scanner and core-schema resolver, translated from `scanner.c`
 //! and `schema.core.c`. Token order and speculative advances follow the C scanner.
 
-use ts_port_tables::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE};
+use tree_sitter_language::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE};
 
 const END_OF_FILE: usize = 0;
 const S_DIR_YML_BGN: usize = 1;

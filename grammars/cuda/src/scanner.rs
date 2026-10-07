@@ -3,7 +3,7 @@
 //! CUDA's C scanner matches the C++ scanner apart from exported function names;
 //! this translation preserves the same raw-string handling and snapshots.
 
-use ts_port_tables::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE, Symbol};
+use tree_sitter_language::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE, Symbol};
 
 const RAW_STRING_DELIMITER: Symbol = 0;
 const RAW_STRING_CONTENT: Symbol = 1;

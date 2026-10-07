@@ -1,6 +1,6 @@
 use super::*;
 use std::sync::LazyLock;
-use ts_port_tables::{ExternalScanner, LanguageTables, Lexer};
+use tree_sitter_language::{ExternalScanner, LanguageTables, Lexer};
 
 fn unused_lex(_: &mut dyn Lexer, _: StateId) -> bool {
     panic!("query parser tests never lex source code")

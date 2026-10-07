@@ -1,11 +1,11 @@
 //! Regression for CMake oracle bucket 289f3584.
 
-use ts_port::{Language, ParseOptions, ParseState, Parser, Point};
+use tree_sitter::{Language, ParseOptions, ParseState, Parser, Point};
 
 #[test]
 fn malformed_endif_retains_identifier_and_recovery_content() {
     let source = b"if ( cond )\nen]dif()\n";
-    let language = Language::from(ts_port_cmake::language());
+    let language = Language::from(tree_sitter_cmake::language());
     let mut parser = Parser::new();
     parser.set_language(&language).unwrap();
 

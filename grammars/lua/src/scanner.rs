@@ -1,7 +1,7 @@
 //! The Lua external scanner, translated from `src/scanner.c`.
 
 use std::ffi::c_char;
-use ts_port_tables::{ExternalScanner, Lexer};
+use tree_sitter_language::{ExternalScanner, Lexer};
 
 const BLOCK_COMMENT_START: usize = 0;
 const BLOCK_COMMENT_CONTENT: usize = 1;

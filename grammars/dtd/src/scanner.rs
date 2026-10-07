@@ -1,7 +1,7 @@
 //! DTD's stateless external scanner, translated from `dtd/src/scanner.c`
 //! and the non-`TS_XML` portions of `common/scanner.h`.
 
-use ts_port_tables::{ExternalScanner, Lexer};
+use tree_sitter_language::{ExternalScanner, Lexer};
 
 // Indices in the grammar's external-token array, in C TokenType order.
 const PI_TARGET: usize = 0;

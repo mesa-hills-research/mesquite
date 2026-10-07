@@ -3,7 +3,7 @@
 //! The order of the scanner's phases and lexer calls follows scanner.c. Transient
 //! lookahead is kept in the scanner for allocation reuse, but is not serialized.
 
-use ts_port_tables::{ExternalScanner, Lexer};
+use tree_sitter_language::{ExternalScanner, Lexer};
 #[path = "scanner_unicode.rs"]
 mod unicode;
 use ContextSort::*;

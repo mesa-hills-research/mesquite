@@ -1,6 +1,6 @@
 //! The Dart external scanner, translated from `src/scanner.c`.
 
-use ts_port_tables::{ExternalScanner, Lexer};
+use tree_sitter_language::{ExternalScanner, Lexer};
 
 const TEMPLATE_CHARS_SINGLE: usize = 0;
 const TEMPLATE_CHARS_DOUBLE: usize = 1;

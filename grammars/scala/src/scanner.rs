@@ -3,7 +3,7 @@
 //! Layout widths and saved positions are the C scanner's wrapping i16 values.
 //! Snapshots retain the native-endian i16 representation, including case flags.
 
-use ts_port_tables::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE};
+use tree_sitter_language::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE};
 
 const AUTOMATIC_SEMICOLON: usize = 0;
 const INDENT: usize = 1;

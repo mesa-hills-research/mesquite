@@ -1,5 +1,5 @@
 pub(crate) use crate::point::Point;
-pub(crate) use ts_port_tables::{FieldId, StateId, Symbol};
+pub(crate) use tree_sitter_language::{FieldId, StateId, Symbol};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Range {
     pub start_point: Point,
@@ -30,7 +30,7 @@ pub(crate) enum SymbolType {
     Supertype,
     Auxiliary,
 }
-pub(crate) const BUILTIN_SYM_ERROR_REPEAT: Symbol = ts_port_tables::BUILTIN_SYM_ERROR - 1;
+pub(crate) const BUILTIN_SYM_ERROR_REPEAT: Symbol = tree_sitter_language::BUILTIN_SYM_ERROR - 1;
 /// The input owns/borrows its latest chunk. `read` replaces it; `chunk` does not
 /// call the client. This avoids copying large suffixes returned by callbacks.
 pub(crate) trait Input {

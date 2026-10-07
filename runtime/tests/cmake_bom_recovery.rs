@@ -1,6 +1,6 @@
 //! Parser-level regression for CMake oracle bucket 548436bf.
 
-use ts_port::{Language, ParseOptions, ParseState, Parser, Point};
+use tree_sitter::{Language, ParseOptions, ParseState, Parser, Point};
 
 #[test]
 fn non_utf8_boms_recover_as_a_single_bracket_content_token() {
@@ -35,7 +35,7 @@ fn non_utf8_boms_recover_as_a_single_bracket_content_token() {
             3,
         ),
     ];
-    let language = Language::from(ts_port_cmake::language());
+    let language = Language::from(tree_sitter_cmake::language());
 
     for (encoding, bytes, end_column) in encodings {
         // Split BOMs and NUL-containing code units at read boundaries, including

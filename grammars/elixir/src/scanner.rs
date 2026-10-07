@@ -1,6 +1,6 @@
 //! The Elixir external scanner, translated from `src/scanner.c`.
 
-use ts_port_tables::{ExternalScanner, Lexer};
+use tree_sitter_language::{ExternalScanner, Lexer};
 
 // In the same order as the C TokenType enum and grammar.externals.
 #[derive(Clone, Copy)]

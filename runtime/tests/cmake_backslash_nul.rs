@@ -1,6 +1,6 @@
 //! Parser-level regression for CMake oracle bucket 9a8ee9c6.
 
-use ts_port::{Language, ParseOptions, ParseState, Parser, Point};
+use tree_sitter::{Language, ParseOptions, ParseState, Parser, Point};
 
 #[test]
 fn backslash_nul_recovers_as_one_bracket_content_token() {
@@ -13,7 +13,7 @@ fn backslash_nul_recovers_as_one_bracket_content_token() {
 
     let mut parser = Parser::new();
     parser
-        .set_language(&Language::from(ts_port_cmake::language()))
+        .set_language(&Language::from(tree_sitter_cmake::language()))
         .unwrap();
 
     // Check the initial scanner and reuse after tokens that change both scanner

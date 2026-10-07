@@ -1,6 +1,6 @@
 use crate::ts_assert::ts_assert;
 use crate::types::*;
-use ts_port_tables::{
+use tree_sitter_language::{
     BUILTIN_SYM_ERROR, LanguageMetadata, LanguageTables, LexMode, ParseAction, ParseActionEntry,
     SymbolMetadata,
 };
@@ -659,7 +659,7 @@ pub(crate) fn ts_language_alias_at(
 pub(crate) fn ts_language_field_map(
     language: &Language,
     production_id: u32,
-) -> &'static [ts_port_tables::FieldMapEntry] {
+) -> &'static [tree_sitter_language::FieldMapEntry] {
     if language.tables.field_count == 0 {
         return &[];
     }

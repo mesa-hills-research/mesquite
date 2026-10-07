@@ -2,7 +2,7 @@
 
 use std::sync::OnceLock;
 
-use ts_port_tables::{ExternalScanner, Lexer};
+use tree_sitter_language::{ExternalScanner, Lexer};
 
 // Indices in the grammar's external-token array.
 const LINE_ENDING: usize = 0;
@@ -282,10 +282,11 @@ fn is_punctuation(c: i32) -> bool {
 // compile-time flags. The complete block scanner handles the remaining sets.
 const DYNAMIC_SYMBOLS: u64 = u64::MAX;
 const TEXT_SYMBOLS: u64 = (1 << LINE_ENDING) | (1 << SOFT_LINE_ENDING) | (1 << TOKEN_EOF);
-const CODE_SYMBOLS: u64 = (1 << LINE_ENDING) | (1 << BLOCK_CLOSE)
-    | (1 << FENCED_CODE_BLOCK_END_BACKTICK);
+const CODE_SYMBOLS: u64 =
+    (1 << LINE_ENDING) | (1 << BLOCK_CLOSE) | (1 << FENCED_CODE_BLOCK_END_BACKTICK);
 const BLOCK_LINE_SYMBOLS: u64 = (1 << LINE_ENDING) | (1 << BLOCK_CLOSE);
-const TABLE_LINE_SYMBOLS: u64 = (1 << LINE_ENDING) | (1 << TOKEN_EOF) | (1 << PIPE_TABLE_LINE_ENDING);
+const TABLE_LINE_SYMBOLS: u64 =
+    (1 << LINE_ENDING) | (1 << TOKEN_EOF) | (1 << PIPE_TABLE_LINE_ENDING);
 
 const fn flags_for(mask: u64) -> [bool; 47] {
     let mut flags = [false; 47];
@@ -320,11 +321,14 @@ static GRAMMAR_MODES: OnceLock<ModeSymbols> = OnceLock::new();
 impl ModeSymbols {
     fn new() -> Self {
         let flags = crate::language()
-            .external_scanner.as_ref().unwrap().states.as_slice();
+            .external_scanner
+            .as_ref()
+            .unwrap()
+            .states
+            .as_slice();
         let rows = flags.as_chunks::<47>().0;
-        let find = |flags: &'static [bool; 47]| {
-            rows.iter().find(|row| *row == flags).unwrap_or(flags)
-        };
+        let find =
+            |flags: &'static [bool; 47]| rows.iter().find(|row| *row == flags).unwrap_or(flags);
         Self {
             text: find(&TEXT_FLAGS),
             code: find(&CODE_FLAGS),
@@ -375,12 +379,18 @@ impl EncodedSymbols {
         // None of these validity flags is read in a content-only scan.
         // NO_INDENTED_CHUNK matters only with INDENTED_CHUNK_START, which
         // makes the classification dynamic. The other three are never read.
-        let ignored = (1 << BLOCK_CLOSE) | (1 << BLOCK_CONTINUATION)
-            | (1 << ERROR) | (1 << NO_INDENTED_CHUNK);
+        let ignored = (1 << BLOCK_CLOSE)
+            | (1 << BLOCK_CONTINUATION)
+            | (1 << ERROR)
+            | (1 << NO_INDENTED_CHUNK);
         let tokens = [
-            LINE_ENDING, SOFT_LINE_ENDING, TOKEN_EOF,
-            FENCED_CODE_BLOCK_END_BACKTICK, FENCED_CODE_BLOCK_END_TILDE,
-            PIPE_TABLE_LINE_ENDING, BLANK_LINE_START,
+            LINE_ENDING,
+            SOFT_LINE_ENDING,
+            TOKEN_EOF,
+            FENCED_CODE_BLOCK_END_BACKTICK,
+            FENCED_CODE_BLOCK_END_TILDE,
+            PIPE_TABLE_LINE_ENDING,
+            BLANK_LINE_START,
         ];
         let mut content = 0;
         let mut covered = ignored;
@@ -402,12 +412,20 @@ struct Symbols<const FLAGS: u64>(u64);
 
 impl<const FLAGS: u64> Symbols<FLAGS> {
     fn new(flags: &[bool; 47]) -> Self {
-        Self(if FLAGS == DYNAMIC_SYMBOLS { pack_flags(flags) } else { FLAGS })
+        Self(if FLAGS == DYNAMIC_SYMBOLS {
+            pack_flags(flags)
+        } else {
+            FLAGS
+        })
     }
 
     #[inline]
     fn contains(self, symbol: usize) -> bool {
-        let mask = if FLAGS == DYNAMIC_SYMBOLS { self.0 } else { FLAGS };
+        let mask = if FLAGS == DYNAMIC_SYMBOLS {
+            self.0
+        } else {
+            FLAGS
+        };
         mask & (1 << symbol) != 0
     }
 }
@@ -603,7 +621,8 @@ impl Scanner {
 
     #[inline]
     fn set_simulating(&mut self, simulate: bool) {
-        self.scan_context = (self.scan_context & !SIMULATING) | if simulate { SIMULATING } else { 0 };
+        self.scan_context =
+            (self.scan_context & !SIMULATING) | if simulate { SIMULATING } else { 0 };
     }
 
     // Keep ordinary text rejection in the external entry: it needs no cached
@@ -637,7 +656,10 @@ impl Scanner {
                 return false;
             }
         }
-        let mut lexer = ScanLexer { inner: lexer, lookahead };
+        let mut lexer = ScanLexer {
+            inner: lexer,
+            lookahead,
+        };
         // Only the external entry calls this helper, with simulation cleared.
         if lexer.eof() {
             if self.scan_context & CONTENT_EOF != 0 {
@@ -656,13 +678,17 @@ impl Scanner {
             match lexer.lookahead() {
                 0x60 if self.scan_context & CONTENT_BACKTICK != 0 => {
                     return self.parse_fenced_code_block::<CODE_SYMBOLS>(
-                        b'`', &mut lexer, Symbols::new(&CODE_FLAGS),
+                        b'`',
+                        &mut lexer,
+                        Symbols::new(&CODE_FLAGS),
                     );
                 }
                 0x7e if self.scan_context & CONTENT_TILDE != 0 => {
                     const TILDE: u64 = 1 << FENCED_CODE_BLOCK_END_TILDE;
                     return self.parse_fenced_code_block::<TILDE>(
-                        b'~', &mut lexer, Symbols::new(&flags_for(TILDE)),
+                        b'~',
+                        &mut lexer,
+                        Symbols::new(&flags_for(TILDE)),
                     );
                 }
                 0x60 | 0x7e => {
@@ -1013,7 +1039,10 @@ impl Scanner {
         let mut extra_indentation = 0u8;
         loop {
             if lexer.lookahead() == i32::from(b'*') {
-                if star_count == 1 && extra_indentation >= 1 && valid_symbols.contains(LIST_MARKER_STAR) {
+                if star_count == 1
+                    && extra_indentation >= 1
+                    && valid_symbols.contains(LIST_MARKER_STAR)
+                {
                     self.mark_end(lexer);
                 }
                 star_count += 1;
@@ -1036,7 +1065,10 @@ impl Scanner {
         }
         let thematic_break = star_count >= 3 && line_end;
         let list_marker_star = star_count >= 1 && extra_indentation >= 1;
-        if valid_symbols.contains(THEMATIC_BREAK) && thematic_break && self.snapshot[INDENTATION] < 4 {
+        if valid_symbols.contains(THEMATIC_BREAK)
+            && thematic_break
+            && self.snapshot[INDENTATION] < 4
+        {
             lexer.set_result_symbol(THEMATIC_BREAK as u16);
             self.mark_end(lexer);
             self.snapshot[INDENTATION] = 0;
@@ -1080,7 +1112,9 @@ impl Scanner {
                 break;
             }
         }
-        if underscore_count >= 3 && is_line_end(lexer.lookahead()) && valid_symbols.contains(THEMATIC_BREAK)
+        if underscore_count >= 3
+            && is_line_end(lexer.lookahead())
+            && valid_symbols.contains(THEMATIC_BREAK)
         {
             lexer.set_result_symbol(THEMATIC_BREAK as u16);
             self.mark_end(lexer);
@@ -1442,7 +1476,9 @@ impl Scanner {
             self.advance(lexer);
             if lexer.lookahead() == i32::from(b'-') {
                 self.advance(lexer);
-                if lexer.lookahead() == i32::from(b'-') && valid_symbols.contains(HTML_BLOCK_2_START) {
+                if lexer.lookahead() == i32::from(b'-')
+                    && valid_symbols.contains(HTML_BLOCK_2_START)
+                {
                     self.advance(lexer);
                     lexer.set_result_symbol(HTML_BLOCK_2_START as u16);
                     if !self.simulating() {
@@ -1822,7 +1858,8 @@ impl Scanner {
             // Perform the same first advance inline, leaving tabs and longer
             // runs to the shared helper without adding setup to other modes.
             if matches!(FLAGS, TEXT_SYMBOLS | CODE_SYMBOLS | BLOCK_LINE_SYMBOLS)
-                && lexer.lookahead() == i32::from(b' ') {
+                && lexer.lookahead() == i32::from(b' ')
+            {
                 self.snapshot[INDENTATION] =
                     self.snapshot[INDENTATION].wrapping_add(self.advance(lexer));
             }
@@ -1855,7 +1892,9 @@ impl Scanner {
                 0x23 => return self.parse_atx_heading::<FLAGS>(lexer, valid_symbols),
                 0x3d => return self.parse_setext_underline::<FLAGS>(lexer, valid_symbols),
                 0x2b => return self.parse_plus::<FLAGS>(lexer, valid_symbols),
-                0x30..=0x39 => return self.parse_ordered_list_marker::<FLAGS>(lexer, valid_symbols),
+                0x30..=0x39 => {
+                    return self.parse_ordered_list_marker::<FLAGS>(lexer, valid_symbols);
+                }
                 0x2d => return self.parse_minus::<FLAGS>(lexer, valid_symbols),
                 0x3c => return self.parse_html_block::<FLAGS>(lexer, valid_symbols),
                 _ => {}
@@ -1927,7 +1966,8 @@ impl Scanner {
         self.snapshot[INDENTATION] = 0;
         self.snapshot[COLUMN] = 0;
         if self.snapshot[STATE] & STATE_CLOSE_BLOCK == 0
-            && (valid_symbols.contains(SOFT_LINE_ENDING) || valid_symbols.contains(PIPE_TABLE_LINE_ENDING))
+            && (valid_symbols.contains(SOFT_LINE_ENDING)
+                || valid_symbols.contains(PIPE_TABLE_LINE_ENDING))
         {
             // Unlike the helper, C calls mark_end even during simulation.
             lexer.mark_end();
@@ -1945,7 +1985,12 @@ impl Scanner {
                 }
             }
             let all_will_be_matched = usize::from(self.snapshot[MATCHED]) == self.block_count();
-            if !lexer.eof() && !self.scan_inner::<PARAGRAPH_SYMBOLS>(lexer, Symbols::new(&PARAGRAPH_INTERRUPT_SYMBOLS)) {
+            if !lexer.eof()
+                && !self.scan_inner::<PARAGRAPH_SYMBOLS>(
+                    lexer,
+                    Symbols::new(&PARAGRAPH_INTERRUPT_SYMBOLS),
+                )
+            {
                 // C restores matched_temp here, then immediately resets it.
                 self.snapshot[MATCHED] = 0;
                 self.snapshot[INDENTATION] = 0;
@@ -2066,7 +2111,7 @@ mod tests {
     }
 
     fn serialized(scanner: &mut dyn ExternalScanner) -> Vec<u8> {
-        let mut buffer = [0u8; ts_port_tables::SERIALIZATION_BUFFER_SIZE];
+        let mut buffer = [0u8; tree_sitter_language::SERIALIZATION_BUFFER_SIZE];
         let size = scanner.serialize(&mut buffer);
         buffer[..size].to_vec()
     }
@@ -2127,9 +2172,18 @@ mod tests {
     #[test]
     fn fixed_text_row_is_immutable_and_foreign_flags_remain_dynamic() {
         let rows = &crate::language().external_scanner.as_ref().unwrap().states;
-        let text = rows.as_chunks::<47>().0.iter().find(|flags| **flags == TEXT_FLAGS).unwrap();
+        let text = rows
+            .as_chunks::<47>()
+            .0
+            .iter()
+            .find(|flags| **flags == TEXT_FLAGS)
+            .unwrap();
         let modes = GRAMMAR_MODES.get_or_init(ModeSymbols::new);
-        let mut scanner = Scanner { modes, text_mode: modes.text, ..Scanner::default() };
+        let mut scanner = Scanner {
+            modes,
+            text_mode: modes.text,
+            ..Scanner::default()
+        };
         for _ in 0..2 {
             let mut lexer = TestLexer::new("word");
             assert!(!scanner.scan(&mut lexer, text));
@@ -2153,7 +2207,10 @@ mod tests {
         let mut expected = TestLexer::new("word");
         assert_eq!(
             scanner.scan(&mut actual, interior),
-            dynamic.scan_inner::<DYNAMIC_SYMBOLS>(&mut ScanLexer::new(&mut expected), Symbols::new(interior)),
+            dynamic.scan_inner::<DYNAMIC_SYMBOLS>(
+                &mut ScanLexer::new(&mut expected),
+                Symbols::new(interior)
+            ),
         );
         assert_eq!(actual.events, expected.events);
         assert_eq!(serialized(&mut scanner), serialized(&mut dynamic));
@@ -2175,7 +2232,11 @@ mod tests {
             symbol_sets.push(valid(&[LINE_ENDING, SOFT_LINE_ENDING, symbol]));
         }
         for c in (0..=127).map(|c| char::from_u32(c).unwrap()).chain([
-            'é', '\u{141}', '\u{161}', '\u{17c}', '\u{10ffff}',
+            'é',
+            '\u{141}',
+            '\u{161}',
+            '\u{17c}',
+            '\u{10ffff}',
         ]) {
             let input = format!("{c}|b\n-|-\n");
             for (state, indentation, column, blocks) in [
@@ -2195,12 +2256,21 @@ mod tests {
             ] {
                 let mut fixture = Scanner::with_blocks(blocks.iter().copied());
                 fixture.snapshot[..HEADER_SIZE].copy_from_slice(&[
-                    state, 0, indentation, column, 3,
+                    state,
+                    0,
+                    indentation,
+                    column,
+                    3,
                 ]);
                 let snapshot = serialized(&mut fixture);
                 // The final rows have the exact identities selected by Default,
                 // so this exercises fixed entries as well as foreign slices.
-                for symbols in symbol_sets.iter().chain([&TEXT_FLAGS, &CODE_FLAGS, &BLOCK_LINE_FLAGS, &TABLE_LINE_FLAGS]) {
+                for symbols in symbol_sets.iter().chain([
+                    &TEXT_FLAGS,
+                    &CODE_FLAGS,
+                    &BLOCK_LINE_FLAGS,
+                    &TABLE_LINE_FLAGS,
+                ]) {
                     let mut fast = Scanner::default();
                     fast.deserialize(&snapshot);
                     fast.set_simulating(true); // scan must clear this even on rejection
@@ -2210,7 +2280,8 @@ mod tests {
                     let mut slow_lexer = TestLexer::new(&input);
                     let result = fast.scan(&mut fast_lexer, symbols);
                     let expected = slow.scan_inner::<DYNAMIC_SYMBOLS>(
-                        &mut ScanLexer::new(&mut slow_lexer), Symbols::new(symbols),
+                        &mut ScanLexer::new(&mut slow_lexer),
+                        Symbols::new(symbols),
                     );
                     assert_eq!(result, expected, "{input:?}, {snapshot:?}");
                     assert_eq!(fast_lexer.events, slow_lexer.events, "{input:?}");
@@ -2226,9 +2297,10 @@ mod tests {
     #[test]
     fn packed_flags_match_independent_scalar_encoding() {
         fn check(flags: &[bool; 47]) {
-            let expected = flags.iter().enumerate().fold(0, |mask, (i, &valid)| {
-                mask | (u64::from(valid) << i)
-            });
+            let expected = flags
+                .iter()
+                .enumerate()
+                .fold(0, |mask, (i, &valid)| mask | (u64::from(valid) << i));
             assert_eq!(pack_flags(flags), expected, "{flags:?}");
         }
         check(&[false; 47]);
@@ -2253,9 +2325,13 @@ mod tests {
     #[test]
     fn content_classification_covers_exactly_the_supported_flags() {
         let content_tokens = [
-            LINE_ENDING, SOFT_LINE_ENDING, TOKEN_EOF,
-            FENCED_CODE_BLOCK_END_BACKTICK, FENCED_CODE_BLOCK_END_TILDE,
-            PIPE_TABLE_LINE_ENDING, BLANK_LINE_START,
+            LINE_ENDING,
+            SOFT_LINE_ENDING,
+            TOKEN_EOF,
+            FENCED_CODE_BLOCK_END_BACKTICK,
+            FENCED_CODE_BLOCK_END_TILDE,
+            PIPE_TABLE_LINE_ENDING,
+            BLANK_LINE_START,
         ];
         let ignored = [BLOCK_CLOSE, BLOCK_CONTINUATION, ERROR, NO_INDENTED_CHUNK];
         assert_eq!(CONTENT_LINE, 1 << LINE_ENDING);
@@ -2284,30 +2360,66 @@ mod tests {
     #[test]
     fn all_content_modes_preserve_scanner_state_and_speculative_events() {
         let content_tokens = [
-            LINE_ENDING, SOFT_LINE_ENDING, TOKEN_EOF,
-            FENCED_CODE_BLOCK_END_BACKTICK, FENCED_CODE_BLOCK_END_TILDE,
-            PIPE_TABLE_LINE_ENDING, BLANK_LINE_START,
+            LINE_ENDING,
+            SOFT_LINE_ENDING,
+            TOKEN_EOF,
+            FENCED_CODE_BLOCK_END_BACKTICK,
+            FENCED_CODE_BLOCK_END_TILDE,
+            PIPE_TABLE_LINE_ENDING,
+            BLANK_LINE_START,
         ];
         let mut inputs: Vec<String> = [
-            "", "\0", " ", " \0", "\t", " \t", "  \0", " \t\0",
-            "\n", "\r\n", " \r\n", "\ncontinued text\n", "\r\n> quote\n",
-            "\n~~~ info\n", "\n* list\n", "a|b\n-| -\n", "\n\0",
-            "*  ** text\n", "_ _ _\r\n", "`", "~", "```\n", "~~~\r\n",
-            "````info`\n", "~~~ info\n", " text\n", " \ttext\n",
-            "> quote\n", "- item\n", "123. item\n", "<script>\n", "# Heading\n",
-        ].map(String::from).into();
+            "",
+            "\0",
+            " ",
+            " \0",
+            "\t",
+            " \t",
+            "  \0",
+            " \t\0",
+            "\n",
+            "\r\n",
+            " \r\n",
+            "\ncontinued text\n",
+            "\r\n> quote\n",
+            "\n~~~ info\n",
+            "\n* list\n",
+            "a|b\n-| -\n",
+            "\n\0",
+            "*  ** text\n",
+            "_ _ _\r\n",
+            "`",
+            "~",
+            "```\n",
+            "~~~\r\n",
+            "````info`\n",
+            "~~~ info\n",
+            " text\n",
+            " \ttext\n",
+            "> quote\n",
+            "- item\n",
+            "123. item\n",
+            "<script>\n",
+            "# Heading\n",
+        ]
+        .map(String::from)
+        .into();
         for delimiter in ['*', '_', '`', '~'] {
             for length in [255, 256, 257, 260] {
                 inputs.push(format!("{} \t\r\n", delimiter.to_string().repeat(length)));
             }
         }
         let block_sets = [
-            &[][..], &[Block::FENCED_CODE][..],
+            &[][..],
+            &[Block::FENCED_CODE][..],
             &[Block::QUOTE, Block::list_item(0), Block::INDENTED_CODE][..],
         ];
         let mut snapshots = Vec::new();
         for blocks in block_sets {
-            for state in [0, STATE_WAS_SOFT_LINE_BREAK, STATE_MATCHING,
+            for state in [
+                0,
+                STATE_WAS_SOFT_LINE_BREAK,
+                STATE_MATCHING,
                 STATE_MATCHING | STATE_WAS_SOFT_LINE_BREAK,
                 STATE_MATCHING | STATE_CLOSE_BLOCK,
                 STATE_MATCHING | STATE_WAS_SOFT_LINE_BREAK | STATE_CLOSE_BLOCK,
@@ -2315,7 +2427,11 @@ mod tests {
                 for (indentation, column, matched, fence) in [(0, 0, 0, 3), (255, 3, 1, 255)] {
                     let mut fixture = Scanner::with_blocks(blocks.iter().copied());
                     fixture.snapshot[..HEADER_SIZE].copy_from_slice(&[
-                        state, matched.min(blocks.len() as u8), indentation, column, fence,
+                        state,
+                        matched.min(blocks.len() as u8),
+                        indentation,
+                        column,
+                        fence,
                     ]);
                     snapshots.push(serialized(&mut fixture));
                 }
@@ -2341,10 +2457,17 @@ mod tests {
                         let mut expected = TestLexer::new(input);
                         let result = fast.scan(&mut actual, &flags);
                         let reference_result = reference.scan_inner::<DYNAMIC_SYMBOLS>(
-                            &mut ScanLexer::new(&mut expected), Symbols::new(&flags),
+                            &mut ScanLexer::new(&mut expected),
+                            Symbols::new(&flags),
                         );
-                        assert_eq!(result, reference_result, "{content}, {snapshot:?}, {input:?}");
-                        assert_eq!(actual.events, expected.events, "{content}, {snapshot:?}, {input:?}");
+                        assert_eq!(
+                            result, reference_result,
+                            "{content}, {snapshot:?}, {input:?}"
+                        );
+                        assert_eq!(
+                            actual.events, expected.events,
+                            "{content}, {snapshot:?}, {input:?}"
+                        );
                         assert_eq!(actual.position, expected.position);
                         assert_eq!(actual.end, expected.end);
                         assert_eq!(actual.lookahead_calls, expected.lookahead_calls);
@@ -2369,27 +2492,54 @@ mod tests {
             let mut fixed_lexer = TestLexer::new(input);
             let mut dynamic_lexer = TestLexer::new(input);
             let flags: [bool; 47] = std::array::from_fn(|i| FLAGS & (1 << i) != 0);
-            let actual = fixed.scan_inner::<FLAGS>(
-                &mut ScanLexer::new(&mut fixed_lexer), Symbols::new(&flags),
-            );
+            let actual = fixed
+                .scan_inner::<FLAGS>(&mut ScanLexer::new(&mut fixed_lexer), Symbols::new(&flags));
             let expected = dynamic.scan_inner::<DYNAMIC_SYMBOLS>(
-                &mut ScanLexer::new(&mut dynamic_lexer), Symbols::new(&flags),
+                &mut ScanLexer::new(&mut dynamic_lexer),
+                Symbols::new(&flags),
             );
             assert_eq!(actual, expected, "{input:?}, {snapshot:?}");
             assert_eq!(fixed_lexer.events, dynamic_lexer.events, "{input:?}");
             assert_eq!(fixed_lexer.lookahead_calls, dynamic_lexer.lookahead_calls);
             assert_eq!(fixed_lexer.eof_calls, dynamic_lexer.eof_calls);
-            assert_eq!(serialized(&mut fixed), serialized(&mut dynamic), "{input:?}");
+            assert_eq!(
+                serialized(&mut fixed),
+                serialized(&mut dynamic),
+                "{input:?}"
+            );
             assert_eq!(fixed.simulating(), dynamic.simulating(), "{input:?}");
         }
         let wrapped_fence = format!("{} \n", "`".repeat(260));
         for input in [
-            "***\n", "*  ** text\n", "_ _ _\r\n", "~~~ info\n", "```info\n",
-            "````info`\n", "- item\n", "+ item\n", "123. item\n", "# Heading\n",
-            "<script>\n", "<custom a='b'>\n", "a|b\n-|-\n", "a\0|b\n-|-\n",
-            "\ncontinued text\n", "\r\n> quote\n", "\n~~~ info\n", "\n* list\n",
-            " text\n", "    text\n", " \ttext\n", " ",
-            "\t text\n", "\t", "", "\0", "``` \n", "~~~\n", &wrapped_fence,
+            "***\n",
+            "*  ** text\n",
+            "_ _ _\r\n",
+            "~~~ info\n",
+            "```info\n",
+            "````info`\n",
+            "- item\n",
+            "+ item\n",
+            "123. item\n",
+            "# Heading\n",
+            "<script>\n",
+            "<custom a='b'>\n",
+            "a|b\n-|-\n",
+            "a\0|b\n-|-\n",
+            "\ncontinued text\n",
+            "\r\n> quote\n",
+            "\n~~~ info\n",
+            "\n* list\n",
+            " text\n",
+            "    text\n",
+            " \ttext\n",
+            " ",
+            "\t text\n",
+            "\t",
+            "",
+            "\0",
+            "``` \n",
+            "~~~\n",
+            &wrapped_fence,
         ] {
             for state in 0..=(STATE_CLOSE_BLOCK | STATE_WAS_SOFT_LINE_BREAK | STATE_MATCHING) {
                 for indentation in [0, 4] {
@@ -2431,7 +2581,11 @@ mod tests {
         fn check(input: &str, indentation: u8, column: u8) {
             let mut fixture = Scanner::with_blocks([Block::QUOTE]);
             fixture.snapshot[..HEADER_SIZE].copy_from_slice(&[
-                STATE_WAS_SOFT_LINE_BREAK, 0, indentation, column, 3,
+                STATE_WAS_SOFT_LINE_BREAK,
+                0,
+                indentation,
+                column,
+                3,
             ]);
             let snapshot = serialized(&mut fixture);
             let mut fast = Scanner::default();
@@ -2443,12 +2597,16 @@ mod tests {
             let mut expected = TestLexer::new(input);
             let result = fast.scan(&mut actual, &TEXT_FLAGS);
             let reference = dynamic.scan_inner::<DYNAMIC_SYMBOLS>(
-                &mut ScanLexer::new(&mut expected), Symbols::new(&TEXT_FLAGS),
+                &mut ScanLexer::new(&mut expected),
+                Symbols::new(&TEXT_FLAGS),
             );
             assert_eq!(result, reference, "{input:?}");
             assert_eq!(actual.events, expected.events, "{input:?}");
             assert_eq!(actual.position, expected.position, "{input:?}");
-            assert_eq!(actual.lookahead_calls, expected.lookahead_calls, "{input:?}");
+            assert_eq!(
+                actual.lookahead_calls, expected.lookahead_calls,
+                "{input:?}"
+            );
             assert_eq!(actual.eof_calls, expected.eof_calls, "{input:?}");
             assert_eq!(serialized(&mut fast), serialized(&mut dynamic), "{input:?}");
             assert_eq!(fast.simulating(), dynamic.simulating(), "{input:?}");
@@ -2784,8 +2942,8 @@ mod tests {
         // Include long runs, trailing spaces/pipes, tabs, escapes, embedded NUL,
         // and wide characters whose low byte is punctuation in C.
         let alphabet = [
-            'a', ' ', '\t', '|', '\\', '\0', 'é', '!', '\u{100}', '\u{109}',
-            '\u{10a}', '\u{10d}', '\u{15c}', '\u{17c}', '\u{2009}',
+            'a', ' ', '\t', '|', '\\', '\0', 'é', '!', '\u{100}', '\u{109}', '\u{10a}', '\u{10d}',
+            '\u{15c}', '\u{17c}', '\u{2009}',
         ];
         let mut seed = 0x3141_5926u32;
         for length in [0, 1, 2, 3, 4, 31, 255, 256, 257, 1025] {
@@ -2794,13 +2952,13 @@ mod tests {
                 seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
                 text.push(alphabet[seed as usize % alphabet.len()]);
                 for column in 0..4 {
-                    let expected_column = text.chars().fold(column, |column, c| {
-                        if c == '\t' {
-                            0
-                        } else {
-                            (column + 1) % 4
-                        }
-                    });
+                    let expected_column =
+                        text.chars().fold(
+                            column,
+                            |column, c| {
+                                if c == '\t' { 0 } else { (column + 1) % 4 }
+                            },
+                        );
                     let mut scanner = Scanner::default();
                     scanner.snapshot[COLUMN] = column;
                     let mut lexer = TestLexer::new(&text);

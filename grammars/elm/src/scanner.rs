@@ -1,6 +1,6 @@
 //! Elm's external scanner, translated from `src/scanner.c`.
 
-use ts_port_tables::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE};
+use tree_sitter_language::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE};
 
 const VIRTUAL_END_DECL: usize = 0;
 const VIRTUAL_OPEN_SECTION: usize = 1;

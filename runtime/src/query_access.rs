@@ -657,9 +657,9 @@ mod tests {
     }
 
     fn language() -> Language {
-        static TABLES: std::sync::LazyLock<ts_port_tables::LanguageTables> =
+        static TABLES: std::sync::LazyLock<tree_sitter_language::LanguageTables> =
             std::sync::LazyLock::new(|| {
-                ts_port_tables::LanguageTables::decode(
+                tree_sitter_language::LanguageTables::decode(
                     include_bytes!("../../grammars/c/src/tables.bin"),
                     |_, _| unreachable!("these tests do not lex"),
                     Some(|_, _| unreachable!("these tests do not lex keywords")),

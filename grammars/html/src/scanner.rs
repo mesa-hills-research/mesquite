@@ -1,6 +1,6 @@
 //! The HTML external scanner, translated from `src/scanner.c` and `src/tag.h`.
 
-use ts_port_tables::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE};
+use tree_sitter_language::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE};
 
 // External token indices, in the order of the C TokenType enum.
 const START_TAG_NAME: usize = 0;
@@ -903,9 +903,7 @@ impl ExternalScanner for Scanner {
         // Canonical snapshots can be copied without separately writing counts.
         // Each entry takes at least one byte, so fitting implies a u16 depth.
         // C always leaves the last byte of the serialization buffer unused.
-        if self.tags.noncanonical_names == 0
-            && self.tags.bytes.len() < SERIALIZATION_BUFFER_SIZE
-        {
+        if self.tags.noncanonical_names == 0 && self.tags.bytes.len() < SERIALIZATION_BUFFER_SIZE {
             let size = self.tags.bytes.len();
             buffer[..size].copy_from_slice(&self.tags.bytes);
             return size;
@@ -1661,28 +1659,42 @@ mod tests {
             false
         }
 
-        for parent in [None, Some("DIV"), Some("BR"), Some("P"), Some("SCRIPT"), Some("X-A")] {
+        for parent in [
+            None,
+            Some("DIV"),
+            Some("BR"),
+            Some("P"),
+            Some("SCRIPT"),
+            Some("X-A"),
+        ] {
             for mask in 0..512 {
                 let valid = std::array::from_fn(|i| mask & (1 << i) != 0);
                 for prefix in ["", " \t\n\x0b\x0c\r"] {
                     for input in [
-                        "", "\0more", "div>", "x-a>", "1>", "</DIV>", "<div>", "<p>",
-                        "<!--x-->", "<!--x", "<!x", "/>", "/x", "<", "_", "@", "?", ">",
-                        "é", "\u{2003}",
+                        "", "\0more", "div>", "x-a>", "1>", "</DIV>", "<div>", "<p>", "<!--x-->",
+                        "<!--x", "<!x", "/>", "/x", "<", "_", "@", "?", ">", "é", "\u{2003}",
                     ] {
                         let input = format!("{prefix}{input}");
-                        let make_scanner = || parent.map_or_else(Scanner::default, |p| with_tags(&[p]));
+                        let make_scanner =
+                            || parent.map_or_else(Scanner::default, |p| with_tags(&[p]));
                         let mut expected = make_scanner();
                         let mut reference_lexer = TestLexer::new(&input);
                         let accepted = reference(&mut expected, &mut reference_lexer, &valid);
                         let mut actual = make_scanner();
                         let mut lexer = TestLexer::new(&input);
-                        assert_eq!(actual.scan(&mut lexer, &valid), accepted, "{parent:?}: {input:?}, {mask}");
+                        assert_eq!(
+                            actual.scan(&mut lexer, &valid),
+                            accepted,
+                            "{parent:?}: {input:?}, {mask}"
+                        );
                         assert_eq!(actual.tags, expected.tags);
                         assert_eq!(lexer.position, reference_lexer.position);
                         assert_eq!(lexer.end, reference_lexer.end);
                         assert_eq!(lexer.symbol, reference_lexer.symbol);
-                        assert_eq!(lexer.calls, reference_lexer.calls, "{parent:?}: {input:?}, {mask}");
+                        assert_eq!(
+                            lexer.calls, reference_lexer.calls,
+                            "{parent:?}: {input:?}, {mask}"
+                        );
                         assert_eq!(serialized(&mut actual), serialized(&mut expected));
                     }
                 }
@@ -1706,7 +1718,10 @@ mod tests {
             for offset in 0..snapshot.len() {
                 let mut different = snapshot.clone();
                 different[offset] ^= 0xff;
-                assert!(!scanner.tags.matches(&different), "depth={depth}, byte={offset}");
+                assert!(
+                    !scanner.tags.matches(&different),
+                    "depth={depth}, byte={offset}"
+                );
             }
             let mut restored = Scanner::default();
             restored.deserialize(&snapshot);

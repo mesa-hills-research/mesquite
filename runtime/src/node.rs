@@ -504,7 +504,7 @@ pub(crate) fn ts_node_has_error(node: Node<'_>) -> bool {
 
 #[inline]
 pub(crate) fn ts_node_is_error(node: Node<'_>) -> bool {
-    ts_node_symbol(node) == ts_port_tables::BUILTIN_SYM_ERROR
+    ts_node_symbol(node) == tree_sitter_language::BUILTIN_SYM_ERROR
 }
 
 pub(crate) fn ts_node_descendant_count(node: Node<'_>) -> u32 {
@@ -838,7 +838,7 @@ fn field_name_for_child(
 mod node_2_tests {
     use super::*;
     use std::sync::{Arc, LazyLock};
-    use ts_port_tables::LanguageTables;
+    use tree_sitter_language::LanguageTables;
 
     fn language() -> Language {
         // Only the immutable tables are needed for these node identity tests.

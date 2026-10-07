@@ -1,6 +1,6 @@
 //! The HCL external scanner, translated from `hcl/src/scanner.c`.
 
-use ts_port_tables::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE};
+use tree_sitter_language::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE};
 
 // External token indices, in C's TokenType order.
 const QUOTED_TEMPLATE_START: usize = 0;

@@ -8,8 +8,8 @@ use std::sync::{LazyLock, Mutex};
 mod c_lexer;
 
 fn parser() -> Parser {
-    static TABLES: LazyLock<ts_port_tables::LanguageTables> = LazyLock::new(|| {
-        ts_port_tables::LanguageTables::decode(
+    static TABLES: LazyLock<tree_sitter_language::LanguageTables> = LazyLock::new(|| {
+        tree_sitter_language::LanguageTables::decode(
             include_bytes!("../../grammars/c/src/tables.bin"),
             c_lexer::ts_lex,
             Some(c_lexer::ts_lex_keywords),

@@ -7,7 +7,7 @@ mod keywords;
 mod unicode;
 
 use intuit::{intuit_more, is_fileglob};
-use ts_port_tables::{ExternalScanner, Lexer};
+use tree_sitter_language::{ExternalScanner, Lexer};
 use unicode::{is_id_continue, is_id_start, is_whitespace};
 
 #[derive(Clone, Copy)]

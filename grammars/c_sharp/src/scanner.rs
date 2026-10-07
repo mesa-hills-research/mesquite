@@ -1,6 +1,6 @@
 //! The C# grammar's external scanner, translated from `src/scanner.c`.
 
-use ts_port_tables::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE};
+use tree_sitter_language::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE};
 
 // External token indices, in the order of the C TokenType enum.
 const OPT_SEMI: usize = 0;

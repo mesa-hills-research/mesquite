@@ -1,6 +1,6 @@
 //! Odin's stateless external scanner, translated from `src/scanner.c`.
 
-use ts_port_tables::{ExternalScanner, Lexer};
+use tree_sitter_language::{ExternalScanner, Lexer};
 
 const NEWLINE: usize = 0;
 const BACKSLASH: usize = 1;

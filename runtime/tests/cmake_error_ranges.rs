@@ -1,11 +1,11 @@
 //! Parser-level regressions for CMake oracle bucket e0b0bff8.
 
-use ts_port::{InputEdit, Language, ParseOptions, ParseState, Parser, Point, Tree};
+use tree_sitter::{InputEdit, Language, ParseOptions, ParseState, Parser, Point, Tree};
 
 fn assert_recovery_range(source: &str, identifier_end: usize, eof: Point, chunk_size: usize) {
     let mut parser = Parser::new();
     parser
-        .set_language(&Language::from(ts_port_cmake::language()))
+        .set_language(&Language::from(tree_sitter_cmake::language()))
         .unwrap();
 
     // Cover both fresh scanner creation and parser reuse after scans that leave

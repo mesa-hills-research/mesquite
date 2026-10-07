@@ -1,6 +1,6 @@
 use super::*;
 use std::sync::{Arc, OnceLock};
-use ts_port_tables::LanguageTables;
+use tree_sitter_language::LanguageTables;
 
 // These tests use hand-built subtrees so they can check the node helpers without
 // depending on the parser, subtree constructors, or grammar scanners.

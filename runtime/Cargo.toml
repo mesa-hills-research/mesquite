@@ -1,14 +1,17 @@
 [package]
-name = "ts_port"
+name = "mhr_tree_sitter"
 version = "0.25.10"
 edition = "2024"
 license = "MIT"
-description = "An idiomatic Rust port of the tree-sitter 0.25.10 runtime."
+description = "A pure, safe Rust port of the tree-sitter 0.25.10 runtime"
+
+[lib]
+name = "tree_sitter"
 
 [dependencies]
-ts_port_tables = { path = "../tables" }
+mhr_tree_sitter_language = { path = "../tables" }
 streaming-iterator = "0.1.9"
 regex = "1.11.1"
 
 [dev-dependencies]
-ts_port_cmake = { path = "../grammars/cmake" }
+mhr_tree_sitter_cmake = { path = "../grammars/cmake" }

@@ -1,6 +1,6 @@
 //! The TOML external scanner, translated from `src/scanner.c`.
 
-use ts_port_tables::{ExternalScanner, Lexer, Symbol};
+use tree_sitter_language::{ExternalScanner, Lexer, Symbol};
 
 const LINE_ENDING_OR_EOF: Symbol = 0;
 const MULTILINE_BASIC_STRING_CONTENT: Symbol = 1;
@@ -649,7 +649,9 @@ mod tests {
                     for mask in 0..32 {
                         let valid: [bool; 5] = std::array::from_fn(|i| mask & (1 << i) != 0);
                         let mut lexer = TestLexer::new("");
-                        lexer.input.extend((0..prefix_length).map(|i| [0x20, 0x09][i % 2]));
+                        lexer
+                            .input
+                            .extend((0..prefix_length).map(|i| [0x20, 0x09][i % 2]));
                         lexer.input.extend([alias, 0x0a]);
                         assert!(
                             !Scanner.scan(&mut lexer, &valid),

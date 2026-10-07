@@ -5,7 +5,7 @@ use crate::{
     types::*,
 };
 use std::sync::Arc;
-use ts_port_tables::{BUILTIN_SYM_END, BUILTIN_SYM_ERROR};
+use tree_sitter_language::{BUILTIN_SYM_END, BUILTIN_SYM_ERROR};
 
 /// Eight bytes, just as in C. The enum containing it is 16 bytes on 64-bit hosts.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -741,7 +741,11 @@ fn summarize_unary(data: &mut ChildSummary, child: &Subtree) {
 }
 
 #[inline(always)]
-fn summarize_child_slice_general(data: &mut ChildSummary, children: &[Subtree], language: &Language) {
+fn summarize_child_slice_general(
+    data: &mut ChildSummary,
+    children: &[Subtree],
+    language: &Language,
+) {
     let branch = &mut data.branch;
     let mut summary = BranchData {
         production_id: branch.production_id,
@@ -1854,10 +1858,10 @@ pub(crate) fn ts_subtree_is_fragile(tree: &Subtree) -> bool {
     ts_subtree_fragile_left(tree) || ts_subtree_fragile_right(tree)
 }
 pub(crate) fn ts_subtree_is_error(tree: &Subtree) -> bool {
-    ts_subtree_symbol(tree) == ts_port_tables::BUILTIN_SYM_ERROR
+    ts_subtree_symbol(tree) == tree_sitter_language::BUILTIN_SYM_ERROR
 }
 pub(crate) fn ts_subtree_is_eof(tree: &Subtree) -> bool {
-    ts_subtree_symbol(tree) == ts_port_tables::BUILTIN_SYM_END
+    ts_subtree_symbol(tree) == tree_sitter_language::BUILTIN_SYM_END
 }
 pub(crate) fn ts_subtree_from_mut(tree: MutableSubtree) -> Subtree {
     tree
@@ -2414,13 +2418,34 @@ mod subtree_2_tests {
         let token = external(&[1, 2, 3]);
         let retained = token.clone();
         assert!(ts_subtree_external_scanner_state_eq(&token, &retained));
-        assert!(ts_subtree_external_scanner_state_eq(&token, &external(&[1, 2, 3])));
-        assert!(!ts_subtree_external_scanner_state_eq(&token, &external(&[1, 2])));
-        assert!(!ts_subtree_external_scanner_state_eq(&token, &external(&[1, 2, 4])));
-        assert!(!ts_subtree_external_scanner_state_eq(&token, &Subtree::Null));
-        assert!(ts_subtree_external_scanner_state_eq(&external(&[]), &Subtree::Null));
-        assert!(ts_subtree_external_scanner_state_eq(&Subtree::Null, &Subtree::Null));
-        assert!(ts_subtree_external_scanner_state_eq(&leaf(1, 2), &leaf(3, 4)));
+        assert!(ts_subtree_external_scanner_state_eq(
+            &token,
+            &external(&[1, 2, 3])
+        ));
+        assert!(!ts_subtree_external_scanner_state_eq(
+            &token,
+            &external(&[1, 2])
+        ));
+        assert!(!ts_subtree_external_scanner_state_eq(
+            &token,
+            &external(&[1, 2, 4])
+        ));
+        assert!(!ts_subtree_external_scanner_state_eq(
+            &token,
+            &Subtree::Null
+        ));
+        assert!(ts_subtree_external_scanner_state_eq(
+            &external(&[]),
+            &Subtree::Null
+        ));
+        assert!(ts_subtree_external_scanner_state_eq(
+            &Subtree::Null,
+            &Subtree::Null
+        ));
+        assert!(ts_subtree_external_scanner_state_eq(
+            &leaf(1, 2),
+            &leaf(3, 4)
+        ));
     }
 
     #[test]
@@ -2450,7 +2475,7 @@ mod subtree_2_tests {
 mod summary_tests {
     use super::*;
     use std::sync::LazyLock;
-    use ts_port_tables::{LanguageTables, SymbolMetadata};
+    use tree_sitter_language::{LanguageTables, SymbolMetadata};
 
     fn language() -> Language {
         static TABLES: LazyLock<LanguageTables> = LazyLock::new(|| {
@@ -2557,8 +2582,17 @@ mod summary_tests {
         let language = language();
         let mut pool = ts_subtree_pool_new(32);
         let inline = ts_subtree_new_leaf_with(
-            &mut pool, 1, length_zero(), length_zero(), 0, 7, false, false, false,
-            &language, |_| panic!("inline leaves do not construct a heap header"),
+            &mut pool,
+            1,
+            length_zero(),
+            length_zero(),
+            0,
+            7,
+            false,
+            false,
+            false,
+            &language,
+            |_| panic!("inline leaves do not construct a heap header"),
         );
         assert!(matches!(inline, Subtree::Inline(_)));
 
@@ -2566,19 +2600,30 @@ mod summary_tests {
             let bytes: Vec<_> = (0..length).map(|i| i as u8).collect();
             let mut initialized = false;
             let tree = ts_subtree_new_leaf_with(
-                &mut pool, 1, length_zero(), length_zero(), 0, 7, true, true, false,
+                &mut pool,
+                1,
+                length_zero(),
+                length_zero(),
+                0,
+                7,
+                true,
+                true,
+                false,
                 &language,
                 |header| {
                     assert!(header.has_external_tokens);
                     assert!(header.children.is_empty());
-                    header.payload = SubtreePayload::External(ts_external_scanner_state_init(&bytes));
+                    header.payload =
+                        SubtreePayload::External(ts_external_scanner_state_init(&bytes));
                     header.has_external_scanner_state_change = true;
                     initialized = true;
                 },
             );
             assert!(initialized);
             assert!(pool.free_trees.is_empty());
-            let Subtree::Heap(header) = &tree else { panic!("external tokens are heap leaves") };
+            let Subtree::Heap(header) = &tree else {
+                panic!("external tokens are heap leaves")
+            };
             assert_eq!(Arc::strong_count(header), 1);
             assert!(header.has_external_scanner_state_change && header.depends_on_column);
             assert_eq!(header.parse_state, 7);

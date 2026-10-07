@@ -1,7 +1,7 @@
 //! The XML external scanner, translated from `xml/src/scanner.c` and
 //! `common/scanner.h` (with `TS_XML` defined).
 
-use ts_port_tables::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE};
+use tree_sitter_language::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE};
 
 // External token indices, in the order of common/scanner.h's TokenType.
 const PI_TARGET: usize = 0;

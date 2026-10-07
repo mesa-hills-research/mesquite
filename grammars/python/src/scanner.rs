@@ -1,6 +1,6 @@
 //! The Python external scanner, translated from `src/scanner.c`.
 
-use ts_port_tables::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE};
+use tree_sitter_language::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE};
 
 // Indices in the grammar's external-token array. COMMENT (7) is only a sentinel
 // for the parser; this scanner does not inspect or return it.

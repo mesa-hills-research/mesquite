@@ -3,7 +3,7 @@
 use super::*;
 use crate::{length::Length, subtree::Subtree, tree::Tree};
 use std::sync::OnceLock;
-use ts_port_tables::LanguageTables;
+use tree_sitter_language::LanguageTables;
 
 fn language() -> Language {
     static TABLES: OnceLock<LanguageTables> = OnceLock::new();

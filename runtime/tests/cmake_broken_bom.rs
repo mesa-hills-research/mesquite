@@ -1,6 +1,6 @@
 //! Parser-level regression for CMake oracle bucket 381f9bd4.
 
-use ts_port::{Language, ParseOptions, ParseState, Parser, Point};
+use tree_sitter::{Language, ParseOptions, ParseState, Parser, Point};
 
 #[test]
 fn truncated_utf32_boms_recover_as_one_bracket_content_token() {
@@ -10,7 +10,7 @@ fn truncated_utf32_boms_recover_as_one_bracket_content_token() {
         for chunk_size in 1..=source.len() {
             let mut parser = Parser::new();
             parser
-                .set_language(&Language::from(ts_port_cmake::language()))
+                .set_language(&Language::from(tree_sitter_cmake::language()))
                 .unwrap();
 
             // Exercise creation and reuse after both bracket token families.

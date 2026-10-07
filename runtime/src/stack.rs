@@ -989,10 +989,7 @@ pub(crate) fn ts_stack_reduce_many_for_version(
 /// Refuse shared or branching prefixes without changing anything, so the full
 /// graph traversal can handle them with its usual ordering and limits.
 #[inline]
-pub(crate) fn ts_stack_pop_count_in_place(
-    stack: &mut Stack,
-    count: u32,
-) -> Option<Vec<Subtree>> {
+pub(crate) fn ts_stack_pop_count_in_place(stack: &mut Stack, count: u32) -> Option<Vec<Subtree>> {
     if stack.heads.len() != 1 || stack.heads[0].status != StackStatus::Active {
         return None;
     }
@@ -1118,10 +1115,14 @@ pub(crate) fn ts_stack_pop_error(
     version: StackVersion,
 ) -> Vec<Subtree> {
     let node = &stack.arena.nodes[stack.heads[version as usize].node.0];
-    let has_error_link = node.links.iter().take(node.link_count as usize).any(|link| {
-        let subtree = &link.as_ref().unwrap().subtree;
-        !subtree.is_null() && ts_subtree_is_error(subtree)
-    });
+    let has_error_link = node
+        .links
+        .iter()
+        .take(node.link_count as usize)
+        .any(|link| {
+            let subtree = &link.as_ref().unwrap().subtree;
+            !subtree.is_null() && ts_subtree_is_error(subtree)
+        });
     if has_error_link {
         let mut found_error = false;
         let mut pop = stack__iter(
@@ -1210,8 +1211,7 @@ pub(crate) fn ts_stack_get_summary(stack: &Stack, version: StackVersion) -> Opti
 }
 
 pub(crate) fn ts_stack_dynamic_precedence(stack: &Stack, version: StackVersion) -> i32 {
-    stack.arena.nodes[stack.heads[version as usize].node.0]
-        .dynamic_precedence
+    stack.arena.nodes[stack.heads[version as usize].node.0].dynamic_precedence
 }
 
 pub(crate) fn ts_stack_has_advanced_since_error(stack: &Stack, version: StackVersion) -> bool {
@@ -1328,9 +1328,7 @@ pub(crate) fn ts_stack_merge_contents(
     let node2 = stack.heads[version2 as usize].node;
     let mut i = 0;
     while i < stack.arena.nodes[node2.0].link_count as usize {
-        let link = stack.arena.nodes[node2.0].links[i]
-            .as_ref()
-            .unwrap();
+        let link = stack.arena.nodes[node2.0].links[i].as_ref().unwrap();
         // StackLink owns its subtree handle, but copying its node ID does not
         // retain the node. stack_node_add_link retains graph edges as needed.
         let link = StackLink {
@@ -1863,7 +1861,14 @@ mod stack2_tests {
         let mut stack = ts_stack_new();
         let base = stack.base_node;
         let heap = Arc::new(SubtreeHeapData::default());
-        ts_stack_push(&mut stack, &mut pool, 0, Subtree::Heap(heap.clone()), false, 2);
+        ts_stack_push(
+            &mut stack,
+            &mut pool,
+            0,
+            Subtree::Heap(heap.clone()),
+            false,
+            2,
+        );
         let old_head = stack.heads[0].node;
         assert_eq!(Arc::strong_count(&heap), 2);
         assert_eq!(stack.arena.node(base).ref_count, 2);
@@ -1945,7 +1950,11 @@ mod stack2_tests {
         assert_eq!(stack.arena.node(head).link_count, 2);
         assert!(stack.arena.free.is_empty());
         // Empty reductions do not remove any prefix, even at a branch.
-        assert!(ts_stack_pop_count_in_place(&mut stack, 0).unwrap().is_empty());
+        assert!(
+            ts_stack_pop_count_in_place(&mut stack, 0)
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(stack.heads[0].node, head);
         ts_stack_delete(&mut stack, &mut pool);
     }
@@ -1961,10 +1970,7 @@ mod stack2_tests {
         stack.arena.nodes[1].error_cost = u32::MAX;
         assert_eq!(ts_stack_error_cost(&stack, 0), 499);
         stack.heads[0].status = StackStatus::Active;
-        stack.arena.nodes[1].links[0]
-            .as_mut()
-            .unwrap()
-            .subtree = leaf(0);
+        stack.arena.nodes[1].links[0].as_mut().unwrap().subtree = leaf(0);
         assert_eq!(ts_stack_error_cost(&stack, 0), u32::MAX);
     }
 
@@ -2001,7 +2007,7 @@ mod stack2_tests {
     #[test]
     fn error_callback_pops_only_the_first_error_path() {
         let error = Subtree::Heap(Arc::new(SubtreeHeapData {
-            symbol: ts_port_tables::BUILTIN_SYM_ERROR,
+            symbol: tree_sitter_language::BUILTIN_SYM_ERROR,
             children: Vec::new(),
             payload: SubtreePayload::Leaf,
             ..SubtreeHeapData::default()
@@ -2069,10 +2075,7 @@ mod stack2_tests {
     fn progress_walks_only_zero_width_error_free_first_links() {
         let mut stack = stack();
         assert!(!ts_stack_has_advanced_since_error(&stack, 0));
-        stack.arena.nodes[1].links[0]
-            .as_mut()
-            .unwrap()
-            .subtree = leaf(1);
+        stack.arena.nodes[1].links[0].as_mut().unwrap().subtree = leaf(1);
         assert!(ts_stack_has_advanced_since_error(&stack, 0));
         stack.heads[0].node_count_at_last_error = 5;
         assert!(!ts_stack_has_advanced_since_error(&stack, 0));
@@ -2340,7 +2343,11 @@ mod stack_1_tests {
             pool.free_trees.iter().map(Arc::as_ptr).collect::<Vec<_>>(),
             [last_ptr, right_ptr, first_ptr, left_ptr],
         );
-        assert!(pool.free_trees.iter().all(|tree| Arc::strong_count(tree) == 1));
+        assert!(
+            pool.free_trees
+                .iter()
+                .all(|tree| Arc::strong_count(tree) == 1)
+        );
     }
 
     #[test]

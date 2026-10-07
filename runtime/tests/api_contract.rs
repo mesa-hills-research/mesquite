@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 
 use std::{cell::Cell, num::NonZeroU16, rc::Rc};
-use ts_port::{
+use tree_sitter::{
     InputEdit, Language, LanguageError, LanguageRef, Node, ParseOptions, ParseState, Parser, Point,
     Range, Tree, TreeCursor,
 };
@@ -80,7 +80,7 @@ fn tree_contract(tree: &mut Tree, edit: &InputEdit) {
     tree.edit(edit);
 }
 
-fn grammar_contract(tables: &'static ts_port_tables::LanguageTables) -> Language {
+fn grammar_contract(tables: &'static tree_sitter_language::LanguageTables) -> Language {
     let language: Language = tables.into();
     let _: Option<&'static str> = language.name();
     let _: usize = language.abi_version();

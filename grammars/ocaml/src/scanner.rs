@@ -1,6 +1,6 @@
 //! OCaml's shared external scanner, translated from `common/scanner.h`.
 
-use ts_port_tables::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE};
+use tree_sitter_language::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE};
 
 const COMMENT: usize = 0;
 const LEFT_QUOTED_STRING_DELIM: usize = 1;

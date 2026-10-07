@@ -4,7 +4,7 @@
 //! lookahead to `char`. State restoration intentionally neither truncates the
 //! heredoc stack nor resets the glob fields when given an empty snapshot.
 
-use ts_port_tables::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE};
+use tree_sitter_language::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE};
 
 const HEREDOC_START: usize = 0;
 const SIMPLE_HEREDOC_BODY: usize = 1;

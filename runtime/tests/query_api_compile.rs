@@ -2,7 +2,7 @@
 //! queries yet; the one runnable test checks required automatic thread traits.
 #![allow(dead_code)]
 
-use ts_port::{
+use tree_sitter::{
     CaptureQuantifier, Language, Node, Point, Query, QueryCapture, QueryCaptures, QueryCursor,
     QueryCursorOptions, QueryCursorState, QueryError, QueryErrorKind, QueryMatch, QueryMatches,
     QueryPredicate, QueryPredicateArg, QueryProperty, StreamingIterator, StreamingIteratorMut,

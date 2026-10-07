@@ -1,6 +1,6 @@
 //! The SQL external scanner, translated from `src/scanner.c`.
 
-use ts_port_tables::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE};
+use tree_sitter_language::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE};
 
 const DOLLAR_QUOTED_STRING_START_TAG: usize = 0;
 const DOLLAR_QUOTED_STRING_END_TAG: usize = 1;

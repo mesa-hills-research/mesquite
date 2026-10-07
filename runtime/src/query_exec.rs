@@ -14,7 +14,7 @@ use crate::{
         ts_tree_cursor_parent_node,
     },
 };
-use ts_port_tables::BUILTIN_SYM_ERROR;
+use tree_sitter_language::BUILTIN_SYM_ERROR;
 
 pub(crate) fn ts_query_cursor__capture<'query, 'tree: 'query>(
     cursor: &mut QueryExecution<'query, 'tree>,
@@ -537,7 +537,7 @@ mod tests {
         tree_cursor::TreeCursorEntry,
     };
     use std::sync::{Arc, LazyLock};
-    use ts_port_tables::LanguageTables;
+    use tree_sitter_language::LanguageTables;
 
     fn language() -> Language {
         static TABLES: LazyLock<LanguageTables> = LazyLock::new(|| {

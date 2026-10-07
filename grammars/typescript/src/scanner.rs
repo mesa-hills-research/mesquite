@@ -1,7 +1,7 @@
 //! The stateless TypeScript/TSX external scanner, translated from
 //! `typescript/src/scanner.c` and `common/scanner.h`.
 
-use ts_port_tables::{ExternalScanner, Lexer};
+use tree_sitter_language::{ExternalScanner, Lexer};
 
 // External token indices, in the order of the C TokenType enum. The final token
 // (ERROR_RECOVERY, index 9) is not inspected by this scanner.

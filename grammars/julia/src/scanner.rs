@@ -1,6 +1,6 @@
 //! Julia's stateless external scanner, translated from `scanner.c`.
 
-use ts_port_tables::{ExternalScanner, Lexer, Symbol};
+use tree_sitter_language::{ExternalScanner, Lexer, Symbol};
 
 // TokenType indices from the C scanner.
 const BLOCK_COMMENT_REST: usize = 0;

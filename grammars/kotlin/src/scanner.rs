@@ -1,6 +1,6 @@
 //! The Kotlin grammar's stateless external scanner, translated from `scanner.c`.
 
-use ts_port_tables::{ExternalScanner, Lexer};
+use tree_sitter_language::{ExternalScanner, Lexer};
 
 // TokenType indices from the C scanner.
 const SEMI: usize = 0;

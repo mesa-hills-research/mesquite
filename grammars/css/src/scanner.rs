@@ -1,6 +1,6 @@
 //! The CSS external scanner, translated from `src/scanner.c`.
 
-use ts_port_tables::{ExternalScanner, Lexer};
+use tree_sitter_language::{ExternalScanner, Lexer};
 
 // External token indices, in the order of the C TokenType enum.
 const DESCENDANT_OP: usize = 0;

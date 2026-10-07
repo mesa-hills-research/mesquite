@@ -4,7 +4,7 @@
 //! Lookahead probes intentionally keep their advances (and mark_end calls):
 //! later fallbacks in the same scan observe the position left by failed probes.
 
-use ts_port_tables::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE};
+use tree_sitter_language::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE};
 
 const NEWLINE: usize = 0;
 const INDENT: usize = 1;

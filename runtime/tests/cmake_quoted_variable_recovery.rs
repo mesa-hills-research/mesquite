@@ -1,6 +1,6 @@
 //! Regressions for CMake oracle buckets 1b5a6fb7 and 4d6cc948.
 
-use ts_port::{InputEdit, Language, ParseOptions, ParseState, Parser, Point, Tree};
+use tree_sitter::{InputEdit, Language, ParseOptions, ParseState, Parser, Point, Tree};
 
 const SOURCES: [&str; 3] = [
     "message(\"${var\twith\ttab}\")\n",
@@ -12,7 +12,7 @@ const SOURCES: [&str; 3] = [
 
 #[test]
 fn whitespace_in_quoted_variable_names_does_not_nest_errors() {
-    let language = Language::from(ts_port_cmake::language());
+    let language = Language::from(tree_sitter_cmake::language());
     for source in SOURCES {
         let mut parser = Parser::new();
         parser.set_language(&language).unwrap();
@@ -56,7 +56,7 @@ fn whitespace_in_quoted_variable_names_does_not_nest_errors() {
 
 #[test]
 fn repairing_and_restoring_quoted_variable_names_resets_recovery_state() {
-    let language = Language::from(ts_port_cmake::language());
+    let language = Language::from(tree_sitter_cmake::language());
     for source in SOURCES {
         let mut parser = Parser::new();
         parser.set_language(&language).unwrap();
@@ -130,7 +130,7 @@ fn malformed_quotes_after_valid_arguments_keep_flat_recovery_children() {
         ("{", 9, 147..148),
         ("bracket_argument_content", 37, 154..338),
     ];
-    let language = Language::from(ts_port_cmake::language());
+    let language = Language::from(tree_sitter_cmake::language());
     for (source, error_index, expected_children, expected_progress_calls) in [
         (deferred_call, 1, deferred_children.as_slice(), 1),
         (compile_features, 2, compile_children.as_slice(), 2),

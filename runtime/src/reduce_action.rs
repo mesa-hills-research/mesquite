@@ -1,4 +1,4 @@
-use ts_port_tables::Symbol;
+use tree_sitter_language::Symbol;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ReduceAction {
     pub count: u32,

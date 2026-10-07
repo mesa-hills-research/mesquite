@@ -6,7 +6,7 @@ use crate::language::{
     ts_lookahead_iterator__next,
 };
 use std::cmp::Ordering;
-use ts_port_tables::{BUILTIN_SYM_ERROR, ParseAction};
+use tree_sitter_language::{BUILTIN_SYM_ERROR, ParseAction};
 
 /// The array.h search, including its choice of the last equal entry. In
 /// particular, step_offsets may contain more than one entry for a step.

@@ -63,7 +63,7 @@ pub(crate) struct Lexer<'a> {
     pub input: &'a mut dyn Input,
     pub logger: Option<&'a mut crate::parser::Logger>,
 }
-impl ts_port_tables::Lexer for Lexer<'_> {
+impl tree_sitter_language::Lexer for Lexer<'_> {
     fn lookahead(&self) -> i32 {
         self.state.lookahead
     }
@@ -507,7 +507,7 @@ pub(crate) fn ts_lexer__log(lexer: &mut Lexer<'_>, args: std::fmt::Arguments<'_>
         buffer.write_fmt(args).expect("formatting into a String");
         let mut end = buffer
             .len()
-            .min(ts_port_tables::SERIALIZATION_BUFFER_SIZE - 1);
+            .min(tree_sitter_language::SERIALIZATION_BUFFER_SIZE - 1);
         // C's fixed buffer reserves a byte for NUL. The Rust logger takes &str,
         // so keep a complete UTF-8 prefix if truncation splits a code point.
         while !buffer.is_char_boundary(end) {
@@ -615,7 +615,7 @@ mod tests {
     use super::*;
     use crate::point::point_new;
     use std::collections::VecDeque;
-    use ts_port_tables::Lexer as _;
+    use tree_sitter_language::Lexer as _;
 
     struct RecordingInput<'a> {
         source: &'a [u8],

@@ -1,6 +1,6 @@
 //! Swift's external scanner, translated from `src/scanner.c`.
 
-use ts_port_tables::{ExternalScanner, Lexer};
+use tree_sitter_language::{ExternalScanner, Lexer};
 
 /// `lookahead` cannot change until `advance`. Keep it across helper calls so
 /// inspecting the same position does not repeatedly dispatch through `dyn Lexer`.

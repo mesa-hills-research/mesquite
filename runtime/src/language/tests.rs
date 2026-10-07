@@ -1,12 +1,12 @@
 use super::*;
 use std::sync::LazyLock;
-use ts_port_tables::{ExternalScannerTables, FieldMapEntry, MapSlice};
+use tree_sitter_language::{ExternalScannerTables, FieldMapEntry, MapSlice};
 
-fn unused_lex(_: &mut dyn ts_port_tables::Lexer, _: StateId) -> bool {
+fn unused_lex(_: &mut dyn tree_sitter_language::Lexer, _: StateId) -> bool {
     panic!("language table tests do not lex")
 }
 
-fn unused_scanner() -> Box<dyn ts_port_tables::ExternalScanner> {
+fn unused_scanner() -> Box<dyn tree_sitter_language::ExternalScanner> {
     panic!("language table tests do not create scanners")
 }
 
@@ -559,11 +559,13 @@ fn all_grammar_states_agree_between_lookup_and_iteration() {
                 let entry = cache.table_entry(&language, state, symbol as Symbol);
                 let (reusable, actions) = tables.action_list(value as usize);
                 assert_eq!(
-                    entry.actions(), actions,
+                    entry.actions(),
+                    actions,
                     "{name} state {state} symbol {symbol}"
                 );
                 assert_eq!(
-                    entry.is_reusable(), reusable,
+                    entry.is_reusable(),
+                    reusable,
                     "{name} state {state} symbol {symbol}"
                 );
             }
@@ -608,7 +610,10 @@ fn parse_table_cache_clears_on_language_change() {
         cache.clear();
         for state in 0..language.tables.state_count as StateId {
             for symbol in 0..language.tables.symbol_count as Symbol {
-                assert_eq!(cache.next_state(language, state, symbol), ts_language_next_state(language, state, symbol));
+                assert_eq!(
+                    cache.next_state(language, state, symbol),
+                    ts_language_next_state(language, state, symbol)
+                );
                 if u32::from(symbol) < language.tables.token_count {
                     let cached = cache.table_entry(language, state, symbol);
                     let expected = ts_language_table_entry(language, state, symbol);
@@ -619,7 +624,12 @@ fn parse_table_cache_clears_on_language_change() {
         }
         for symbol in [BUILTIN_SYM_ERROR, BUILTIN_SYM_ERROR_REPEAT] {
             assert_eq!(cache.next_state(language, StateId::MAX, symbol), 0);
-            assert!(cache.table_entry(language, StateId::MAX, symbol).actions().is_empty());
+            assert!(
+                cache
+                    .table_entry(language, StateId::MAX, symbol)
+                    .actions()
+                    .is_empty()
+            );
         }
     }
 }

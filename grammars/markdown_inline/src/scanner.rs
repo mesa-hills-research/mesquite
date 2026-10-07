@@ -1,6 +1,6 @@
 //! The Markdown inline external scanner, translated from `scanner.c`.
 
-use ts_port_tables::{ExternalScanner, Lexer};
+use tree_sitter_language::{ExternalScanner, Lexer};
 
 // The order is the external token order in grammar.js and scanner.c.
 #[derive(Clone, Copy)]
@@ -251,8 +251,12 @@ impl ExternalScanner for Scanner {
         // Valid snapshots have four bytes; an empty slice resets the state.
         // C reads past the buffer on malformed short snapshots. Reset those
         // safely as well, using the same single fixed-width check.
-        let [state, code_span_delimiter_length, latex_span_delimiter_length, num_emphasis_delimiters_left] =
-            buffer.first_chunk::<4>().copied().unwrap_or_default();
+        let [
+            state,
+            code_span_delimiter_length,
+            latex_span_delimiter_length,
+            num_emphasis_delimiters_left,
+        ] = buffer.first_chunk::<4>().copied().unwrap_or_default();
         *self = Self {
             state,
             code_span_delimiter_length,
@@ -590,11 +594,13 @@ mod tests {
                     assert_eq!(lexer.symbol, token as u16);
                 }
                 if matches!(suffix, "\n" | "\r") {
-                    assert!(!lexer
-                        .calls
-                        .borrow()
-                        .iter()
-                        .any(|call| matches!(call, Call::Eof(_))));
+                    assert!(
+                        !lexer
+                            .calls
+                            .borrow()
+                            .iter()
+                            .any(|call| matches!(call, Call::Eof(_)))
+                    );
                 }
             }
 
@@ -700,16 +706,18 @@ mod tests {
         assert_eq!(actual.position, expected.position);
         assert_eq!(actual.end, expected.end);
         assert_eq!(actual.symbol, expected.symbol);
-        assert!(actual
-            .calls
-            .borrow()
-            .iter()
-            .filter(|call| !matches!(call, Call::Eof(_)))
-            .eq(expected
+        assert!(
+            actual
                 .calls
                 .borrow()
                 .iter()
-                .filter(|call| !matches!(call, Call::Eof(_)))));
+                .filter(|call| !matches!(call, Call::Eof(_)))
+                .eq(expected
+                    .calls
+                    .borrow()
+                    .iter()
+                    .filter(|call| !matches!(call, Call::Eof(_))))
+        );
     }
 
     #[test]
@@ -793,11 +801,13 @@ mod tests {
         let mut lexer = TestLexer::new(&format!("`{}`!", "content".repeat(32)));
         assert!(scanner.scan(&mut lexer, &valid(&[Token::CodeSpanStart])));
         assert_eq!(lexer.lookahead_calls.get(), lexer.position + 1);
-        assert!(!lexer
-            .calls
-            .borrow()
-            .iter()
-            .any(|call| matches!(call, Call::Eof(_))));
+        assert!(
+            !lexer
+                .calls
+                .borrow()
+                .iter()
+                .any(|call| matches!(call, Call::Eof(_)))
+        );
         assert_eq!(lexer.end, Some(1));
     }
 

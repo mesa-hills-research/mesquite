@@ -1,6 +1,6 @@
 //! The Rust grammar's external scanner, translated from `scanner.c`.
 
-use ts_port_tables::{ExternalScanner, Lexer};
+use tree_sitter_language::{ExternalScanner, Lexer};
 
 // These indices are the order of TokenType in the C scanner.
 const STRING_CONTENT: usize = 0;

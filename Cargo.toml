@@ -1,4 +1,3 @@
-# Written by the ts_port host; agents don't change it.
 [workspace]
 resolver = "3"
 members = [

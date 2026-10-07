@@ -1,11 +1,6 @@
 use super::*;
 
-fn status(
-    cost: u32,
-    node_count: u32,
-    dynamic_precedence: i32,
-    is_in_error: bool,
-) -> ErrorStatus {
+fn status(cost: u32, node_count: u32, dynamic_precedence: i32, is_in_error: bool) -> ErrorStatus {
     ErrorStatus {
         cost,
         node_count,

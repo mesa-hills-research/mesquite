@@ -1,7 +1,7 @@
 //! The PHP external scanner, translated from `php/common/scanner.h`.
 //! Shared by the PHP and PHP-only grammars.
 
-use ts_port_tables::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE};
+use tree_sitter_language::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE};
 
 // External token indices, in the order of the C TokenType enum.
 const AUTOMATIC_SEMICOLON: usize = 0;
@@ -513,7 +513,7 @@ mod tests {
     use std::cell::RefCell;
 
     use super::*;
-    use ts_port_tables::Symbol;
+    use tree_sitter_language::Symbol;
 
     #[derive(Debug, PartialEq, Eq)]
     enum Event {

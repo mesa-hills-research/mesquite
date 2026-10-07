@@ -41,7 +41,7 @@ pub(crate) struct CursorChildIterator<'tree> {
     pub structural_child_index: u32,
     pub descendant_index: u32,
     pub alias_sequence: &'static [Symbol],
-    pub field_map: &'static [ts_port_tables::FieldMapEntry],
+    pub field_map: &'static [tree_sitter_language::FieldMapEntry],
     pub inherited_field_id: FieldId,
 }
 #[derive(Debug, Default)]
@@ -869,7 +869,7 @@ mod tests {
 
     #[test]
     fn forward_seek_matches_iteration_through_uninteresting_edges() {
-        use ts_port_tables::FieldMapEntry;
+        use tree_sitter_language::FieldMapEntry;
         // Include extras, line breaks, aliases, skipped leaves, and invisible
         // branches. The seek path must retain exactly the iterator's position,
         // structural index, descendant index, and inherited field semantics.
@@ -1057,7 +1057,7 @@ mod tests {
 
     #[test]
     fn cached_edge_metadata_preserves_field_precedence_and_extra_boundaries() {
-        use ts_port_tables::FieldMapEntry;
+        use tree_sitter_language::FieldMapEntry;
         let parent = parent(vec![leaf(1, 0, 0), leaf(1, 0, EXTRA), leaf(1, 0, VISIBLE)]);
         let mut iter = iterator(&parent, &[5, 0]);
         iter.inherited_field_id = 7;
@@ -1095,7 +1095,7 @@ mod tests {
     #[test]
     fn cached_fields_follow_hidden_wrappers_but_stop_at_visible_and_extra_nodes() {
         use std::sync::LazyLock;
-        use ts_port_tables::{FieldMapEntry, LanguageTables, MapSlice, SymbolMetadata};
+        use tree_sitter_language::{FieldMapEntry, LanguageTables, MapSlice, SymbolMetadata};
         // Reuse a decoded table fixture without lexing; replace only the edge
         // metadata needed to make inheritance boundaries explicit in this tree.
         static TABLES: LazyLock<LanguageTables> = LazyLock::new(|| {

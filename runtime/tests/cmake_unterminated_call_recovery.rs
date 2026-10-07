@@ -6,7 +6,7 @@
 //! inserted missing delimiters, rather than the reference's top-level ERROR.
 
 use std::ops::Range;
-use ts_port::{InputEdit, Language, ParseOptions, ParseState, Parser, Point};
+use tree_sitter::{InputEdit, Language, ParseOptions, ParseState, Parser, Point};
 
 fn assert_root_error(
     source: &[u8],
@@ -16,7 +16,7 @@ fn assert_root_error(
     expected_progress_calls: usize,
     chunk_size: usize,
 ) {
-    let language = Language::from(ts_port_cmake::language());
+    let language = Language::from(tree_sitter_cmake::language());
     let mut parser = Parser::new();
     parser.set_language(&language).unwrap();
 
@@ -112,7 +112,7 @@ fn assert_incremental_repair_and_undo(
     replacement: &[u8],
     recovery_bytes: Range<usize>,
 ) {
-    let language = Language::from(ts_port_cmake::language());
+    let language = Language::from(tree_sitter_cmake::language());
     let mut parser = Parser::new();
     parser.set_language(&language).unwrap();
     let mut tree = parser.parse(source, None).unwrap();
@@ -242,7 +242,7 @@ fn nul_in_argument_is_recovery_content_not_eof() {
 
 #[test]
 fn canceled_unterminated_calls_resume_with_empty_recovery_content() {
-    let language = Language::from(ts_port_cmake::language());
+    let language = Language::from(tree_sitter_cmake::language());
     for source in [
         &b"message(\n\n\nmessage(\"Additional message\")\n"[..],
         &b"set(var \"\\\n\")\nmessage(\n\n\nmessage(\"Additional message\")\n"[..],

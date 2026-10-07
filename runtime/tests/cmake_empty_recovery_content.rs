@@ -1,7 +1,7 @@
 //! Regression for CMake oracle bucket f5e2762e.
 
 use std::ops::Range;
-use ts_port::{InputEdit, Language, ParseOptions, ParseState, Parser, Point};
+use tree_sitter::{InputEdit, Language, ParseOptions, ParseState, Parser, Point};
 
 fn assert_empty_recovery_content(
     source: &str,
@@ -9,7 +9,7 @@ fn assert_empty_recovery_content(
     end: Point,
     chunk_size: usize,
 ) {
-    let language = Language::from(ts_port_cmake::language());
+    let language = Language::from(tree_sitter_cmake::language());
     let mut parser = Parser::new();
     parser.set_language(&language).unwrap();
 
@@ -172,7 +172,7 @@ fn missing_block_end_retains_header_and_empty_recovery_content() {
 
 #[test]
 fn incremental_repair_and_undo_restore_empty_recovery_content() {
-    let language = Language::from(ts_port_cmake::language());
+    let language = Language::from(tree_sitter_cmake::language());
     for (source, suffix, end, repaired_end) in [
         ("a", "()", Point::new(0, 1), Point::new(0, 3)),
         ("message", "()", Point::new(0, 7), Point::new(0, 9)),
