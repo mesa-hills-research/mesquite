@@ -15,12 +15,14 @@ interfaces. Do not replace an unimplemented dependency with an approximation.
 value types and the input adapters. `api` is the official Rust binding surface,
 implemented as inherent methods on runtime types, and re-exported by `lib.rs`.
 There is no FFI, build script, C compiler, or dependency on the reference runtime.
-Only the host-owned `ts_port_tables` crate is needed.
+Grammar access uses the host-owned `ts_port_tables` crate; queries also use pure-Rust
+`streaming-iterator` and `regex` dependencies.
 
 The official binding subset in the task is exposed, including `LanguageRef`, errors,
 progress options, named/non-named iteration, offsets, editing and incremental
-comparison. Queries, wasm, public lookahead iterators, custom decoder APIs and
-public UTF-16 parsing are out of scope. Internal lookahead iteration **is required**
+comparison. Queries were added in the query skeleton (see the query section below).
+Wasm, public lookahead iterators, custom decoder APIs and public UTF-16 parsing
+are out of scope. Internal lookahead iteration **is required**
 by error recovery and belongs to `language`. The optional public logger is omitted:
 the official logger accepts non-Send captures, incompatible with safe storage in a
 Send parser. An internal Send logger is provided for runtime diagnostics. No unsafe
@@ -231,6 +233,194 @@ invalid UTF-8 text access uses str::Utf8Error. Malformed *source* is parsed into
 error nodes, never converted to a Rust panic. Corrupt internal invariants and
 malformed grammar tables may assert/panic. Allocation failure follows the Rust
 allocator OOM policy, not a silently failed parse. DOT output uses io::Result.
+
+## Queries (0.25.10)
+
+Queries are now in scope. The modules below mirror **all 100 functions** of
+`lib/src/query.c`; each function body is tagged `todo!("query-N: C_name")`.
+`query_api.rs` mirrors the Rust binding rather than the FFI. Compilation, analysis,
+execution and text-predicate evaluation are deliberately **unimplemented** in this
+skeleton: do not replace dependencies with permissive matching approximations.
+
+| Unit | File | Ownership / responsibility |
+|---|---|---|
+| query-1 | `src/query.rs` | Shared types; stream, capture pool, quantifiers, symbol table, steps, analysis helpers, pattern-map search (52 C functions) |
+| query-2 | `src/query_analysis.rs` | Pattern-map insert, parse-table analysis and guaranteed-step inference (3) |
+| query-3 | `src/query_parse.rs` | Negated fields and recursive S-expression/predicate/string parsing (4) |
+| query-4 | `src/query_access.rs` | Compile/finalize/access/disable; cursor initialization, settings, state/capture preparation (33), plus execution scratch handoff |
+| query-5 | `src/query_exec.rs` | Capture, state splitting, descent and the matching state machine (4) |
+| query-6 | `src/query_iter.rs` | Next match/capture, removal and maximum-start-depth setting (4) |
+| query-api | `src/query_api.rs` | Public binding, metadata/predicate validation, streaming/filtering, options and storage adapters |
+
+The five sibling algorithm files are private submodules of `query.rs`, using
+`super::*`; their functions are re-exported inside the crate. Shared representations
+live only in `query.rs`. Avoid cross-unit signature changes without updating every
+caller. Compiler/query state types are crate-private, never part of the binding.
+
+### Compiler and analysis
+
+* `CompiledQuery` is C's TSQuery. The public `Query` owns it in a Box (stable
+  identity for the binding's PartialEq) and separately owns binding metadata.
+  `Language` remains a Copy handle to static host-owned tables. C delete functions
+  consume their owned Rust value; ordinary field Drop handles reclamation. No FFI
+  Drop shim is needed in the public Query/QueryCursor.
+* `Stream` borrows source bytes. `input` is a byte index replacing a pointer;
+  `source.len()` is the end and zero is the start. `stream_reset` accepts that
+  index, **not** a character index. Compiler offsets are u32. Respect the binding's
+  source-length truncation to u32 at compilation, UTF-8 decoder behavior, and C
+  locale `iswspace`/`iswalnum` (ASCII in the oracle), not Rust Unicode classes.
+* `SymbolTable` keeps C's flat bytes and ordered `Slice { offset, length }` entries.
+  Do not replace it with sorted names, a HashMap iteration order, or UTF-8 String
+  indexing. Returned byte slices exclude the NUL terminator; their length replaces
+  C's length out-parameter. Predicate strings may contain embedded NULs. Preserve
+  exact escape decoding and binding UTF-8 conversion/error behavior.
+* Steps, pattern entries, step offsets and predicate steps retain source/insertion
+  order. `PredicateStepKind::Done` terminates each predicate. `QueryErrorCode`
+  distinguishes `None`, `ParentDone` (C's internal -1), and real compiler errors;
+  `QueryCompileError { offset, kind }` is the constructor's error result. Binding
+  Predicate and Language errors, diagnostic rows/columns and messages are query-api.
+* The sentinel NONE and pattern-done marker are **u16::MAX**, not usize::MAX.
+  Steps/capture ids/alternatives and start depths stay u16. Cursor depth, ids, byte
+  offsets and operation counters stay u32. Do not silently remove C truncations.
+  Mask every assignment to the former bitfields: analysis field_id 15 bits,
+  subgraph child_index 7 bits, consumed_capture_count 12 bits. Use explicit
+  wrapping arithmetic where C wraps, including incrementing the 12-bit counter.
+* Quantifiers use the five-value `CaptureQuantifier` enum, not a heuristic flag.
+  Translate the multiplication/join/add tables independently and preserve missing
+  capture entries as Zero. Per-step captures have exactly 3 slots. Negated-field
+  lists are still zero-terminated in the flat field array and obey the limit 8.
+* Predecessor rows have 257 StateId entries: a count followed by at most 256
+  predecessors. Analysis stack depth is 8; analysis iteration cap is 256. Preserve
+  C's incomplete-analysis handling, primary-state tests, alias/supertype and repeat
+  analysis. Reaching a limit must not turn uncertain steps into guaranteed steps.
+* `AnalysisStateSet = Vec<AnalysisState>` replaces uniquely owned C pointers with
+  values. A set clone copies one fixed-depth state; pool operations move values.
+  No pointer identity is observed by C here. Keep the explicit C comparator,
+  lower-bound insertion and deduplication order; deriving Ord would be incorrect.
+  `state_pool`, next/deeper sets and reverse work order remain explicit. Use a
+  local Copy of a state before mutating/reallocating its containing Vec.
+* Out-parameters become results: pattern_map_search returns `(found, index)` even
+  on a miss, analyze_patterns returns `Result<(), error_offset>`, and fallibility,
+  offsets, string/capture accessors and disable operations retain C semantics.
+
+### Execution, pool reuse and output order
+
+C's TSQueryCursor is split to avoid storing borrowed trees/queries/callbacks in a
+lifetime-free public cursor:
+
+* `CursorConfig` persists ranges, timeout duration, maximum start depth, match
+  limit, exceeded-limit flag and idle scratch buffers. `QueryExecution<'query,
+  'tree>` borrows that config and the compiled query, owns a TreeCursor borrowing
+  the tree, owns active/finished states and a typed `CaptureListPool<'tree>`, and
+  owns `QueryCursorOptions<'query>`. The public iterators own this execution.
+* query-4's exec functions construct the borrowed execution instead of mutating a
+  pointer-bearing persistent object. Move/clear idle state Vecs with mem::take.
+  Rebuild pool slots from `config.capture_list_layout`, one saved capacity per
+  previously allocated slot, all reset as C does. QueryExecution::drop records
+  **all** pool slot capacities and moves cleared state Vecs back to config. This
+  deliberately trades allocation reuse across executions for safe node lifetimes;
+  slot count, id order and match-limit behavior must survive execution boundaries.
+  In particular, lowering a limit does not revoke existing free pool slots.
+* Pool slots contain a Vec and `in_use` instead of setting Vec.len to UINT32_MAX.
+  Release retains data/capacity and marks unused; acquire clears it. Keep C's
+  first-free-slot search, free_capture_list_count updates and u16 casts of pool
+  ids/loop bounds, including the distinct u32 QueryState.capture_list_id field.
+  Do not use an unordered free list, a new global capture limit, or eager pruning.
+  `max_capture_list_count` lives in config while idle, copied to the pool by exec.
+* `capture` and `copy_state` take **indices** into states, not references that
+  alias a mutable execution. copy_state returns the inserted index or None, and
+  inserts immediately after the original. `prepare_to_capture` takes a detached
+  local QueryState copy and optional-preserve sentinel u32::MAX; write the state
+  back after its capture operation. Keep steal/dead-state mutations and the
+  protected-original-state rule when splitting; never hold Vec references across
+  insertion. Return `(left_contains_right, right_contains_left)` from compare.
+* `first_in_progress_capture` returns an optional record of index/offset/pattern/
+  definiteness. In next_capture initialize the no-result comparison values to
+  u32::MAX, exactly as C's out-parameters do. Preserve match initiation order,
+  alternative splitting, longest-match pruning and node/capture comparison ties.
+  Do not use Node PartialEq when C compares only `.id`, or vice versa.
+* `QueryMatchData` is an owned **transient** result (id, u16 pattern index, capture
+  Vec). query-6 copies captures before releasing their pool slot. Expose only the
+  prefix selected by C's u16 TSQueryMatch.capture_count truncation. next_capture
+  also returns the selected capture's *position in that list*, not its name id.
+  Output is not pre-collected or sorted: captures can be emitted from unfinished
+  states once definite, while next_match and next_capture have different order.
+* Internal cursor ranges use u32 bytes/Points. End zero means unlimited, invalid
+  start > end rejects without changing the range, and intersections/empty-node
+  tests follow C exactly. Iterator range setters affect the live config.
+* Timeout/progress checks occur at exactly C's 100-operation checkpoints. Keep
+  operation_count, end_clock, ascending/visible/halted flags and callback byte
+  offset updates in the same order; do not call once per returned match. Callbacks
+  borrow the execution, never a 'static payload. No unsafe Send/Sync is needed.
+
+### Binding, text predicates, and borrowed result storage
+
+The crate root exports all query types plus `StreamingIterator` and
+`StreamingIteratorMut` from `streaming-iterator = "0.1.9"`. `regex::bytes::Regex`
+uses the same Unicode/std/perf-capable regex family as the official binding.
+`QueryMatches` yields QueryMatch; `QueryCaptures` yields `(QueryMatch, usize)`.
+Both have mutable streaming get and range setters. TextProvider supports closures
+returning chunk iterators and borrowed byte slices. Text is fetched lazily and
+only concatenated into scratch buffers when it spans chunks.
+
+query-api must translate **both** metadata construction and runtime filtering:
+`eq?`, `not-eq?`, `any-eq?`, `any-not-eq?`, `match?`, `not-match?`, `any-match?`,
+`any-not-match?`, `any-of?`, `not-any-of?`. Store `is_positive` and `match_all_nodes`
+separately, and preserve the binding's empty/missing/repeated-capture truth tables,
+paired-capture iteration and early returns rather than substituting intuitive
+all/any logic. Validate predicate arity/types/regex errors exactly. `set!`, `is?`,
+`is-not?` produce properties; unknown operators remain general predicates and
+are **not** executed automatically. Do not reject them. A text-predicate failure
+skips a match; in captures iteration it also removes that match from the engine.
+
+Two exact public signatures require stable borrowed views that cannot be expressed
+as ordinary self-borrows in owning, lifetime-free structs. The skeleton contains
+no unsafe implementation; query-api owns these **only two** permitted narrowly
+scoped storage adapters, with precise `// SAFETY:` comments required:
+
+1. `CaptureNames` owns boxed strings and a private Box of lifetime-erased &str
+   views. Create the views only after strings have stable heap storage. Never
+   mutate/free strings while views exist, never leak/intern them process-wide,
+   never expose the private 'static lifetime: `capture_names() -> &[&str]` reborrows
+   **both** layers with the Query borrow. Moving a Query moves boxes, not strings.
+2. `CaptureSnapshots` owns boxed immutable capture lists behind a Mutex, in the
+   **persistent public cursor**, not in the iterator. `store` accepts a typed
+   capture Vec and returns a slice with a lifetime bounded by both the arena
+   borrow and the tree. Its private erased lists must never be read as 'static
+   Nodes, inspected in Debug, cloned or otherwise exposed. Only original typed
+   views may access nodes. Reset/free boxes only under `&mut self`, so no returned
+   view can remain live. Dropping Node/QueryCapture does not dereference a tree;
+   it is safe to discard erased storage after the original tree has gone away.
+   A shared Mutex borrow allows appending boxes without moving earlier buffers;
+   no existing list may ever be mutated, and no reference into the outer Vec
+   may escape the lock. No manual thread-trait implementations are needed.
+
+This storage keeps the official `QueryMatch.captures: &'cursor [QueryCapture]`
+and streaming Item lifetimes without a raw mutable cursor alias, dangling
+iterator self-reference, leaked allocations or references to overwritten engine
+buffers. It is stronger than the binding's invalidated-on-advance backing: a caller
+can copy the public slice out of a streamed item, or move an item via get_mut.
+Therefore retain result snapshots until the *next exclusive cursor execution* or
+cursor drop, not merely until advance/iterator drop. The deliberate cost is one
+immutable result snapshot per yielded candidate, additional to the match-limited
+engine pool; do not count it against that pool. Filter before publishing where
+possible. A later optimization may deduplicate immutable snapshots but may not
+weaken these lifetimes or change match/capture order.
+
+`QueryMatch::remove(&self)` records its id in a cursor-owned Mutex queue; drain ids
+through query-6's remove_match **before every engine advancement**, including
+filter/retry loops. This has the same observable effect as immediate C removal
+without an unsafe mutable-cursor alias. Keep removal order and repeated removals.
+Match id access and capture iteration do not advance the engine.
+
+Options callbacks are explicitly tied to the returned iterator's `'query`
+lifetime. This rejects the official binding's unsafe corner case of retaining
+an iterator after a borrowed callback dies, while ordinary with-options callers
+remain source-compatible. Const public getters remain const via a temporary
+const-compatible local todo macro. The capture-node iterator has a named backing
+type, like the runtime's child iterators. Public Drop is automatic rather than a
+stub FFI call. No implementation or query-behavior success is claimed by compiling
+this skeleton; the parse oracle is a regression/build check until stubs are filled.
 
 ## C idioms, safety and performance
 

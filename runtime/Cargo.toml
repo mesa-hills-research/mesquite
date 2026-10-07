@@ -7,3 +7,5 @@ description = "An idiomatic Rust port of the tree-sitter 0.25.10 runtime."
 
 [dependencies]
 ts_port_tables = { path = "../tables" }
+streaming-iterator = "0.1.9"
+regex = "1.11.1"
