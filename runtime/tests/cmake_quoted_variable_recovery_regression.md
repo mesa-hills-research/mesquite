@@ -78,3 +78,18 @@ whole-state deserialization reset, and reran:
 - `cargo clippy -p ts_port_cmake -p ts_port --all-targets -- -D warnings`: passes.
 
 This revalidation changes documentation only; it introduces no C deviations.
+
+## Incremental repair/restore coverage
+
+At starting revision `5d59d52`, the bucket again passed without runtime changes.
+The parser regression now also replaces each malformed quoted variable name
+with a valid underscore-separated name, then restores the malformed name while
+reusing the edited tree. Two repair/restore cycles exercise scanner state reuse;
+the restored tree must match the same C-derived symbol IDs, ranges, flags, and
+flat ERROR children as the initial parse.
+
+Validation: both parser regression tests and all 24 scanner tests pass; the bucket
+passes 4/4, and the full CMake oracle passes 270/270 gate and 9878/9878 fresh
+inputs. Workspace all-targets checking passes (the pre-existing host-owned YAML
+warning remains); all-targets clippy for `ts_port` and `ts_port_cmake` passes with
+`-D warnings`. No runtime changes or new deviations from C were needed.
