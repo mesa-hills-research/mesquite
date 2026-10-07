@@ -22,9 +22,11 @@ bytes. The existing unit test
 `recovery_content_consumes_non_utf8_boms_and_embedded_nuls` covers all four
 encoding layouts, both on creation and after empty-state deserialization.
 The parser-level regression in `cmake_bom_recovery.rs` also checks all four
-complete byte inputs against the reference tree shape, flags, byte/point ranges,
-and progress-callback count. Each is parsed with a fresh scanner and after
-parsing valid bracket arguments and comments to exercise scanner reset.
+complete byte inputs against the reference tree shape, symbol IDs, flags,
+byte/point ranges, and progress-callback count. Each is parsed with a fresh scanner
+and after parsing valid bracket arguments and comments to exercise scanner reset.
+Both whole-buffer reads and 1-, 2-, 3-, and 4-byte chunks are covered, splitting
+BOMs and embedded NUL-containing code units across read boundaries.
 No additional scanner or runtime behavior change is required for this bucket.
 
 ## Verification
@@ -45,3 +47,25 @@ All checks were rerun for this task with the correction already merged:
 
 This follow-up adds parser-level regression coverage: no deviations from C, no
 unsafe code, and no host-owned generated files changed.
+
+## Reverification after merges `6a25441` and `2d1d5ac`
+
+On reassignment of bucket `548436bf`, its four inputs already passed before any
+changes. Rechecked the current read-only C scanner against Rust: zero-initialized
+creation and resetting both fields on invalid-length deserialization still match.
+Reran every verification command above on both merged baselines: bucket 4/4,
+CMake gate 270/270, fresh CMake 9,878/9,878, all 24 scanner tests and the parser BOM
+regression pass. Workspace all-target checking and both targeted strict clippy
+commands also pass, with only the unchanged generated YAML warning during the
+workspace check. No further behavior change or duplicate regression is needed;
+this reassignment records verification of the already committed correction.
+
+## Chunked-input coverage on merged baseline `4047264`
+
+The bucket still passed before changes. Extended the existing parser regression
+with the chunk sizes above and explicit symbol-ID assertions; no scanner/runtime
+behavior changes were needed. Reverification: bucket 4/4, gate 270/270 (including
+incremental and query checks), fresh CMake 9,878/9,878, all 24 scanner tests, and
+the extended BOM regression pass. Workspace all-target checking and targeted
+strict clippy pass; the only workspace warning remains the host-owned YAML lexer
+unused assignment noted above.
