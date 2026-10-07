@@ -332,6 +332,7 @@ fn compare_error_statuses(a: ErrorStatus, b: ErrorStatus) -> ErrorComparison {
     }
 }
 
+#[inline]
 pub(crate) fn ts_parser__version_status(parser: &mut Parser, version: StackVersion) -> ErrorStatus {
     let mut cost = ts_stack_error_cost(&parser.stack, version);
     let is_paused = ts_stack_is_paused(&parser.stack, version);
@@ -1018,7 +1019,6 @@ pub(crate) fn ts_parser__shift(
     }
 }
 
-#[inline]
 pub(crate) fn ts_parser__reduce(
     parser: &mut Parser,
     version: StackVersion,
@@ -1038,80 +1038,94 @@ pub(crate) fn ts_parser__reduce(
     );
     let original_head = (allow_replacement && version_count > 1)
         .then(|| ts_stack_head_snapshot(&parser.stack, version));
-    let popped = if allow_replacement {
-        if count == 0 {
-            ts_stack_pop_count_in_place(&mut parser.stack, 0).map(|children| {
-                (children, ts_stack_state(&parser.stack, version), false)
-            })
-        } else {
-            ts_stack_prepare_reduction(&mut parser.stack, version, count)
-                .map(|(children, state)| (children, state, true))
-        }
-    } else { None };
-    if let Some((mut children, state, retained)) = popped {
+    // The common unary case can keep its unique stack slot as well as the
+    // head. No extras can remain in the child list on this path.
+    if allow_replacement && count == 1 {
         let language = parser.language.unwrap();
-        ts_subtree_array_remove_trailing_extras(&mut children, &mut parser.trailing_extras);
-        let next_state = parser.parse_table_cache.next_state(&language, state, symbol);
-        let parent = ts_subtree_new_node_with(
-            symbol,
-            children,
-            production_id as u32,
-            &language,
-            |data| {
-                if end_of_non_terminal_extra && next_state == state {
-                    data.extra = true;
-                }
-                if is_fragile || version_count > 1 {
-                    data.fragile_left = true;
-                    data.fragile_right = true;
-                    data.parse_state = TS_TREE_STATE_NONE;
-                } else {
-                    data.parse_state = state;
-                }
-                let SubtreePayload::Branch(branch) = &mut data.payload else {
-                    unreachable!("a reduced node has branch data");
-                };
-                branch.dynamic_precedence += dynamic_precedence;
-            },
-        );
-        if retained {
-            ts_stack_replace_reduced_top(&mut parser.stack, version, parent, next_state);
-        } else {
-            ts_stack_push(
-                &mut parser.stack,
-                &mut parser.tree_pool,
-                version,
-                parent,
-                false,
-                next_state,
+        if ts_stack_reduce_unary_for_version(&mut parser.stack, version, |children, state| {
+            parser.trailing_extras.clear();
+            let next_state = parser
+                .parse_table_cache
+                .next_state(&language, state, symbol);
+            let parent = ts_subtree_new_node_with(
+                symbol,
+                children,
+                production_id as u32,
+                &language,
+                |data| {
+                    if end_of_non_terminal_extra && next_state == state {
+                        data.extra = true;
+                    }
+                    if is_fragile || version_count > 1 {
+                        data.fragile_left = true;
+                        data.fragile_right = true;
+                        data.parse_state = TS_TREE_STATE_NONE;
+                    } else {
+                        data.parse_state = state;
+                    }
+                    let SubtreePayload::Branch(branch) = &mut data.payload else {
+                        unreachable!("a reduced node has branch data");
+                    };
+                    branch.dynamic_precedence += dynamic_precedence;
+                },
             );
+            (parent, next_state)
+        })
+        .is_some()
+        {
+            return ts_parser__finish_committed_reduction(parser, version, version_count, original_head);
         }
-        if !parser.trailing_extras.is_empty() {
-            for extra in parser.trailing_extras.drain(..) {
-                ts_stack_push(
-                    &mut parser.stack,
-                    &mut parser.tree_pool,
-                    version,
-                    extra,
-                    false,
-                    next_state,
+    }
+    // A committed reduction on the only active version needs neither a
+    // temporary version nor a slice worklist. Keep this path separate from the
+    // general reduction's grouping, selection, and version-merging machinery.
+    if allow_replacement {
+        let language = parser.language.unwrap();
+        if let Some(next_state) =
+            ts_stack_reduce_many_for_version(&mut parser.stack, version, count, |mut children, state| {
+                ts_subtree_array_remove_trailing_extras(&mut children, &mut parser.trailing_extras);
+                let next_state = parser
+                    .parse_table_cache
+                    .next_state(&language, state, symbol);
+                let parent = ts_subtree_new_node_with(
+                    symbol,
+                    children,
+                    production_id as u32,
+                    &language,
+                    |data| {
+                        if end_of_non_terminal_extra && next_state == state {
+                            data.extra = true;
+                        }
+                        if is_fragile || version_count > 1 {
+                            data.fragile_left = true;
+                            data.fragile_right = true;
+                            data.parse_state = TS_TREE_STATE_NONE;
+                        } else {
+                            data.parse_state = state;
+                        }
+                        let SubtreePayload::Branch(branch) = &mut data.payload else {
+                            unreachable!("a reduced node has branch data");
+                        };
+                        branch.dynamic_precedence += dynamic_precedence;
+                    },
                 );
+                (parent, next_state)
+            })
+        {
+            if !parser.trailing_extras.is_empty() {
+                for extra in parser.trailing_extras.drain(..) {
+                    ts_stack_push(
+                        &mut parser.stack,
+                        &mut parser.tree_pool,
+                        version,
+                        extra,
+                        false,
+                        next_state,
+                    );
+                }
             }
+            return ts_parser__finish_committed_reduction(parser, version, version_count, original_head);
         }
-        for other in 0..version_count {
-            if other != version && ts_stack_merge_contents(
-                &mut parser.stack, &mut parser.tree_pool, other, version,
-            ) {
-                ts_stack_restore_head_snapshot(
-                    &mut parser.stack,
-                    &mut parser.tree_pool,
-                    version,
-                    original_head.expect("merging requires another version"),
-                );
-                return STACK_VERSION_NONE;
-            }
-        }
-        return version;
     }
     ts_parser__reduce_general(
         parser,
@@ -1123,6 +1137,29 @@ pub(crate) fn ts_parser__reduce(
         is_fragile,
         end_of_non_terminal_extra,
     )
+}
+
+#[inline]
+fn ts_parser__finish_committed_reduction(
+    parser: &mut Parser,
+    version: StackVersion,
+    version_count: StackVersion,
+    original_head: Option<StackHeadSnapshot>,
+) -> StackVersion {
+    for other in 0..version_count {
+        if other != version && ts_stack_merge_contents(
+            &mut parser.stack, &mut parser.tree_pool, other, version,
+        ) {
+            ts_stack_restore_head_snapshot(
+                &mut parser.stack,
+                &mut parser.tree_pool,
+                version,
+                original_head.expect("merging requires another version"),
+            );
+            return STACK_VERSION_NONE;
+        }
+    }
+    version
 }
 
 fn ts_parser__reduce_general(
@@ -3061,6 +3098,50 @@ mod parser3_tests {
                     assert_eq!(snapshots[0], snapshots[1]);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn owned_reductions_preserve_head_metadata_like_pop_then_renumber() {
+        let language = reduction_language();
+        let symbol = language.tables.token_count as Symbol;
+        for force_general in [false, true] {
+            let mut parser = ts_parser_new();
+            parser.language = Some(language);
+            if force_general {
+                parser.logger = Some(Box::new(|_, _| {}));
+            }
+            let external = Subtree::Heap(Arc::new(SubtreeHeapData {
+                has_external_tokens: true,
+                children: Vec::new(),
+                payload: SubtreePayload::External(ExternalScannerState::default()),
+                ..SubtreeHeapData::default()
+            }));
+            let head = &mut parser.stack.heads[0];
+            head.last_external_token = external.clone();
+            head.node_count_at_last_error = 17;
+            head.summary = Some(vec![StackSummaryEntry {
+                position: length_zero(), depth: 3, state: 9,
+            }]);
+            for count in [0, 1] {
+                let version = ts_parser__reduce(
+                    &mut parser, 0, symbol, count, -3, 0, false, false, !force_general,
+                );
+                assert_eq!(version, u32::from(force_general));
+                ts_stack_renumber_version(&mut parser.stack, &mut parser.tree_pool, version, 0);
+                assert_eq!(parser.stack.heads.len(), 1);
+                let head = &parser.stack.heads[0];
+                assert_eq!(head.status, StackStatus::Active);
+                assert_eq!(head.node_count_at_last_error, 17);
+                assert!(head.last_external_token.ptr_eq(&external));
+                assert!(head.lookahead_when_paused.is_null());
+                let summary = head.summary.as_ref().unwrap();
+                assert_eq!(summary.len(), 1);
+                assert_eq!(summary[0].depth, 3);
+                assert_eq!(summary[0].state, 9);
+                assert_eq!(summary[0].position, length_zero());
+            }
+            ts_parser_reset(&mut parser);
         }
     }
 
