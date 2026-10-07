@@ -1,7 +1,7 @@
 # CMake quoted-variable recovery verification (bucket `1b5a6fb7`)
 
-All four reported inputs already pass at the starting revision `eb946ad`
-(superseding the previous verification at `d14c3c2`):
+All four reported inputs already pass at the starting revision `6f25876`
+(superseding the previous verification at `eb946ad`):
 
 - `Tests/RunCMake/Syntax/NameWithTabsQuoted.cmake`
 - `Tests/RunCMake/Syntax/NameWithSpacesQuoted.cmake`
@@ -48,7 +48,9 @@ parser API, independent of the external fixture checkout:
 
 ## Latest verification
 
-Rechecked the Rust scanner against the current C source and reran at `eb946ad`:
+Rechecked the Rust scanner against the current C source and reran at `6f25876`
+(all results below were rerun on this checkout, not inherited from the earlier
+verification):
 
 - `run_oracle(inputs = "bucket:1b5a6fb7")`: **4/4 pass**, queries enabled.
 - `run_oracle(inputs = "all", languages = "cmake")`:
