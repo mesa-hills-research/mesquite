@@ -79,7 +79,7 @@ Bucket `548436bf` was already resolved when reassigned on baselines `ddcce0a`,
 `8c603d1`, `97aa08a`, `70eab23`, `ea0053e`, `72cb09d`, `e883860`, `a598c22`,
 `2bcb268`, `1e6ec2a`, `2ead51c`, `1268323`, `8c4d5fb`, `8a2cdca`, `3a38d3e`,
 `4c3758c`, `4d0a266`, `dcc0a89`, `2d40993`, `6e798ee`, `1956ccc`, `a20caec`,
-`2e86cef`, `1f446eb`, and `b077d3c`.
+`2e86cef`, `1f446eb`, `b077d3c`, and `2ff8b31`.
 Compared scanner creation, reset, and bracket-content scanning against the current
 C source;
 the merged implementation still matches, including consuming embedded NULs until
@@ -91,6 +91,7 @@ is unchanged. This verification-only follow-up adds no behavior changes or dupli
 tests; the existing correction and regressions already cover the assigned inputs.
 
 On baselines `3a38d3e`, `6e798ee`, `1956ccc`, `a20caec`, `2e86cef`, `1f446eb`,
-and `b077d3c`, verification also included the full runtime and CMake scanner test suites (`cargo test -p ts_port_cmake -p ts_port`) and strict clippy
+`b077d3c`, and `2ff8b31`, verification also included the full runtime and CMake
+scanner test suites (`cargo test -p ts_port_cmake -p ts_port`) and strict clippy
 for all targets in both packages (`cargo clippy -p ts_port_cmake -p ts_port
 --all-targets -- -D warnings`); both passed.
