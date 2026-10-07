@@ -24,6 +24,9 @@ pub(crate) struct LexerState {
     pub included_ranges: Vec<Range>,
     pub encoding: InputEncoding,
     pub current_included_range_index: u32,
+    // End of the current nonempty range, or zero at EOF. Avoid looking up the
+    // range in its Vec on every character; refresh only on jumps and reads.
+    current_range_end: u32,
     pub chunk_start: u32,
     pub chunk_size: u32,
     pub lookahead_size: u32,
@@ -95,6 +98,7 @@ pub(crate) fn ts_lexer__clear_chunk(lexer: &mut LexerState) {
     lexer.chunk_start = 0;
 }
 
+#[inline(never)]
 pub(crate) fn ts_lexer__get_chunk(lexer: &mut Lexer<'_>) {
     lexer.state.chunk_start = lexer.state.current_position.bytes;
     lexer.input.read(
@@ -104,9 +108,11 @@ pub(crate) fn ts_lexer__get_chunk(lexer: &mut Lexer<'_>) {
     lexer.state.chunk_size = lexer.input.chunk().len() as u32;
     if lexer.state.chunk_size == 0 {
         lexer.state.current_included_range_index = lexer.state.included_ranges.len() as u32;
+        lexer.state.current_range_end = 0;
     }
 }
 
+#[inline(always)]
 pub(crate) fn ts_lexer__get_lookahead(lexer: &mut Lexer<'_>) {
     let position_in_chunk = lexer
         .state
@@ -120,20 +126,43 @@ pub(crate) fn ts_lexer__get_lookahead(lexer: &mut Lexer<'_>) {
         return;
     }
 
-    let decode = match lexer.state.encoding {
-        InputEncoding::Utf8 => ts_decode_utf8,
-        InputEncoding::Utf16Le => ts_decode_utf16_le,
-        InputEncoding::Utf16Be => ts_decode_utf16_be,
-    };
-    (lexer.state.lookahead_size, lexer.state.lookahead) =
-        decode(&lexer.input.chunk()[position_in_chunk as usize..lexer.state.chunk_size as usize]);
+    let chunk = &lexer.input.chunk()
+        [position_in_chunk as usize..lexer.state.chunk_size as usize];
+    if lexer.state.encoding == InputEncoding::Utf8 && chunk[0].is_ascii() {
+        lexer.state.lookahead_size = 1;
+        lexer.state.lookahead = i32::from(chunk[0]);
+        return;
+    }
 
+    (lexer.state.lookahead_size, lexer.state.lookahead) =
+        decode_lookahead(lexer.state.encoding, chunk);
+    if lexer.state.lookahead == DECODE_ERROR {
+        finish_lookahead_error(lexer, size);
+    }
+}
+
+// Keep Unicode validation and chunk-boundary retries out of the ASCII path.
+// Direct calls avoid selecting and calling a decoder function pointer.
+#[inline(never)]
+fn decode_lookahead(encoding: InputEncoding, chunk: &[u8]) -> (u32, i32) {
+    match encoding {
+        InputEncoding::Utf8 => ts_decode_utf8(chunk),
+        InputEncoding::Utf16Le => ts_decode_utf16_le(chunk),
+        InputEncoding::Utf16Be => ts_decode_utf16_be(chunk),
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn finish_lookahead_error(lexer: &mut Lexer<'_>, size: u32) {
     // Retry every decoding error near a chunk boundary, not just incomplete
     // sequences: the read callback may supply more bytes at this position.
-    if lexer.state.lookahead == DECODE_ERROR && size < 4 {
+    if size < 4 {
         ts_lexer__get_chunk(lexer);
-        (lexer.state.lookahead_size, lexer.state.lookahead) =
-            decode(&lexer.input.chunk()[..lexer.state.chunk_size as usize]);
+        (lexer.state.lookahead_size, lexer.state.lookahead) = decode_lookahead(
+            lexer.state.encoding,
+            &lexer.input.chunk()[..lexer.state.chunk_size as usize],
+        );
     }
     if lexer.state.lookahead == DECODE_ERROR {
         lexer.state.lookahead_size = 1;
@@ -156,6 +185,7 @@ pub(crate) fn ts_lexer_goto(lexer: &mut LexerState, position: Length) {
                 };
             }
             lexer.current_included_range_index = i as u32;
+            lexer.current_range_end = range.end_byte;
             found_included_range = true;
             break;
         }
@@ -172,6 +202,7 @@ pub(crate) fn ts_lexer_goto(lexer: &mut LexerState, position: Length) {
         lexer.lookahead = 0;
     } else {
         lexer.current_included_range_index = lexer.included_ranges.len() as u32;
+        lexer.current_range_end = 0;
         // Initialization and set_included_ranges always install at least one
         // range, even when the caller supplies an empty list.
         let last = lexer
@@ -188,6 +219,7 @@ pub(crate) fn ts_lexer_goto(lexer: &mut LexerState, position: Length) {
     }
 }
 
+#[inline(always)]
 pub(crate) fn ts_lexer__do_advance(lexer: &mut Lexer<'_>, skip: bool) {
     let state = &mut *lexer.state;
     if state.lookahead_size != 0 {
@@ -212,12 +244,38 @@ pub(crate) fn ts_lexer__do_advance(lexer: &mut Lexer<'_>, skip: bool) {
             .wrapping_add(state.lookahead_size);
     }
 
+    if state.current_position.bytes >= state.current_range_end && !advance_range(state) {
+        if skip {
+            state.token_start_position = state.current_position;
+        }
+        ts_lexer__clear_chunk(state);
+        state.lookahead = 0;
+        state.lookahead_size = 1;
+        return;
+    }
+
+    if skip {
+        state.token_start_position = state.current_position;
+    }
+    if state.current_position.bytes < state.chunk_start
+        || state.current_position.bytes >= state.chunk_start.wrapping_add(state.chunk_size)
+    {
+        ts_lexer__get_chunk(lexer);
+    }
+    ts_lexer__get_lookahead(lexer);
+}
+
+// A range transition is rare compared with advancing within a range. Keep the
+// C loop (including empty ranges and their end positions) on this slow path.
+#[inline(never)]
+fn advance_range(state: &mut LexerState) -> bool {
     while let Some(range) = state
         .included_ranges
         .get(state.current_included_range_index as usize)
     {
         if state.current_position.bytes < range.end_byte && range.end_byte != range.start_byte {
-            break;
+            state.current_range_end = range.end_byte;
+            return true;
         }
         state.current_included_range_index += 1;
         if let Some(next) = state
@@ -228,46 +286,37 @@ pub(crate) fn ts_lexer__do_advance(lexer: &mut Lexer<'_>, skip: bool) {
                 bytes: next.start_byte,
                 extent: next.start_point,
             };
-        } else {
-            break;
         }
     }
-
-    if skip {
-        state.token_start_position = state.current_position;
-    }
-
-    if !ts_lexer__eof(state) {
-        if state.current_position.bytes < state.chunk_start
-            || state.current_position.bytes >= state.chunk_start.wrapping_add(state.chunk_size)
-        {
-            ts_lexer__get_chunk(lexer);
-        }
-        ts_lexer__get_lookahead(lexer);
-    } else {
-        ts_lexer__clear_chunk(state);
-        state.lookahead = 0;
-        state.lookahead_size = 1;
-    }
+    state.current_range_end = 0;
+    false
 }
 
+#[inline]
 pub(crate) fn ts_lexer__advance(lexer: &mut Lexer<'_>, skip: bool) {
     if lexer.state.chunk_size == 0 {
         return;
     }
     if lexer.logger.is_some() {
-        let message = if skip { "skip" } else { "consume" };
-        let character = lexer.state.lookahead;
-        if (32..127).contains(&character) {
-            ts_lexer__log(
-                lexer,
-                format_args!("{message} character:'{}'", character as u8 as char),
-            );
-        } else {
-            ts_lexer__log(lexer, format_args!("{message} character:{character}"));
-        }
+        log_advance(lexer, skip);
     }
     ts_lexer__do_advance(lexer, skip);
+}
+
+// Keep formatting and logger dispatch out of the per-character hot path.
+#[cold]
+#[inline(never)]
+fn log_advance(lexer: &mut Lexer<'_>, skip: bool) {
+    let message = if skip { "skip" } else { "consume" };
+    let character = lexer.state.lookahead;
+    if (32..127).contains(&character) {
+        ts_lexer__log(
+            lexer,
+            format_args!("{message} character:'{}'", character as u8 as char),
+        );
+    } else {
+        ts_lexer__log(lexer, format_args!("{message} character:{character}"));
+    }
 }
 
 pub(crate) fn ts_lexer__mark_end(lexer: &mut LexerState) {
