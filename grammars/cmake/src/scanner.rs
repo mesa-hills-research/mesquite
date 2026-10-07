@@ -241,6 +241,31 @@ mod tests {
         Symbol(u16),
     }
 
+    #[test]
+    fn recovery_content_preserves_callback_order_before_and_after_reset() {
+        let mut scanner = create();
+        for reset in [false, true] {
+            if reset {
+                // The previous scan left the token at BRACKET_ARGUMENT_CONTENT.
+                scanner.deserialize(&[]);
+            }
+            let mut lexer = TestLexer::new(")\n");
+            assert!(scanner.scan(&mut lexer, &[true; 7]));
+            assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
+            assert_eq!(lexer.end, Some(2));
+            assert_eq!(
+                lexer.events,
+                [
+                    Event::Advance(0, false),
+                    Event::MarkEnd(1),
+                    Event::Advance(1, false),
+                    Event::MarkEnd(2),
+                    Event::Symbol(BRACKET_ARGUMENT_CONTENT as u16),
+                ]
+            );
+        }
+    }
+
     struct TestLexer {
         input: Vec<i32>,
         position: usize,
@@ -322,6 +347,42 @@ mod tests {
         assert!(scanner.scan(&mut lexer, &[true; 7]));
         assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
         assert_eq!(lexer.end, Some(5));
+    }
+
+    #[test]
+    fn recovery_content_keeps_multiline_error_ranges_through_eof() {
+        // Recovery can start after an identifier or at the beginning of a
+        // non-CMake file. The content token includes the final newline, so the
+        // enclosing ERROR ends at EOF rather than at the last nonblank byte.
+        for (input, start) in [
+            (
+                "Usage: .*/cmake -E \\[command\\] \\[arguments \\.\\.\\.\\]\nAvailable commands:\n",
+                5,
+            ),
+            (
+                ".*Properties for TARGET rot13:.*\n.*rot13.SOURCES = \"rot13.c;rot13.h\".*\n",
+                0,
+            ),
+        ] {
+            let mut scanner = create();
+            for _ in 0..2 {
+                let mut lexer = TestLexer::new(input);
+                lexer.position = start;
+                assert!(scanner.scan(&mut lexer, &[true; 7]));
+                assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
+                assert_eq!(lexer.position, input.len());
+                assert_eq!(lexer.end, Some(input.len()));
+                assert_eq!(
+                    &lexer.events[lexer.events.len() - 3..],
+                    &[
+                        Event::Advance(input.len() - 1, false),
+                        Event::MarkEnd(input.len()),
+                        Event::Symbol(BRACKET_ARGUMENT_CONTENT as u16),
+                    ]
+                );
+                scanner.deserialize(&[]);
+            }
+        }
     }
 
     #[test]
