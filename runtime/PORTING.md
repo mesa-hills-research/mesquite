@@ -115,6 +115,13 @@ Ownership rules for signatures:
 State comparison is byte equality with length checks, not allocation identity.
 Copying long immutable scanner snapshots shares bytes safely.
 
+Leaf construction keeps the inline case separate from the heap allocator. The
+`ts_subtree_new_leaf_with` initializer runs only for heap leaves, before sharing
+the header, to install serialized external-scanner state without an immediate
+COW check. Never use this heap-only initializer to mutate inline-leaf metadata.
+The release entry point similarly dispatches heap handles to the existing
+worklist/pool algorithm; null and inline releases do not clear pool scratch.
+
 ## Graph-structured stack
 
 The stack is a parser-local arena. `StackNodeId(usize)` indexes
@@ -250,9 +257,14 @@ pending entry records its depth and child index; the cursor maintains a path to
 the current node. On cancellation, drop the borrows and keep only that path in
 `Parser.balance_path`. On resumption, reconstruct the pending left siblings along
 the path without repeating progress checks or processing completed ancestors.
-New branch headers are summarized before wrapping them in `Arc`; subsequent
-re-summarization still uses normal COW mutation. Unambiguous reductions also finish
-parse-state, fragility, and precedence initialization before sharing the header.
+New branches compute a non-owning `ChildSummary` over the borrowed child slice
+before constructing the droppable `SubtreeHeapData` header and wrapping it in
+`Arc`. This keeps header initialization out of the summary loop. Subsequent
+re-summarization uses the same helper and normal COW mutation; it must seed the
+accumulator with the old padding, size, first-leaf data, fragility and parse state
+because C preserves or consults these values in empty/first-child cases.
+Unambiguous reductions also finish parse-state, fragility, and precedence
+initialization before sharing the header.
 For ambiguous reductions, compare alternative child summaries **before** adding
 the action's dynamic precedence; initialize the selected parent only afterwards.
 
