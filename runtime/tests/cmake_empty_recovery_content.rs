@@ -5,7 +5,7 @@ use ts_port::{Language, ParseOptions, ParseState, Parser, Point};
 
 fn assert_empty_recovery_content(
     source: &str,
-    prefix: &[(&str, Range<usize>)],
+    prefix: &[(&str, Range<usize>, usize)],
     end: Point,
     chunk_size: usize,
 ) {
@@ -59,13 +59,13 @@ fn assert_empty_recovery_content(
         assert_eq!(error.child_count(), prefix.len() + 1);
         assert_eq!(error.named_child_count(), 2);
 
-        for (index, (kind, bytes)) in prefix.iter().enumerate() {
+        for (index, (kind, bytes, child_count)) in prefix.iter().enumerate() {
             let child = error.child(index).unwrap();
             assert_eq!(child.kind(), *kind);
             assert_eq!(child.byte_range(), *bytes);
             assert_eq!(child.start_position(), Point::new(0, bytes.start));
             assert_eq!(child.end_position(), Point::new(0, bytes.end));
-            assert_eq!(child.child_count(), 0);
+            assert_eq!(child.child_count(), *child_count);
         }
 
         let content = error.child(prefix.len()).unwrap();
@@ -116,7 +116,7 @@ fn incomplete_commands_retain_zero_width_content_at_eof() {
         for chunk_size in [source.len(), 1] {
             assert_empty_recovery_content(
                 source,
-                &[("identifier", 0..source.len())],
+                &[("identifier", 0..source.len(), 0)],
                 Point::new(0, source.len()),
                 chunk_size,
             );
@@ -140,7 +140,32 @@ fn incomplete_if_skips_trailing_whitespace_before_empty_content() {
         // Byte-at-a-time reads split CRLF and trailing whitespace across
         // chunks: the empty token must still start at the true EOF position.
         for chunk_size in [source.len(), 1] {
-            assert_empty_recovery_content(source, &[("if", 0..2), ("(", 2..3)], end, chunk_size);
+            assert_empty_recovery_content(
+                source,
+                &[("if", 0..2, 0), ("(", 2..3, 0)],
+                end,
+                chunk_size,
+            );
+        }
+    }
+}
+
+#[test]
+fn missing_block_end_retains_header_and_empty_recovery_content() {
+    // Unlike an unfinished command, these headers have already reduced to
+    // complete command nodes. Recovery must preserve them as siblings of the
+    // empty scanner token, rather than insert a missing endblock/endwhile.
+    for (source, header, header_children) in [
+        ("block()\n", "block_command", 3),
+        ("while(a)\n", "while_command", 4),
+    ] {
+        for chunk_size in [source.len(), 1] {
+            assert_empty_recovery_content(
+                source,
+                &[(header, 0..source.len() - 1, header_children)],
+                Point::new(1, 0),
+                chunk_size,
+            );
         }
     }
 }
