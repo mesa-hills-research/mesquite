@@ -305,8 +305,9 @@ mod tests {
 
         // Recovery enables every external symbol. C's zero token allows a
         // content token even when there has not been an opening bracket.
-        // Embedded NULs remain content rather than being mistaken for EOF.
-        for input in ["text\\\0\nmore", "", "text", "text\\\0\nmore"] {
+        // Embedded NULs remain content rather than being mistaken for EOF,
+        // including when recovery starts at a backslash immediately before one.
+        for input in ["text\\\0\nmore", "", "text", "\\\0\nmore", "\0", "\0more"] {
             let mut lexer = TestLexer::new(input);
             assert!(scanner.scan(&mut lexer, &[true; 7]));
             assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
