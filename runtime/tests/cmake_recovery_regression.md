@@ -73,3 +73,30 @@ Checks rerun for this bucket:
 - `cargo clippy -p ts_port_cmake --all-targets -- -D warnings`: passes.
 
 This verification adds no C deviations, unsafe code, or generated-file changes.
+
+## Empty recovery-content bucket `f5e2762e`
+
+Reverified at `45453af`: all 16 reported inputs already pass. The merged scanner
+initialization/reset correction above allows `bracket_argument_content` at EOF
+without an opener, including after `a` and after skipping the newline in `if(\n`.
+This zero-width token is a real scanner token, not an inserted missing node.
+No additional scanner or runtime behavior change is necessary.
+
+The existing `cmake_empty_recovery_content` integration tests assert the complete
+small recovery trees, content ranges and flags, and zero progress-callback calls,
+both with fresh scanners and after parsing bracket arguments/comments. Scanner
+unit tests additionally check the EOF callback order and snapshot reset behavior.
+
+Checks rerun for this bucket:
+
+- `run_oracle(inputs = "bucket:f5e2762e")`: 16/16 pass.
+- `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs
+  (including incremental and query checks), and 9878/9878 fresh inputs pass.
+- `cargo check --workspace --all-targets`: passes with the pre-existing warning
+  in host-owned `grammars/yaml/src/lex.rs:20` noted above.
+- `cargo test -p ts_port_cmake`: 24 tests pass.
+- `cargo test -p ts_port --test cmake_empty_recovery_content`: 2 tests pass.
+- `cargo clippy -p ts_port_cmake -p ts_port --all-targets -- -D warnings`: passes.
+
+This follow-up only records verification; it adds no C deviations, unsafe code,
+or generated-file changes.
