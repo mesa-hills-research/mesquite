@@ -152,18 +152,24 @@ view, replacing void* payloads. Pop-error captures `&mut bool`; summary captures
 `SummarizeStackSession`; callbacks inspect predecessor nodes through the arena.
 Order of links, versions, slices and summaries is semantically important.
 
-For a sole reduce action on the sole active version, the parser may fuse the pop
-with the immediately following replacement of the original head.
-`ts_stack_pop_count_in_place` first verifies that every removed node is uniquely
-owned and has one predecessor; failure leaves the stack untouched for the normal
-traversal. On success it moves child handles into the slice and transfers the
-last predecessor reference back to head 0, avoiding transient retains, a second
-head, and the subsequent release walk. This committed path returns its child Vec
-directly, without constructing a slice worklist; the parser builds and pushes
-its one parent separately from the general grouping/merging reduction. Preserve
-the head's scanner token, error
-baseline and summary. Never use this path for speculative reductions or multiple
-actions/versions: those still need the original head for alternatives and merges.
+For a sole reduce action, the parser may fuse an entirely unique, single-link
+prefix with replacement of its original head, including when other versions are
+active. `ts_stack_reduce_unary_for_version` and `ts_stack_reduce_many_for_version`
+preflight ownership before mutation, move children into a construction callback,
+and keep the last removed arena slot and its predecessor edge for the parent.
+A zero-child reduction instead adds a new slot. Shared/branching prefixes and
+speculative actions retain the ordinary pop/group/merge algorithm.
+
+With multiple versions, preserve C's fragile-parent marking and temporary-version
+limit (including the halted-version allowance), despite not creating a temporary
+head. After construction, try merges with every other original version in index
+order, excluding the source. On success, merge links without removing the source:
+advance must still halt that original version. Restore its original scalar header
+and null-link status first, because scheduling reads its position and recovery can
+inspect even a halted version's error status before condensation removes it. Its
+consumed subtree links are no longer traversed. Preserve scanner token, error
+baseline, and summary throughout. Only a sole reduce action may use this path;
+a speculative alternative must still have its original stack intact.
 
 ## Parser, input, lexer, scanner and progress
 

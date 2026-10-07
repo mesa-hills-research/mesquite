@@ -745,7 +745,11 @@ pub(crate) fn ts_stack_head_snapshot(stack: &Stack, version: StackVersion) -> St
         error_cost: node.error_cost,
         node_count: node.node_count,
         dynamic_precedence: node.dynamic_precedence,
-        null_link: node.links.first.as_ref().is_none_or(|link| link.subtree.is_null()),
+        null_link: node
+            .links
+            .first
+            .as_ref()
+            .is_none_or(|link| link.subtree.is_null()),
     }
 }
 
@@ -780,7 +784,9 @@ pub(crate) fn ts_stack_reduce_unary(
     stack: &mut Stack,
     build: impl FnOnce(Vec<Subtree>, StateId) -> (Subtree, StateId),
 ) -> Option<StateId> {
-    if stack.heads.len() != 1 { return None; }
+    if stack.heads.len() != 1 {
+        return None;
+    }
     ts_stack_reduce_unary_for_version(stack, 0, build)
 }
 
@@ -861,7 +867,9 @@ pub(crate) fn ts_stack_reduce_many(
     count: u32,
     build: impl FnOnce(Vec<Subtree>, StateId) -> (Subtree, StateId),
 ) -> Option<StateId> {
-    if stack.heads.len() != 1 { return None; }
+    if stack.heads.len() != 1 {
+        return None;
+    }
     ts_stack_reduce_many_for_version(stack, 0, count, build)
 }
 
@@ -1259,7 +1267,9 @@ pub(crate) fn ts_stack_merge(
     if ts_stack_merge_contents(stack, pool, version1, version2) {
         ts_stack_remove_version(stack, pool, version2);
         true
-    } else { false }
+    } else {
+        false
+    }
 }
 
 pub(crate) fn ts_stack_merge_contents(
