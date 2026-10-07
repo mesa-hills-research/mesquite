@@ -42,6 +42,8 @@ const ALPHA: u8 = 2;
 const DIGIT: u8 = 4;
 const CONCAT_END: u8 = 8;
 const IDENTIFIER: u8 = 16;
+const SPECIAL_VARIABLE: u8 = 32;
+const TEST_PUNCTUATION: u8 = 64;
 
 // C-locale classes shared by the token tests at each input position.
 fn character_class(c: i32) -> u8 {
@@ -63,6 +65,12 @@ fn character_class(c: i32) -> u8 {
             }
             if c == 0x5f {
                 classes[c] |= IDENTIFIER;
+            }
+            if matches!(c, 0x2a | 0x40 | 0x3f | 0x2d | 0x30 | 0x5f) {
+                classes[c] |= SPECIAL_VARIABLE;
+            }
+            if matches!(c, 0x5c | 0x2d | 0x0a | 0x24) {
+                classes[c] |= TEST_PUNCTUATION;
             }
             c += 1;
         }
@@ -115,6 +123,15 @@ impl<'a> ScannerLexer<'a> {
         self.class & (ALPHA | DIGIT) != 0
     }
 
+    // Called after skip_whitespace::<false>. Other characters, including a
+    // newline that the grammar wants to keep, do nothing in the test block.
+    #[inline(always)]
+    fn starts_test_punctuation(&self, valid: &ValidSymbols) -> bool {
+        self.class & TEST_PUNCTUATION != 0
+            && (self.lookahead != 0x0a || !valid[NEWLINE])
+            && (self.lookahead != 0x24 || (valid[BARE_DOLLAR] && !valid[ERROR_RECOVERY]))
+    }
+
     // Commit the cache once per unconditional run, not once per character.
     fn skip_whitespace<const NEWLINES: bool>(&mut self) {
         if !self.is_space() || (!NEWLINES && self.lookahead == 0x0a) {
@@ -131,14 +148,38 @@ impl<'a> ScannerLexer<'a> {
         self.class = character_class(c);
     }
 
-    // After the numeric prefix, later digits cannot make a name numeric again.
+    // Most attempts begin with a name, not a number. Keep numeric-prefix
+    // handling out of this loop so it does not carry numeric state or the
+    // digit-loop setup through every ordinary identifier character.
     #[inline(always)]
     fn scan_identifier(&mut self) -> Option<bool> {
-        let mut c = self.lookahead;
+        let mut c;
         let mut class = self.class;
         if class & IDENTIFIER == 0 {
             return None;
         }
+        if class & DIGIT != 0 {
+            return Some(self.scan_numeric_identifier());
+        }
+        loop {
+            self.inner.advance(false);
+            c = self.inner.lookahead();
+            class = character_class(c);
+            if class & IDENTIFIER == 0 {
+                break;
+            }
+        }
+        self.lookahead = c;
+        self.class = class;
+        Some(false)
+    }
+
+    // After the numeric prefix, later digits cannot make a name numeric again.
+    #[cold]
+    #[inline(never)]
+    fn scan_numeric_identifier(&mut self) -> bool {
+        let mut c = self.lookahead;
+        let mut class = self.class;
         while class & DIGIT != 0 {
             self.inner.advance(false);
             c = self.inner.lookahead();
@@ -152,7 +193,7 @@ impl<'a> ScannerLexer<'a> {
         }
         self.lookahead = c;
         self.class = class;
-        Some(is_number)
+        is_number
     }
 
     fn mark_end(&mut self) {
@@ -554,61 +595,13 @@ impl Scanner {
 
         if valid[TEST_OPERATOR] && !valid[EXPANSION_WORD] {
             lexer.skip_whitespace::<false>();
-            if lexer.lookahead() == i32::from(b'\\') {
-                if valid[EXTGLOB_PATTERN] {
-                    return self.scan_extglob_pattern(lexer, valid);
-                }
-                if valid[REGEX_NO_SPACE] {
-                    return self.scan_regex(lexer, valid);
-                }
-                skip(lexer);
-                if lexer.eof() {
-                    return false;
-                }
-                if lexer.lookahead() == i32::from(b'\r') {
-                    skip(lexer);
-                    if lexer.lookahead() == i32::from(b'\n') {
-                        skip(lexer);
-                    }
-                } else if lexer.lookahead() == i32::from(b'\n') {
-                    skip(lexer);
-                } else {
-                    return false;
-                }
-                lexer.skip_whitespace::<true>();
-            }
-            if lexer.lookahead() == i32::from(b'\n') && !valid[NEWLINE] {
-                skip(lexer);
-                lexer.skip_whitespace::<true>();
-            }
-            if lexer.lookahead() == i32::from(b'-') {
-                advance(lexer);
-                let mut advanced_once = false;
-                while lexer.is_alpha() {
-                    advanced_once = true;
-                    advance(lexer);
-                }
-                if lexer.is_space() && advanced_once {
-                    lexer.mark_end();
-                    advance(lexer);
-                    if lexer.lookahead() == i32::from(b'}') && valid[CLOSING_BRACE] {
-                        if valid[EXPANSION_WORD] {
-                            lexer.mark_end();
-                            lexer.set_result_symbol(EXPANSION_WORD as u16);
-                            return true;
-                        }
-                        return false;
-                    }
-                    lexer.set_result_symbol(TEST_OPERATOR as u16);
-                    return true;
-                }
-                if lexer.is_space() && valid[EXTGLOB_PATTERN] {
-                    lexer.set_result_symbol(EXTGLOB_PATTERN as u16);
-                    return true;
-                }
-            }
-            if valid[BARE_DOLLAR] && !valid[ERROR_RECOVERY] && scan_bare_dollar(lexer) {
-                return true;
+            // After non-newline whitespace, only these four punctuation
+            // cases can advance or emit a token. All other characters are
+            // a no-op in the test-operator block.
+            if lexer.starts_test_punctuation(valid)
+                && let Some(result) = self.scan_test_punctuation(lexer, valid)
+            {
+                return result;
             }
         }
 
@@ -645,9 +638,7 @@ impl Scanner {
                 }
             }
 
-            if !valid[EXPANSION_WORD]
-                && matches!(lexer.lookahead(), 0x2a | 0x40 | 0x3f | 0x2d | 0x30 | 0x5f)
-            {
+            if !valid[EXPANSION_WORD] && lexer.class & SPECIAL_VARIABLE != 0 {
                 lexer.mark_end();
                 advance(lexer);
                 if matches!(
@@ -738,6 +729,75 @@ impl Scanner {
             return true;
         }
         self.scan_regex(lexer, valid)
+    }
+}
+
+impl Scanner {
+    // None falls through to the following token handlers, including after
+    // speculative advances. Some(false) must still stop the entire scan.
+    #[cold]
+    fn scan_test_punctuation(
+        &mut self,
+        lexer: &mut ScannerLexer<'_>,
+        valid: &ValidSymbols,
+    ) -> Option<bool> {
+        if lexer.lookahead() == i32::from(b'\\') {
+            if valid[EXTGLOB_PATTERN] {
+                return Some(self.scan_extglob_pattern(lexer, valid));
+            }
+            if valid[REGEX_NO_SPACE] {
+                return Some(self.scan_regex(lexer, valid));
+            }
+            skip(lexer);
+            if lexer.eof() {
+                return Some(false);
+            }
+            if lexer.lookahead() == i32::from(b'\r') {
+                skip(lexer);
+                if lexer.lookahead() == i32::from(b'\n') {
+                    skip(lexer);
+                }
+            } else if lexer.lookahead() == i32::from(b'\n') {
+                skip(lexer);
+            } else {
+                return Some(false);
+            }
+            lexer.skip_whitespace::<true>();
+        }
+        if lexer.lookahead() == i32::from(b'\n') && !valid[NEWLINE] {
+            skip(lexer);
+            lexer.skip_whitespace::<true>();
+        }
+        if lexer.lookahead() == i32::from(b'-') {
+            advance(lexer);
+            let mut advanced_once = false;
+            while lexer.is_alpha() {
+                advanced_once = true;
+                advance(lexer);
+            }
+            if lexer.is_space() && advanced_once {
+                lexer.mark_end();
+                advance(lexer);
+                if lexer.lookahead() == i32::from(b'}') && valid[CLOSING_BRACE] {
+                    if valid[EXPANSION_WORD] {
+                        lexer.mark_end();
+                        lexer.set_result_symbol(EXPANSION_WORD as u16);
+                        return Some(true);
+                    }
+                    return Some(false);
+                }
+                lexer.set_result_symbol(TEST_OPERATOR as u16);
+                return Some(true);
+            }
+            if lexer.is_space() && valid[EXTGLOB_PATTERN] {
+                lexer.set_result_symbol(EXTGLOB_PATTERN as u16);
+                return Some(true);
+            }
+        }
+        if valid[BARE_DOLLAR] && !valid[ERROR_RECOVERY] && scan_bare_dollar(lexer) {
+            return Some(true);
+        }
+        None
     }
 }
 
@@ -1450,6 +1510,14 @@ mod tests {
                 is_alpha(c) || is_digit(c) || c == 0x5f
             );
             assert_eq!(
+                class & TEST_PUNCTUATION != 0,
+                matches!(c, 0x5c | 0x2d | 0x0a | 0x24)
+            );
+            assert_eq!(
+                class & SPECIAL_VARIABLE != 0,
+                matches!(c, 0x2a | 0x40 | 0x3f | 0x2d | 0x30 | 0x5f)
+            );
+            assert_eq!(
                 class & CONCAT_END != 0,
                 is_space(c) || matches!(c, 0 | 0x3e | 0x3c | 0x29 | 0x28 | 0x3b | 0x26 | 0x7c)
             );
@@ -1480,6 +1548,104 @@ mod tests {
                 inner.events,
                 (0..end).map(|_| Event::Advance(false)).collect::<Vec<_>>()
             );
+        }
+    }
+
+    #[test]
+    fn identifier_runs_match_c_control_flow() {
+        // scanner.c tests the first character separately, then keeps testing
+        // both digit and name characters throughout the remaining run. Compare
+        // that control flow with the port's split numeric/name loops, including
+        // their speculative advances when the surrounding token is rejected.
+        fn reference(lexer: &mut TestLexer) -> Option<bool> {
+            let mut is_number = true;
+            if is_digit(lexer.lookahead()) {
+                lexer.advance(false);
+            } else if is_alpha(lexer.lookahead()) || lexer.lookahead() == 0x5f {
+                is_number = false;
+                lexer.advance(false);
+            } else {
+                return None;
+            }
+            loop {
+                if is_digit(lexer.lookahead()) {
+                    lexer.advance(false);
+                } else if is_alpha(lexer.lookahead()) || lexer.lookahead() == 0x5f {
+                    is_number = false;
+                    lexer.advance(false);
+                } else {
+                    return Some(is_number);
+                }
+            }
+        }
+
+        let characters: Vec<i32> = (0..128)
+            .chain([-1, 128, 233, 0x100, 0x10ffff, i32::MAX])
+            .collect();
+        for &first in &characters {
+            for &second in &characters {
+                for prefix in ["", "09", "a_"] {
+                    let mut expected = TestLexer::new(prefix);
+                    expected.input.extend([first, second]);
+                    expected.input.extend("8A_0=".chars().map(|c| c as i32));
+                    let mut actual = TestLexer::new("");
+                    actual.input.clone_from(&expected.input);
+                    let expected_result = reference(&mut expected);
+                    let mut cursor = ScannerLexer::new(&mut actual);
+                    assert_eq!(
+                        cursor.scan_identifier(),
+                        expected_result,
+                        "prefix={prefix:?}, first={first}, second={second}"
+                    );
+                    assert_eq!(cursor.lookahead(), expected.lookahead());
+                    assert_eq!(cursor.class, character_class(expected.lookahead()));
+                    assert_eq!(actual.position, expected.position);
+                    assert_eq!(actual.events, expected.events);
+                    assert_eq!(actual.end, expected.end);
+                    assert_eq!(actual.symbol, expected.symbol);
+                    assert_eq!(actual.lookahead_calls.get(), actual.position + 1);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn punctuation_filter_matches_unfiltered_control_flow() {
+        let rows = &crate::language().external_scanner.as_ref().unwrap().states;
+        let characters: Vec<i32> = (0..128)
+            .chain([-1, 128, 233, 0x100, 0x10ffff, i32::MAX])
+            .collect();
+        for symbols in rows.as_chunks::<{ ERROR_RECOVERY + 1 }>().0 {
+            for prefix in ["", " \t", " \n"] {
+                for &c in &characters {
+                    for suffix in ["", "-n $\n", "\\\n $x}"] {
+                        let mut expected = TestLexer::new(prefix);
+                        expected.input.push(c);
+                        expected.input.extend(suffix.chars().map(|c| c as i32));
+                        let mut actual = TestLexer::new("");
+                        actual.input.clone_from(&expected.input);
+                        let mut reference = Scanner::default();
+                        let mut filtered = Scanner::default();
+                        let mut lexer = ScannerLexer::new(&mut expected);
+                        lexer.skip_whitespace::<false>();
+                        let expected_result = reference.scan_test_punctuation(&mut lexer, symbols);
+                        let mut lexer = ScannerLexer::new(&mut actual);
+                        lexer.skip_whitespace::<false>();
+                        let result = if lexer.starts_test_punctuation(symbols) {
+                            filtered.scan_test_punctuation(&mut lexer, symbols)
+                        } else {
+                            None
+                        };
+                        assert_eq!(result, expected_result);
+                        assert_eq!(actual.position, expected.position);
+                        assert_eq!(actual.end, expected.end);
+                        assert_eq!(actual.symbol, expected.symbol);
+                        assert_eq!(actual.events, expected.events);
+                        assert_eq!(actual.lookahead_calls.get(), expected.lookahead_calls.get());
+                        assert_eq!(snapshot(&mut filtered), snapshot(&mut reference));
+                    }
+                }
+            }
         }
     }
 
