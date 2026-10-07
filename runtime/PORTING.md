@@ -165,8 +165,11 @@ last returned chunk. `CallbackInput<F,T>` stores `Option<T>` and calls the clien
 callback only on read. `SliceInput` borrows the complete source and changes a
 start index. No copy of the entire remaining document is made on each chunk read.
 The lexer tracks chunk_start/chunk_size and invalidates this cache at input changes.
-Empty chunks mean EOF according to the C lexer. Never retain a chunk reference
-across another read. Decode malformed UTF-8 exactly as C, including consumed bytes
+Empty chunks mean EOF according to the C lexer. `LexerState.current_range_end`
+caches the current nonempty included range's end byte (zero at EOF), avoiding
+per-character Vec lookups. Refresh it on goto, range transitions, and empty reads;
+empty included ranges must still be visited in order when crossing a boundary.
+Never retain a chunk reference across another read. Decode malformed UTF-8 exactly as C, including consumed bytes
 and -1 lookahead; lexer also owns the three unicode decoding helper stubs.
 
 `ParseContext<'input,'options>` holds the borrowed Input and ParseOptions. Functions
