@@ -605,9 +605,18 @@ impl Scanner {
                     && self.lookahead != i32::from(b':'))
                     || (is_cur_saf && self.lookahead == i32::from(b'#'))
                 {
-                    self.adv(lexer);
+                    loop {
+                        self.adv(lexer);
+                        self.sch_stt =
+                            advance_schema(self.sch_stt, self.cur_chr, &mut self.rlt_sch);
+                        // Every plain-safe character except ':' is unconditional
+                        // after another safe character. Mark the run once, before
+                        // any speculative colon or non-content advance.
+                        if !is_plain_safe(self.lookahead) || self.lookahead == i32::from(b':') {
+                            break;
+                        }
+                    }
                     self.mrk_end(lexer);
-                    self.sch_stt = advance_schema(self.sch_stt, self.cur_chr, &mut self.rlt_sch);
                 } else if is_lka_wsp {
                     self.adv(lexer);
                     self.sch_stt = advance_schema(self.sch_stt, self.cur_chr, &mut self.rlt_sch);
@@ -2502,6 +2511,182 @@ mod tests {
                 .to_bytes()
             )
         );
+    }
+
+    // The original C loop marks after each content character. Compare against
+    // it independently of the run optimization, including speculative failures.
+    fn reference_plain_content(
+        scanner: &mut Scanner,
+        lexer: &mut dyn Lexer,
+        is_in_blk: bool,
+    ) -> ScanResult {
+        let is_plain_safe = |c| is_ns_char(c) && (is_in_blk || !is_c_flow_indicator(c));
+        let mut is_cur_saf: bool = is_plain_safe(scanner.cur_chr);
+        let mut is_lka_wsp: bool = is_wsp(scanner.lookahead);
+        let mut is_lka_saf: bool = is_plain_safe(scanner.lookahead);
+        if is_lka_saf || is_lka_wsp {
+            loop {
+                if (is_lka_saf
+                    && scanner.lookahead != i32::from(b'#')
+                    && scanner.lookahead != i32::from(b':'))
+                    || (is_cur_saf && scanner.lookahead == i32::from(b'#'))
+                {
+                    scanner.adv(lexer);
+                    scanner.mrk_end(lexer);
+                    scanner.sch_stt =
+                        advance_schema(scanner.sch_stt, scanner.cur_chr, &mut scanner.rlt_sch);
+                } else if is_lka_wsp {
+                    scanner.adv(lexer);
+                    scanner.sch_stt =
+                        advance_schema(scanner.sch_stt, scanner.cur_chr, &mut scanner.rlt_sch);
+                } else if scanner.lookahead == i32::from(b':') {
+                    scanner.adv(lexer); // check later
+                } else {
+                    break;
+                }
+                is_cur_saf = is_lka_saf;
+                is_lka_wsp = is_wsp(scanner.lookahead);
+                is_lka_saf = is_plain_safe(scanner.lookahead);
+
+                if scanner.cur_chr == i32::from(b':') {
+                    if is_lka_saf {
+                        scanner.mrk_end(lexer);
+                        scanner.sch_stt =
+                            advance_schema(scanner.sch_stt, scanner.cur_chr, &mut scanner.rlt_sch);
+                    } else {
+                        return ScanResult::Fail;
+                    }
+                }
+            }
+        } else {
+            return ScanResult::Stop;
+        }
+        ScanResult::Success
+    }
+
+    #[test]
+    fn plain_runs_match_per_character_reference() {
+        let alphabet = [
+            0,
+            b'a' as i32,
+            b'1' as i32,
+            b' ' as i32,
+            b'\t' as i32,
+            b'\r' as i32,
+            b'\n' as i32,
+            b':' as i32,
+            b'#' as i32,
+            b',' as i32,
+            b'[' as i32,
+            b']' as i32,
+            b'{' as i32,
+            b'}' as i32,
+            0x85,
+            0xa0,
+            0xd800,
+            0xfeff,
+            0x10000,
+            0x110000,
+            -1,
+        ];
+        let schemas = [
+            ResultSchema::String,
+            ResultSchema::Int,
+            ResultSchema::Null,
+            ResultSchema::Bool,
+            ResultSchema::Float,
+        ];
+        // Exhaust every three-character sequence of the meaningful character
+        // classes. Vary the preceding character, DFA state/type and column, too.
+        for case in 0..alphabet.len().pow(3) {
+            let mut index = case;
+            let input: Vec<_> = (0..3)
+                .map(|_| {
+                    let c = alphabet[index % alphabet.len()];
+                    index /= alphabet.len();
+                    c
+                })
+                .collect();
+            for is_in_blk in [false, true] {
+                let mut actual = scanner();
+                let mut expected = scanner();
+                let mut lexer = TestLexer::new("");
+                lexer.input = input.clone();
+                let mut reference = TestLexer::new("");
+                reference.input = input.clone();
+                for scanner in [&mut actual, &mut expected] {
+                    scanner.cur_row = -7;
+                    scanner.cur_col = i16::MAX.wrapping_sub((case % 4) as i16);
+                    scanner.cur_chr = alphabet[(case / 5) % alphabet.len()];
+                    scanner.lookahead = input[0];
+                    // State 34 is unreachable in the C core schema.
+                    scanner.sch_stt = (case % 44) as i8 - 1;
+                    if scanner.sch_stt >= 34 {
+                        scanner.sch_stt += 1;
+                    }
+                    scanner.rlt_sch = schemas[case % schemas.len()];
+                    scanner.end_row = -8;
+                    scanner.end_col = 13;
+                }
+                assert_eq!(
+                    actual.scn_pln_cnt(&mut lexer, is_in_blk),
+                    reference_plain_content(&mut expected, &mut reference, is_in_blk),
+                    "{input:?}, block={is_in_blk}"
+                );
+                let state = |s: &Scanner| {
+                    (
+                        s.end_row,
+                        s.end_col,
+                        s.cur_row,
+                        s.cur_col,
+                        s.cur_chr,
+                        s.lookahead,
+                        s.sch_stt,
+                        s.rlt_sch,
+                    )
+                };
+                assert_eq!(
+                    state(&actual),
+                    state(&expected),
+                    "{input:?}, block={is_in_blk}"
+                );
+                assert_eq!(
+                    (lexer.position, lexer.end),
+                    (reference.position, reference.end)
+                );
+                assert_eq!(lexer.lookahead_calls.get(), reference.lookahead_calls.get());
+                // Only overwritten intermediate marks may differ; all advances
+                // (including skip flags and speculative colons) stay identical.
+                lexer.events.retain(|e| !matches!(e, Event::MarkEnd(_)));
+                reference.events.retain(|e| !matches!(e, Event::MarkEnd(_)));
+                assert_eq!(lexer.events, reference.events);
+            }
+        }
+    }
+
+    #[test]
+    fn plain_runs_coalesce_marks_but_keep_colon_rollback() {
+        for is_in_blk in [false, true] {
+            let mut scanner = scanner();
+            let text = format!("{}: trailing", "a#é中".repeat(64));
+            let mut lexer = TestLexer::new(&text);
+            scanner.cur_col = i16::MAX - 2;
+            scanner.cur_chr = b'a' as i32;
+            scanner.lookahead = lexer.lookahead();
+            assert_eq!(scanner.scn_pln_cnt(&mut lexer, is_in_blk), ScanResult::Fail);
+            assert_eq!(lexer.end, 256);
+            assert_eq!(lexer.position, 257);
+            assert_eq!(scanner.end_col, (i16::MAX - 2).wrapping_add(256));
+            assert_eq!(scanner.cur_col, (i16::MAX - 2).wrapping_add(257));
+            assert_eq!(
+                lexer
+                    .events
+                    .iter()
+                    .filter(|e| matches!(e, Event::MarkEnd(_)))
+                    .count(),
+                1
+            );
+        }
     }
 
     #[test]
