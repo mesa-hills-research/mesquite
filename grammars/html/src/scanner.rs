@@ -646,62 +646,118 @@ impl Scanner {
         true
     }
 
-    fn scan_implicit_end_tag(&mut self, lexer: &mut dyn Lexer, mut c: i32) -> bool {
-        let is_closing_tag = c == i32::from(b'/');
-        if is_closing_tag {
-            lexer.advance(false);
-            c = lexer.lookahead();
-        } else if self.tags.last().is_some_and(|tag| tag.is_void()) {
+    fn scan_implicit_end_tag(&mut self, lexer: &mut dyn Lexer, c: i32) -> bool {
+        if c == i32::from(b'/') {
+            self.scan_implicit_closing_tag(lexer)
+        } else {
+            self.scan_implicit_opening_tag(lexer, c)
+        }
+    }
+
+    // Matching builtin closes need neither a collected name nor a containment
+    // check. Keep the recovery buffer and opening-tag work out of this frame.
+    #[inline(never)]
+    fn scan_implicit_closing_tag(&mut self, lexer: &mut dyn Lexer) -> bool {
+        lexer.advance(false);
+        let c = lexer.lookahead();
+        let expected = self
+            .tags
+            .top_kind
+            .filter(|&kind| kind != TagType::Custom)
+            .map_or(&[][..], TagType::name);
+        let (prefix, next) = scan_builtin_prefix(lexer, expected, c);
+        if !expected.is_empty()
+            && prefix == expected.len()
+            && TAG_NAME_CHARS.get(next as usize).copied().unwrap_or(0) == 0
+        {
+            return false;
+        }
+        self.scan_implicit_close_recovery(lexer, &expected[..prefix], next)
+    }
+
+    #[inline(never)]
+    fn scan_implicit_close_recovery(
+        &mut self,
+        lexer: &mut dyn Lexer,
+        prefix: &[u8],
+        c: i32,
+    ) -> bool {
+        let mut short_name = [0; 16];
+        let name =
+            scan_name_after_prefix(lexer, &mut self.long_tag_name, &mut short_name, prefix, c);
+        if name.is_empty() && !lexer.eof() {
+            return false;
+        }
+        if self.tags.last_matches_name(name) {
+            return false;
+        }
+        let next_tag = Tag::for_name(name);
+        // Recovery compares types, not custom spellings, and pops only one tag.
+        if self.tags.contains_kind(next_tag.kind) {
             self.tags.pop();
             lexer.set_result_symbol(IMPLICIT_END_TAG as u16);
             return true;
         }
+        false
+    }
 
-        let mut short_name = [0; 16];
-        let expected = if is_closing_tag {
-            self.tags
-                .last()
-                .filter(|tag| tag.kind != TagType::Custom)
-                .map_or(&[][..], |tag| tag.kind.name())
-        } else {
-            &[][..]
-        };
-        let name = if expected.is_empty() {
-            scan_tag_name(lexer, &mut self.long_tag_name, &mut short_name, c)
-        } else {
-            let (prefix, next) = scan_builtin_prefix(lexer, expected, c);
-            if prefix == expected.len()
-                && TAG_NAME_CHARS.get(next as usize).copied().unwrap_or(0) == 0
-            {
-                return false;
-            }
-            scan_name_after_prefix(
-                lexer,
-                &mut self.long_tag_name,
-                &mut short_name,
-                &expected[..prefix],
-                next,
-            )
-        };
-        if name.is_empty() && !lexer.eof() {
-            return false;
+    #[inline(never)]
+    fn scan_implicit_opening_tag(&mut self, lexer: &mut dyn Lexer, c: i32) -> bool {
+        if self.tags.last().is_some_and(|tag| tag.is_void()) {
+            self.tags.pop();
+            lexer.set_result_symbol(IMPLICIT_END_TAG as u16);
+            return true;
         }
-        if is_closing_tag {
-            // Most closing tags match their parent. Compare its spelling
-            // directly instead of searching the full builtin name map.
-            if self.tags.last_matches_name(name) {
+        // Only the exceptional parents in Tag::can_contain inspect the next
+        // tag's type. For every other parent, consume the same complete name
+        // without collecting or classifying it. The advances are still needed
+        // on failure: the runtime records this scan's furthest lookahead.
+        if !matches!(
+            self.tags.top_kind,
+            Some(
+                TagType::Li
+                    | TagType::Dt
+                    | TagType::Dd
+                    | TagType::P
+                    | TagType::Colgroup
+                    | TagType::Rb
+                    | TagType::Rt
+                    | TagType::Rp
+                    | TagType::Optgroup
+                    | TagType::Tr
+                    | TagType::Td
+                    | TagType::Th
+            )
+        ) {
+            let mut c = c;
+            let mut byte = TAG_NAME_CHARS.get(c as usize).copied().unwrap_or(0);
+            if byte == 0 && !lexer.eof() {
                 return false;
             }
-
-            let next_tag = Tag::for_name(name);
-            // Recovery deliberately compares only types here, not custom names.
-            // Only one stack entry is removed, even if the match is much deeper.
-            if self.tags.contains_kind(next_tag.kind) {
+            while byte != 0 {
+                lexer.advance(false);
+                c = lexer.lookahead();
+                byte = TAG_NAME_CHARS.get(c as usize).copied().unwrap_or(0);
+            }
+            // C also closes these three document-level tags at EOF, even
+            // after a nonempty name. NUL lookahead alone does not imply EOF.
+            if matches!(
+                self.tags.top_kind,
+                Some(TagType::Html | TagType::Head | TagType::Body)
+            ) && lexer.eof()
+            {
                 self.tags.pop();
                 lexer.set_result_symbol(IMPLICIT_END_TAG as u16);
                 return true;
             }
-        } else if self.tags.last().is_some_and(|parent| {
+            return false;
+        }
+        let mut short_name = [0; 16];
+        let name = scan_tag_name(lexer, &mut self.long_tag_name, &mut short_name, c);
+        if name.is_empty() && !lexer.eof() {
+            return false;
+        }
+        if self.tags.last().is_some_and(|parent| {
             !parent.can_contain(&Tag::for_name(name))
                 || (matches!(parent.kind, TagType::Html | TagType::Head | TagType::Body)
                     && lexer.eof())
@@ -1561,6 +1617,112 @@ mod tests {
     }
 
     #[test]
+    fn scanner_dispatch_preserves_c_callbacks_for_all_symbol_masks() {
+        // C's separate whitespace loop and character switch. Keep this model
+        // independent of future fast-path dispatch or symbol-mask changes.
+        fn reference(scanner: &mut Scanner, lexer: &mut TestLexer, valid: &[bool; 9]) -> bool {
+            if valid[RAW_TEXT] && !valid[START_TAG_NAME] && !valid[END_TAG_NAME] {
+                return scanner.scan_raw_text(lexer);
+            }
+            let mut c = lexer.lookahead();
+            while matches!(c, 0x09..=0x0d | 0x20) {
+                lexer.advance(true);
+                c = lexer.lookahead();
+            }
+            match c {
+                0x3c => {
+                    lexer.mark_end();
+                    lexer.advance(false);
+                    c = lexer.lookahead();
+                    if c == i32::from(b'!') {
+                        lexer.advance(false);
+                        return scan_comment(lexer);
+                    }
+                    if valid[IMPLICIT_END_TAG] {
+                        return scanner.scan_implicit_end_tag(lexer, c);
+                    }
+                }
+                0 if valid[IMPLICIT_END_TAG] => {
+                    return scanner.scan_implicit_end_tag(lexer, c);
+                }
+                0x2f if valid[SELF_CLOSING_TAG_DELIMITER] => {
+                    return scanner.scan_self_closing_tag_delimiter(lexer);
+                }
+                0 | 0x2f => {}
+                _ if (valid[START_TAG_NAME] || valid[END_TAG_NAME]) && !valid[RAW_TEXT] => {
+                    return if valid[START_TAG_NAME] {
+                        scanner.scan_start_tag_name(lexer, c)
+                    } else {
+                        scanner.scan_end_tag_name(lexer, c)
+                    };
+                }
+                _ => {}
+            }
+            false
+        }
+
+        for parent in [None, Some("DIV"), Some("BR"), Some("P"), Some("SCRIPT"), Some("X-A")] {
+            for mask in 0..512 {
+                let valid = std::array::from_fn(|i| mask & (1 << i) != 0);
+                for prefix in ["", " \t\n\x0b\x0c\r"] {
+                    for input in [
+                        "", "\0more", "div>", "x-a>", "1>", "</DIV>", "<div>", "<p>",
+                        "<!--x-->", "<!--x", "<!x", "/>", "/x", "<", "_", "@", "?", ">",
+                        "é", "\u{2003}",
+                    ] {
+                        let input = format!("{prefix}{input}");
+                        let make_scanner = || parent.map_or_else(Scanner::default, |p| with_tags(&[p]));
+                        let mut expected = make_scanner();
+                        let mut reference_lexer = TestLexer::new(&input);
+                        let accepted = reference(&mut expected, &mut reference_lexer, &valid);
+                        let mut actual = make_scanner();
+                        let mut lexer = TestLexer::new(&input);
+                        assert_eq!(actual.scan(&mut lexer, &valid), accepted, "{parent:?}: {input:?}, {mask}");
+                        assert_eq!(actual.tags, expected.tags);
+                        assert_eq!(lexer.position, reference_lexer.position);
+                        assert_eq!(lexer.end, reference_lexer.end);
+                        assert_eq!(lexer.symbol, reference_lexer.symbol);
+                        assert_eq!(lexer.calls, reference_lexer.calls, "{parent:?}: {input:?}, {mask}");
+                        assert_eq!(serialized(&mut actual), serialized(&mut expected));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shallow_snapshot_equality_checks_every_byte_and_backtracking() {
+        let mut scanner = Scanner::default();
+        for depth in (0..65).chain((0..65).rev()) {
+            scanner.tags.clear();
+            for _ in 0..depth {
+                scanner.tags.push(Tag::for_name(b"DIV"));
+            }
+            let snapshot = serialized(&mut scanner);
+            assert_eq!(snapshot.len(), depth + 4);
+            assert!(scanner.tags.matches(&snapshot));
+            // Equality must cover the header and all entries, including the
+            // ends and overlap boundaries of possible fixed-width comparisons.
+            for offset in 0..snapshot.len() {
+                let mut different = snapshot.clone();
+                different[offset] ^= 0xff;
+                assert!(!scanner.tags.matches(&different), "depth={depth}, byte={offset}");
+            }
+            let mut restored = Scanner::default();
+            restored.deserialize(&snapshot);
+            assert_eq!(restored.tags, scanner.tags);
+            for _ in 0..depth {
+                scanner.tags.pop();
+                restored.tags.pop();
+                let snapshot = serialized(&mut scanner);
+                assert_eq!(serialized(&mut restored), snapshot);
+                assert!(scanner.tags.matches(&snapshot));
+                assert!(restored.tags.matches(&snapshot));
+            }
+        }
+    }
+
+    #[test]
     fn tag_name_classification_table_matches_c_locale() {
         for c in -1..=256 {
             let expected = if matches!(c, 0x30..=0x39 | 0x41..=0x5a | 0x61..=0x7a | 0x2d | 0x3a) {
@@ -1809,6 +1971,92 @@ mod tests {
                     );
                     assert_eq!(actual.tags, expected.tags, "{input:?}");
                     assert_eq!(lexer.position, reference_lexer.position, "{input:?}");
+                    assert_eq!(lexer.calls, reference_lexer.calls, "{input:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn implicit_opening_lookahead_matches_collected_names_for_every_parent() {
+        // C's opening branch always collects/classifies a name. Compare its
+        // state and callbacks even for failed scans, including EOF queries.
+        fn reference(scanner: &mut Scanner, lexer: &mut TestLexer) -> bool {
+            if scanner.tags.last().is_some_and(|tag| tag.is_void()) {
+                scanner.tags.pop();
+                lexer.set_result_symbol(IMPLICIT_END_TAG as u16);
+                return true;
+            }
+            let mut short = [0; 16];
+            let c = lexer.lookahead();
+            let name = scan_tag_name(lexer, &mut scanner.long_tag_name, &mut short, c);
+            if name.is_empty() && !lexer.eof() {
+                return false;
+            }
+            let next = Tag::for_name(name);
+            if scanner.tags.last().is_some_and(|parent| {
+                !parent.can_contain(&next)
+                    || (matches!(parent.kind, TagType::Html | TagType::Head | TagType::Body)
+                        && lexer.eof())
+            }) {
+                scanner.tags.pop();
+                lexer.set_result_symbol(IMPLICIT_END_TAG as u16);
+                return true;
+            }
+            false
+        }
+
+        let mut parents: Vec<_> = TAG_TYPES_BY_TAG_NAME
+            .iter()
+            .map(|&(name, _)| Some(Tag::for_name(name)))
+            .collect();
+        parents.extend([
+            None,
+            Some(Tag::default()),
+            Some(Tag {
+                kind: TagType::EndOfVoidTags,
+                custom_tag_name: &[],
+            }),
+            Some(Tag {
+                kind: TagType::Custom,
+                custom_tag_name: b"P",
+            }),
+            Some(Tag::for_name(b"X-CUSTOM")),
+        ]);
+        let mut names: Vec<_> = TAG_TYPES_BY_TAG_NAME
+            .iter()
+            .map(|&(name, _)| std::str::from_utf8(name).unwrap().to_ascii_lowercase())
+            .collect();
+        names.extend([
+            String::new(),
+            "-x:12".to_owned(),
+            "0".to_owned(),
+            "é".to_owned(),
+            "\u{10000}".to_owned(),
+            "X-".repeat(300),
+        ]);
+        for parent in parents {
+            for name in &names {
+                for suffix in ["", ">", "\0x", "é>", " >"] {
+                    let input = format!("{name}{suffix}");
+                    let make_scanner = || Scanner {
+                        tags: parent.into_iter().collect(),
+                        ..Scanner::default()
+                    };
+                    let mut expected = make_scanner();
+                    let mut reference_lexer = TestLexer::new(&input);
+                    let accepted = reference(&mut expected, &mut reference_lexer);
+                    let mut actual = make_scanner();
+                    let mut lexer = TestLexer::new(&input);
+                    let c = lexer.lookahead();
+                    assert_eq!(
+                        actual.scan_implicit_end_tag(&mut lexer, c),
+                        accepted,
+                        "parent={parent:?}, input={input:?}",
+                    );
+                    assert_eq!(actual.tags, expected.tags, "{input:?}");
+                    assert_eq!(lexer.position, reference_lexer.position, "{input:?}");
+                    assert_eq!(lexer.end, reference_lexer.end, "{input:?}");
                     assert_eq!(lexer.calls, reference_lexer.calls, "{input:?}");
                 }
             }
