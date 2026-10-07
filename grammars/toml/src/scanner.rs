@@ -67,7 +67,12 @@ fn scan_non_newline(lexer: &mut dyn Lexer, valid_symbols: &[bool; 5], mut lookah
         return valid_symbols[end_symbol as usize] && scan_multiline_string_end(lexer, lookahead);
     }
 
-    while matches!(lookahead, 0x20 | 0x09) {
+    // Keep whitespace recognition a bit test, rather than a jump table
+    // shared with the CR/LF/EOF dispatch below. The unsigned bound is
+    // required before shifting: lookahead can be a decoder error or a
+    // non-ASCII code point whose low bits resemble whitespace.
+    const WHITESPACE: u64 = (1 << 9) | (1 << 32);
+    while lookahead as u32 <= 32 && (WHITESPACE >> lookahead) & 1 != 0 {
         lexer.advance(true);
         lookahead = lexer.lookahead();
     }
@@ -628,6 +633,45 @@ mod tests {
                     );
                     assert!(lexer.events.is_empty(), "first {first}, mask {mask}");
                     assert_eq!(lexer.lookahead_calls.get(), 1);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn whitespace_bitset_rejects_modulo_64_aliases_after_skipping() {
+        // Machine shifts can mask their count modulo 64. Neither positive
+        // code points nor negative decoder errors may alias a set bit when
+        // entering or leaving the whitespace loop.
+        for upper_bits in [64, 128, 256, 0x10000, 0x100000, i32::MIN, -64] {
+            for low_bits in [0, 0x09, 0x0a, 0x0d, 0x20] {
+                let alias = upper_bits | low_bits;
+                for prefix_length in [0, 1, 2, 7] {
+                    for mask in 0..32 {
+                        let valid: [bool; 5] = std::array::from_fn(|i| mask & (1 << i) != 0);
+                        let mut lexer = TestLexer::new("");
+                        lexer.input.extend((0..prefix_length).map(|i| [0x20, 0x09][i % 2]));
+                        lexer.input.extend([alias, 0x0a]);
+                        assert!(
+                            !Scanner.scan(&mut lexer, &valid),
+                            "alias {alias}, prefix length {prefix_length}, mask {mask}"
+                        );
+                        let advances = if valid[LINE_ENDING_OR_EOF as usize] {
+                            prefix_length
+                        } else {
+                            0
+                        };
+                        let expected: Vec<_> = (0..advances)
+                            .map(|position| Event::Advance {
+                                position,
+                                skip: true,
+                            })
+                            .collect();
+                        assert_eq!(lexer.events, expected);
+                        assert_eq!(lexer.position, advances);
+                        assert_eq!(lexer.lookahead_calls.get(), advances + 1);
+                        assert_eq!(lexer.symbol, Symbol::MAX);
+                    }
                 }
             }
         }
