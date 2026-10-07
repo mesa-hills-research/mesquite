@@ -59,12 +59,13 @@ This follow-up changes only this verification note; it introduces no deviation
 from C and no new unsafe code.
 
 
-### Revalidation of `4d6cc948` at `88489b8`
+### Revalidation of `4d6cc948` at `cabce01`
 
 The assigned Registry-query input still passes before any new changes, as it did
-at `9c27be8`. Direct comparison with the current C scanner confirms that the
-merged zero-valued creation/reset behavior above is the required correction; no additional
-runtime change is warranted. The checks below were rerun at this revision,
+at `9c27be8` and `88489b8`. Direct comparison with the current C scanner confirms
+that the merged zero-valued creation/reset behavior above is the required
+correction; no additional runtime change is warranted. The checks below were
+rerun at `cabce01`,
 including the parser regression with both fresh and reused scanner state,
 single-byte input chunks, and incremental repair/restoration. The reduced
 Registry-query expression is already present in both scanner and parser tests;
@@ -180,10 +181,10 @@ lexer warning noted above. This change only strengthens regression coverage;
 there are no runtime changes, C deviations, new unsafe code, or generated-file
 changes.
 
-### ERROR-range revalidation at `5f3aee6`
+### ERROR-range revalidation at `ce616cb`
 
 Rechecked the previously resolved bucket at this starting revision; all checks
-below were rerun, rather than relying on the earlier verification at `512817f`.
+below were rerun, rather than relying on the earlier verification at `5f3aee6`.
 Bucket `e0b0bff8` already passes on this starting checkout. Comparing the current
 C scanner with Rust confirms the merged zero-valued creation/reset fix remains
 correct; no new implementation change or duplicate regression is needed.
