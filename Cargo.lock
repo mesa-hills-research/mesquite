@@ -83,6 +83,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ts_port_cmake"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
 name = "ts_port_cpp"
 version = "0.1.0"
 dependencies = [
@@ -97,7 +104,91 @@ dependencies = [
 ]
 
 [[package]]
+name = "ts_port_cuda"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
+name = "ts_port_dart"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
+name = "ts_port_dtd"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
+name = "ts_port_elixir"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
+name = "ts_port_elm"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
+name = "ts_port_embedded_template"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
+name = "ts_port_erlang"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
+name = "ts_port_fortran"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
+name = "ts_port_fsharp"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
+name = "ts_port_glsl"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
 name = "ts_port_go"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
+name = "ts_port_haskell"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
+name = "ts_port_hcl"
 version = "0.1.0"
 dependencies = [
  "ts_port_tables",
@@ -132,6 +223,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ts_port_julia"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
 name = "ts_port_kotlin"
 version = "0.1.0"
 dependencies = [
@@ -140,6 +238,13 @@ dependencies = [
 
 [[package]]
 name = "ts_port_lua"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
+name = "ts_port_make"
 version = "0.1.0"
 dependencies = [
  "ts_port_tables",
@@ -160,6 +265,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "ts_port_objc"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
+name = "ts_port_ocaml"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
+name = "ts_port_ocaml_interface"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
+name = "ts_port_odin"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
 name = "ts_port_php"
 version = "0.1.0"
 dependencies = [
@@ -174,7 +307,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "ts_port_powershell"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
+name = "ts_port_proto"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
 name = "ts_port_python"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
+name = "ts_port_r"
 version = "0.1.0"
 dependencies = [
  "ts_port_tables",
@@ -189,6 +343,34 @@ dependencies = [
 
 [[package]]
 name = "ts_port_rust"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
+name = "ts_port_scala"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
+name = "ts_port_solidity"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
+name = "ts_port_sql"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
+name = "ts_port_svelte"
 version = "0.1.0"
 dependencies = [
  "ts_port_tables",
@@ -221,6 +403,20 @@ dependencies = [
 
 [[package]]
 name = "ts_port_typescript"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
+name = "ts_port_verilog"
+version = "0.1.0"
+dependencies = [
+ "ts_port_tables",
+]
+
+[[package]]
+name = "ts_port_xml"
 version = "0.1.0"
 dependencies = [
  "ts_port_tables",
