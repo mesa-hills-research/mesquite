@@ -1,6 +1,6 @@
 # CMake backslash/NUL recovery (bucket `9a8ee9c6`)
 
-Reverified at starting revision `2bec7c3` (after the latest main merge).
+Reverified at starting revision `743f5e3` (after the latest main merge).
 The reported 113-byte input,
 `Tests/RunCMake/Syntax/NullAfterBackslash.cmake`, already passes with the merged
 CMake scanner correction; no additional runtime or scanner change is needed.
@@ -46,8 +46,8 @@ changes, and both the existing scanner tests and parser regression pass.
 - `cargo test -p ts_port --test cmake_backslash_nul`: **1 test passes**.
 - `cargo clippy -p ts_port_cmake -p ts_port --all-targets -- -D warnings`: passes.
 
-The bucket was already passing before this verification; the oracle reported no
-remaining divergence to fix. This follow-up only refreshes the verification
-record: no production behavior changes, C deviations, new unsafe code, or changes
+The assigned `bucket:9a8ee9c6` passed on the first oracle run at this starting
+revision, and the full CMake rerun reported no remaining divergence to fix. This
+follow-up only refreshes the verification record: no production behavior changes, C deviations, new unsafe code, or changes
 to host-owned generated files. The existing regression already covers this bucket
 and scanner reset across repeated parses, so no duplicate test was added.
