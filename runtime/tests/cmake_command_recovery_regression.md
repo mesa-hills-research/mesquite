@@ -110,14 +110,24 @@ Checks rerun on this revision:
 This follow-up adds regression coverage only. It introduces no runtime changes,
 C deviations, unsafe code, new warnings, or host-owned generated-file changes.
 
-## Stop-request revalidation at `48519b9`
+## Revalidation at `48519b9` and resumed checks at `0ae2ce7`
 
 The assigned bucket is already fixed in this checkout. A fresh oracle run passes
 **7/7 inputs** with queries enabled; direct comparison against the current C
 scanner confirms the zero initialization and whole-state reset remain correct.
 `cargo check --workspace --all-targets` passes (with the existing host-owned YAML
 unused-assignment warning), and both `cmake_command_recovery` integration tests
-pass. No scanner/runtime changes or duplicate tests were needed. The operator
-stopped this run, so broader oracle and clippy checks were not rerun in this
-session; their earlier results above are historical. Nothing remains to fix in
-the assigned bucket on this checkout.
+pass. No scanner/runtime changes or duplicate tests were needed.
+
+After the operator restarted the workflow, the deferred checks were rerun:
+
+- Full CMake oracle: **270/270 gate** (seven incremental checks and queries) and
+  **9878/9878 fresh inputs** (queries enabled) pass.
+- `cargo check --workspace --all-targets`: passes with the same pre-existing
+  host-owned YAML warning.
+- `cargo test -p ts_port -p ts_port_cmake`: **212 runtime unit tests**, all
+  integration/doc tests, and **24 CMake tests** pass.
+- `cargo clippy -p ts_port -p ts_port_cmake --all-targets -- -D warnings`: passes.
+
+Nothing remains to fix in the assigned bucket on this checkout. This follow-up
+only records verification; it adds no C deviations or unsafe/generated code.
