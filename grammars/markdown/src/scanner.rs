@@ -612,12 +612,20 @@ impl Scanner {
     // invalid, so those characters must always reach the full scanner.
     #[inline(always)]
     fn scan_content(&mut self, lexer: &mut dyn Lexer) -> bool {
-        let mut lookahead = lexer.lookahead();
+        let lookahead = lexer.lookahead();
         let matching = self.snapshot[STATE] & STATE_MATCHING;
         let active = (TEXT_ACTIVE.wrapping_shr(lookahead as u32) as u8) & 1;
         if active | matching == 0 {
             return false;
         }
+        self.scan_content_slow(lexer, lookahead)
+    }
+
+    // All content-only flag combinations share their invalid block-start
+    // attempts. Retain those advances/marks even when returning false.
+    #[inline(never)]
+    fn scan_content_slow(&mut self, lexer: &mut dyn Lexer, mut lookahead: i32) -> bool {
+        let matching = self.snapshot[STATE] & STATE_MATCHING;
         if lookahead == i32::from(b' ') && matching == 0 {
             self.snapshot[COLUMN] = self.snapshot[COLUMN].wrapping_add(1) % 4;
             self.snapshot[INDENTATION] = self.snapshot[INDENTATION].wrapping_add(1);
@@ -629,13 +637,6 @@ impl Scanner {
                 return false;
             }
         }
-        self.scan_content_slow(lexer, lookahead)
-    }
-
-    // All content-only flag combinations share their invalid block-start
-    // attempts. Retain those advances/marks even when returning false.
-    #[inline(never)]
-    fn scan_content_slow(&mut self, lexer: &mut dyn Lexer, lookahead: i32) -> bool {
         let mut lexer = ScanLexer { inner: lexer, lookahead };
         // Only the external entry calls this helper, with simulation cleared.
         if lexer.eof() {
