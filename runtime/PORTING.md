@@ -181,6 +181,13 @@ External scanners come from tables.external_scanner.create, as
 serialize/deserialize use the parser's 1024-byte scanner buffer and subtree state.
 Respect the exact timing of deserialization, failed scans, retries and keyword lexing.
 
+Lexing and reductions preserve the stack head's last scanner token until a shift
+or recovery installs a new one. Borrow it from the stack for deserialization and
+reuse checks rather than retaining a temporary Arc across the parser call; the
+owning token cache still retains its snapshot. Scanner-state comparison may return
+true immediately for identical Subtree handles, but distinct handles must still
+compare serialized bytes (and absent state must still equal an empty snapshot).
+
 **Progress parity is required.** `operation_count`, 100-operation checkpoint,
 position/has_error updates, scanner/recovery work and balancing's scaled operation
 increments must match parser.c in order. Do not call progress per token, per byte,

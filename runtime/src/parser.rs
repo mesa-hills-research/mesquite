@@ -426,16 +426,12 @@ pub(crate) fn ts_parser__external_scanner_serialize(parser: &mut Parser) -> u32 
 }
 
 pub(crate) fn ts_parser__external_scanner_deserialize(
-    parser: &mut Parser,
+    scanner: &mut dyn ExternalScanner,
     external_token: &Subtree,
 ) {
     let data = ts_subtree_external_scanner_state(external_token)
         .map_or(&[][..], ts_external_scanner_state_data);
-    parser
-        .external_scanner
-        .as_mut()
-        .expect("external scanner")
-        .deserialize(data);
+    scanner.deserialize(data);
 }
 
 pub(crate) fn ts_parser__external_scanner_scan(
@@ -503,8 +499,6 @@ pub(crate) fn ts_parser__lex(
         return Subtree::Null;
     }
     let start_position = ts_stack_position(&parser.stack, version);
-    // Retain the handle across mutable parser calls, not a borrow of its stack.
-    let external_token = ts_stack_last_external_token(&parser.stack, version).clone();
     let mut found_external_token = false;
     let mut error_mode = parse_state == ERROR_STATE;
     let mut skipped_error = false;
@@ -529,7 +523,15 @@ pub(crate) fn ts_parser__lex(
                 current_position.extent.column
             );
             ts_lexer_start(&mut parser_lexer(parser, context));
-            ts_parser__external_scanner_deserialize(parser, &external_token);
+            // Lexing does not mutate the stack. Borrow the scanner snapshot
+            // from its head instead of retaining/releasing an Arc per token.
+            ts_parser__external_scanner_deserialize(
+                parser
+                    .external_scanner
+                    .as_deref_mut()
+                    .expect("external scanner"),
+                ts_stack_last_external_token(&parser.stack, version),
+            );
             let mut found_token =
                 ts_parser__external_scanner_scan(parser, context, lex_mode.external_lex_state);
             if parser.has_scanner_error {
@@ -540,7 +542,10 @@ pub(crate) fn ts_parser__lex(
                 external_scanner_state_len = ts_parser__external_scanner_serialize(parser);
                 let bytes = &parser.scanner_buffer[..external_scanner_state_len as usize];
                 external_scanner_state_changed =
-                    !ts_subtree_external_scanner_state(&external_token)
+                    !ts_subtree_external_scanner_state(ts_stack_last_external_token(
+                        &parser.stack,
+                        version,
+                    ))
                         .map_or(bytes.is_empty(), |state| {
                             ts_external_scanner_state_eq(state, bytes)
                         });
@@ -721,7 +726,7 @@ fn parser2_log_stack(parser: &mut Parser) {
 }
 
 pub(crate) fn ts_parser__get_cached_token(
-    parser: &mut Parser,
+    parser: &Parser,
     state: StateId,
     position: usize,
     last_external_token: &Subtree,
@@ -784,7 +789,6 @@ pub(crate) fn ts_parser__reuse_node(
     version: StackVersion,
     state: &mut StateId,
     position: u32,
-    last_external_token: &Subtree,
     table_entry: &mut TableEntry,
 ) -> Subtree {
     use crate::reusable_node::*;
@@ -822,7 +826,7 @@ pub(crate) fn ts_parser__reuse_node(
         }
         if !ts_subtree_external_scanner_state_eq(
             &parser.reusable_node.last_external_token,
-            last_external_token,
+            ts_stack_last_external_token(&parser.stack, version),
         ) {
             parser2_log!(
                 parser,
@@ -1687,7 +1691,9 @@ pub(crate) fn ts_parser__advance(
     let language = parser.language.expect("parser language");
     let mut state = ts_stack_state(&parser.stack, version);
     let position = ts_stack_position(&parser.stack, version).bytes;
-    let last_external_token = ts_stack_last_external_token(&parser.stack, version).clone();
+    // Reuse, lexing and reductions preserve this head's scanner state; only a
+    // shift/recovery (which returns from advance) installs a new external token.
+    // Borrow from the head when needed, retaining only for the owning cache.
     let mut did_reuse = true;
     let mut lookahead = Subtree::Null;
     let mut table_entry = TableEntry::default();
@@ -1698,7 +1704,6 @@ pub(crate) fn ts_parser__advance(
             version,
             &mut state,
             position,
-            &last_external_token,
             &mut table_entry,
         );
     }
@@ -1708,7 +1713,7 @@ pub(crate) fn ts_parser__advance(
             parser,
             state,
             position as usize,
-            &last_external_token,
+            ts_stack_last_external_token(&parser.stack, version),
             &mut table_entry,
         );
     }
@@ -1724,7 +1729,7 @@ pub(crate) fn ts_parser__advance(
                 ts_parser__set_cached_token(
                     parser,
                     position,
-                    last_external_token.clone(),
+                    ts_stack_last_external_token(&parser.stack, version).clone(),
                     lookahead.clone(),
                 );
                 ts_subtree_symbol(&lookahead)
@@ -2771,6 +2776,43 @@ mod parser3_tests {
                 resumed.push_children(node);
             }
             assert_eq!(symbols, expected[boundary..]);
+        }
+    }
+
+    #[test]
+    fn balancing_cursor_resumes_before_every_child_including_earlier_siblings() {
+        let expected = [1, 5, 7, 6, 4, 2, 3];
+        for stop in 0..expected.len() {
+            let leaf = || Subtree::Inline(InlineLeaf::default());
+            let mut tree = branch(
+                1,
+                vec![
+                    leaf(),
+                    branch(2, vec![branch(3, vec![leaf()])]),
+                    branch(4, vec![leaf()]),
+                    leaf(),
+                    branch(5, vec![branch(6, vec![leaf()]), branch(7, vec![leaf()])]),
+                ],
+            );
+            let mut cursor = BalanceCursor::new(&mut tree, Vec::new());
+            let mut visited = Vec::new();
+            for _ in 0..stop {
+                let node = cursor.next().unwrap();
+                visited.push(ts_subtree_symbol(node));
+                cursor.push_children(node);
+            }
+            assert_eq!(ts_subtree_symbol(cursor.next().unwrap()), expected[stop]);
+            let path = cursor.path;
+            drop(cursor.pending);
+
+            // No restoration step or extra Arc owner is needed on cancellation.
+            assert_eq!(ts_subtree_symbol(&tree), 1);
+            let mut resumed = BalanceCursor::new(&mut tree, path);
+            while let Some(node) = resumed.next() {
+                visited.push(ts_subtree_symbol(node));
+                resumed.push_children(node);
+            }
+            assert_eq!(visited, expected, "resumed at traversal index {stop}");
         }
     }
 
