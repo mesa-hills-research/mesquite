@@ -4,10 +4,10 @@ The seven reported fresh-CMake inputs had an `ERROR` child of `source_file` in
 C, but a `normal_command` in the port. The smallest was
 `Tests/RunCMake/Syntax/UnterminatedBrace1.cmake` (`set(var "${")`, followed by a
 newline). The bucket already passed at the original verification revision,
-`8fbaaf9`, and still passes at the current starting revision, `58ff8c2`; no
+`8fbaaf9`, and still passes at the current starting revision, `cd6c5fd`; no
 additional runtime or scanner behavior change is needed.
 
-## Latest revalidation at `58ff8c2`
+## Latest revalidation at `cd6c5fd`
 
 The assigned bucket still passes on the starting checkout: **7/7 bucket**,
 **270/270 gate** (including incremental/query checks), and **9878/9878 fresh**
@@ -21,7 +21,9 @@ pass, including fresh/reused scanners and whole-source/one-byte input chunks.
 These existing parser regressions cover all five cases listed in the assignment,
 asserting ERROR grouping, exact recovery ranges, and zero progress-callback calls;
 no duplicate regression was added.
-Strict all-targets clippy for `ts_port` and `ts_port_cmake` also passes. This
+The full `ts_port` suite also passes: 212 unit tests and all integration/doc
+tests, including both command-recovery regressions. Strict all-targets clippy
+for `ts_port` and `ts_port_cmake` also passes. This
 revalidation changes only this record: no C deviations, unsafe code, new
 warnings, or generated-file changes were introduced.
 
@@ -49,7 +51,8 @@ delimiter levels, callback order, and native-endian snapshot round trips.
 - `cargo check --workspace --all-targets`: passes. The existing unused-assignment
   warning in host-owned `grammars/yaml/src/lex.rs:20` is unrelated and unchanged.
 - `cargo test -p ts_port_cmake`: **24 tests pass**.
-- `cargo test -p ts_port --test cmake_command_recovery`: **2 tests pass**.
+- `cargo test -p ts_port`: **212 unit tests and all integration/doc tests pass**,
+  including both `cmake_command_recovery` tests.
 - `cargo clippy -p ts_port_cmake -p ts_port --all-targets -- -D warnings`: passes.
 
 This verification adds no runtime changes, deviations from C, or unsafe code.
