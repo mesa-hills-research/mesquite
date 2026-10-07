@@ -29,11 +29,11 @@ Existing regression coverage is sufficient and was rerun rather than duplicated:
   inputs, chunk sizes 1 through 3, fresh parsers and reuse after bracket arguments
   and comments, node kinds/ids, ranges, flags, child counts, and progress calls.
 
-## Verification on baseline `155e51e`
+## Verification on baseline `8199471`
 
-Reassigned bucket `381f9bd4` already passes on merged baseline `155e51e`.
+Reassigned bucket `381f9bd4` already passes on merged baseline `8199471`.
 Rechecked the current C source and reran the checks below on this baseline;
-all results remain unchanged from the previous verification (`82216a5`).
+all results remain unchanged from the previous verification (`155e51e`).
 The existing tests cover both exact inputs, so no additional behavior change
 or duplicate regression test was needed.
 
@@ -42,8 +42,8 @@ or duplicate regression test was needed.
   (incremental=7, queries enabled), fresh repository 9,878/9,878 pass.
 - `cargo check --workspace --all-targets`: passes. The existing unused-assignment
   warning in host-owned `grammars/yaml/src/lex.rs:20` remains unchanged.
-- `cargo test -p ts_port --test cmake_broken_bom`: passes.
-- `cargo test -p ts_port_cmake`: all 24 tests pass.
+- `cargo test -p ts_port -p ts_port_cmake`: all 212 runtime unit tests, all
+  integration tests (including `cmake_broken_bom`), and all 24 CMake tests pass.
 - `cargo clippy -p ts_port -p ts_port_cmake --all-targets -- -D warnings`: passes.
 
 This follow-up records verification of the already committed correction; no
