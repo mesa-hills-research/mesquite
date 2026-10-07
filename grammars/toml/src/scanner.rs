@@ -13,7 +13,9 @@ pub(crate) struct Scanner;
 
 // Keep quote-run callbacks and bookkeeping out of the line-ending scan path.
 // Specialize the two delimiters so their token IDs and code points do not
-// occupy registers across the lexer callbacks.
+// occupy registers across the lexer callbacks. Quote runs are uncommon
+// compared with the scanner's ordinary LF tokens.
+#[cold]
 #[inline(never)]
 fn scan_multiline_string_end<
     const DELIMITER: i32,
@@ -54,7 +56,9 @@ fn scan_multiline_string_end<
 }
 
 // LF takes the direct path in scan. Dispatch the remaining starts only
-// when needed, keeping quote bookkeeping out of that common path.
+// when needed. Marking these helpers cold lets the enabled LF path fall
+// through the entry checks instead of branching around failure returns.
+#[cold]
 #[inline(never)]
 fn scan_non_newline(lexer: &mut dyn Lexer, valid_symbols: &[bool; 5], mut lookahead: i32) -> bool {
     match lookahead {
