@@ -401,6 +401,28 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_rejects_non_delimiters_without_state_or_lexer_effects() {
+        let mut scanner = Scanner::default();
+        let state = [0xfd, 7, 8, 3];
+        scanner.deserialize(&state);
+        let mut valid_symbols = [true; 15];
+        valid_symbols[Token::TriggerError as usize] = false;
+        // Include low-byte aliases of all delimiters, NUL, invalid scalar
+        // values, and non-ASCII scalars. Dispatch must compare full codepoints
+        // before narrowing the matched delimiter to a byte for its handler.
+        for codepoint in (0..=0x2ff).chain([i32::MIN, -1, 0xd800, 0x10ffff, i32::MAX]) {
+            if matches!(codepoint, 0x24 | 0x2a | 0x5f | 0x60 | 0x7e) {
+                continue;
+            }
+            let mut lexer = TestLexer::new("");
+            lexer.input = vec![codepoint];
+            assert!(!scanner.scan(&mut lexer, &valid_symbols), "{codepoint:x}");
+            assert!(lexer.calls.borrow().is_empty(), "{codepoint:x}");
+            assert_eq!(snapshot(&mut scanner), state, "{codepoint:x}");
+        }
+    }
+
+    #[test]
     fn leaf_spans_preserve_lexer_call_order_and_independent_lengths() {
         for (delimiter, open, close, state_index) in [
             ('`', Token::CodeSpanStart, Token::CodeSpanClose, 1),
@@ -715,6 +737,30 @@ mod tests {
                                     flags,
                                 );
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn span_content_classes_and_unicode_aliases_match_c() {
+        for delimiter in *b"`$" {
+            for content in (0..=0xff).chain([
+                -1,
+                0x100 + i32::from(delimiter),
+                0x10000 + i32::from(delimiter),
+                0x10ffff,
+            ]) {
+                for opening_count in [1, 2] {
+                    let mut input = vec![i32::from(delimiter); opening_count];
+                    input.extend([i32::from(b'x'), content, i32::from(b' ')]);
+                    input.extend(std::iter::repeat_n(i32::from(delimiter), opening_count));
+                    input.push(content);
+                    for previous_length in [0, 1, 2] {
+                        for flags in 0..8 {
+                            compare_leaf_with_reference(&input, delimiter, previous_length, flags);
                         }
                     }
                 }
