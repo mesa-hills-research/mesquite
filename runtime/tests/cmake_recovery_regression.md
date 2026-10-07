@@ -6,7 +6,7 @@ an exposed `(` in the port, around byte 3335 in a malformed quoted variable
 reference.
 
 The bucket already passed at revision `9b5a105` and was reverified after the
-merged fixes through `029b957`. The scanner initialization/reset correction is
+merged fixes through `6df21f5`. The scanner initialization/reset correction is
 already merged; no additional runtime or scanner behavior change is needed.
 
 ## Root cause and existing correction
@@ -31,7 +31,7 @@ scanners.
 
 ## Verification
 
-All checks below were rerun at `029b957`; the assigned input passed before
+All checks below were rerun at `6df21f5`; the assigned input passed before
 any changes. Existing scanner and parser regressions already cover the reduced
 Registry-query expression, including single-byte input chunks and incremental
 repair/restoration, so no duplicate test or further behavior change was needed.
@@ -51,7 +51,7 @@ repair/restoration, so no duplicate test or further behavior change was needed.
 - `cargo test -p ts_port --test cmake_command_recovery`: 2 tests pass,
   covering malformed variable references with fresh and reused scanners.
 - `cargo test -p ts_port`: all 212 unit tests and all integration tests pass,
-  including both `cmake_quoted_variable_recovery` tests, which cover fresh/reused
+  including all three `cmake_quoted_variable_recovery` tests, which cover fresh/reused
   scanners, single-byte input chunks, and incremental repair/restoration.
 - `cargo clippy -p ts_port_cmake -p ts_port --all-targets -- -D warnings`: passes.
 
@@ -208,7 +208,7 @@ new unsafe code, warnings, or generated-file modifications are introduced.
 
 ## Empty recovery-content bucket `f5e2762e`
 
-Reverified at `f36ba56` (previously at `1e51df0`, `49dddb9`, `6a16e7c`, and `4949d42`):
+Reverified at `b875c2d` (previously at `f36ba56`):
 all 16 reported inputs already pass on the starting checkout. The merged scanner
 initialization/reset correction above allows `bracket_argument_content` at EOF
 without an opener, including after `a` and after skipping the newline in `if(\n`.
@@ -236,7 +236,7 @@ The current C source was compared directly with the Rust scanner: creation uses
 The matching implementation and all regression cases were already present at
 this starting revision, so no duplicate test or behavior change was warranted.
 
-Checks rerun for this bucket at `f36ba56`:
+Checks rerun for this bucket at `b875c2d`:
 
 - `run_oracle(inputs = "bucket:f5e2762e")`: 16/16 pass.
 - `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs
@@ -255,7 +255,7 @@ changes are introduced.
 
 ## Unterminated-call bucket `7f8795fb`
 
-Reverified at `24e0c71` (previously at `7586f2b`, `6674d74`, and `9a8563b`): all three
+Reverified at `7212094` (previously at `24e0c71`, `7586f2b`, `6674d74`, and `9a8563b`): all three
 reported inputs already pass on the starting checkout with the merged scanner
 initialization/reset correction above. The current C scanner uses
 `ts_calloc` and clears both fields on empty or invalid-length snapshots, matching
@@ -273,7 +273,7 @@ input chunks. The earlier verification note incorrectly described all three coun
 as zero; the existing tests already assert the correct counts. No additional
 behavior change or duplicate test is needed.
 
-Validation rerun for this bucket at `24e0c71`:
+Validation rerun for this bucket at `7212094`:
 
 - `run_oracle(inputs = "bucket:7f8795fb")`: 3/3 pass.
 - `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs
@@ -281,11 +281,11 @@ Validation rerun for this bucket at `24e0c71`:
 - `cargo check --workspace --all-targets`: passes, with only the existing warning
   in host-owned `grammars/yaml/src/lex.rs:20` noted above.
 - `cargo test -p ts_port_cmake`: 24 tests pass.
-- `cargo test -p ts_port`: all unit and integration tests pass, including the
-  three `cmake_unterminated_call_recovery` tests, which also assert each
-  direct ERROR child's kind, symbol id, range, flags, and child count.
+- `cargo test -p ts_port --test cmake_unterminated_call_recovery`: all three
+  tests pass, asserting each direct ERROR child's kind, symbol id, range,
+  flags, child count, and the exact progress-callback counts.
 - `cargo clippy -p ts_port -p ts_port_cmake --all-targets -- -D warnings`: passes.
-- `cargo clippy --workspace --all-targets -- -D warnings`: blocked by the
+- Prior workspace-wide clippy validation was blocked by the
   pre-existing unused-assignment warning in host-owned `grammars/yaml/src/lex.rs:20`.
   That generated file is outside this bucket and was left unchanged.
 
