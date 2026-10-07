@@ -46,3 +46,11 @@ bracket-comment parses to exercise scanner reset as well as creation.
 Reverification: the bucket remains **7/7**, the CMake gate **270/270**, and fresh
 CMake **9878/9878**. The new integration test and its `cargo clippy` target pass
 with `-D warnings`.
+
+The follow-up at `a90c17b` adds `CommandError0` and `ParenInVarName0` to the
+executable coverage. These cases assert multiline byte/point boundaries,
+leading whitespace exclusion from recovery content, preservation of an earlier
+valid command, and zero progress-callback calls. They exercise fresh and reused
+scanners. All 7 bucket, 270 gate, and 9878 fresh inputs still pass; both integration
+tests, all 24 CMake crate tests, workspace checking, and targeted clippy pass
+(the same host-owned YAML warning remains unchanged).
