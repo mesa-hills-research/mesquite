@@ -6,7 +6,7 @@ an exposed `(` in the port, around byte 3335 in a malformed quoted variable
 reference.
 
 The bucket already passed at revision `9b5a105` and was reverified after the
-merged fixes through `5a2aac7`. The scanner initialization/reset correction is
+merged fixes through `82828d1`. The scanner initialization/reset correction is
 already merged; no additional runtime or scanner behavior change is needed.
 
 ## Root cause and existing correction
@@ -31,7 +31,7 @@ scanners.
 
 ## Verification
 
-All checks below were rerun at `5a2aac7`; the assigned input passed before
+All checks below were rerun at `82828d1`; the assigned input passed before
 any changes. Existing scanner and parser regressions already cover the reduced
 Registry-query expression, so no duplicate test or further behavior change was
 needed.
@@ -150,6 +150,25 @@ confirms the zero-initialized creation/reset semantics; the bucket and its
 regression tests were already resolved on this checkout. This revalidation
 changes only the verification record, not scanner or runtime behavior.
 
+### Incremental EOF-range coverage (`45f70f2`)
+
+The assigned five inputs already pass at this starting revision. The current C
+scanner still zero-initializes creation and resets both fields on invalid-length
+snapshots, matching the merged correction; no further behavior change is needed.
+Extended `cmake_error_ranges.rs` to delete and restore the final newline twice
+using edited old trees. Both smallest bucket inputs retain the exact ERROR and
+content children, updated byte/point ranges, and zero progress callbacks. These
+checks run after fresh creation and bracket-argument/comment parses, with whole,
+seven-byte, and single-byte input chunks.
+
+Validation: bucket **5/5**, CMake gate **270/270** (incremental/query checks), and
+fresh CMake **9878/9878** (query checks) pass. All runtime and CMake scanner tests
+pass, as do strict all-targets clippy for both packages and workspace all-targets
+checking. The latter still reports the pre-existing host-owned generated YAML
+lexer warning noted above. This change only strengthens regression coverage;
+there are no runtime changes, C deviations, new unsafe code, or generated-file
+changes.
+
 ## Empty recovery-content bucket `f5e2762e`
 
 Reverified at `4977a30`: all 16 reported inputs already pass. The merged scanner
@@ -186,7 +205,7 @@ changes are introduced.
 
 ## Unterminated-call bucket `7f8795fb`
 
-Reverified at `5605c32`: all three reported inputs already pass on the starting
+Reverified at `4f9d98d`: all three reported inputs already pass on the starting
 checkout with the merged scanner initialization/reset correction above. The
 current C scanner uses
 `ts_calloc` and clears both fields on empty or invalid-length snapshots, matching
@@ -204,7 +223,7 @@ input chunks. The earlier verification note incorrectly described all three coun
 as zero; the existing tests already assert the correct counts. No additional
 behavior change or duplicate test is needed.
 
-Validation rerun for this bucket:
+Validation rerun for this bucket at `4f9d98d` (all checks completed successfully):
 
 - `run_oracle(inputs = "bucket:7f8795fb")`: 3/3 pass.
 - `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs
