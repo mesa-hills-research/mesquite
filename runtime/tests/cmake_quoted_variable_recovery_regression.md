@@ -71,7 +71,7 @@ bucket failures remain.
 
 ## Registry-query bucket `4d6cc948`
 
-Reverified at `76dae5d` (current assigned baseline, superseding `2065a0c`): the assigned
+Reverified at `c4bf20b` (current assigned baseline, superseding `76dae5d`): the assigned
 `Tests/RunCMake/find_package/Registry-query.cmake` already passes on the starting
 checkout. Its malformed `${CMAKE_ CURRENT_SOURCE_DIR}/${FILE_DIR}` reference
 exercised the same incorrect scanner initialization/reset described above:
@@ -86,7 +86,7 @@ regressions check fresh/reused scanners, whole-input and one-byte chunks, two
 incremental repair/restore cycles, tree ranges/flags, and progress counts. No
 duplicate test was added.
 
-Checks rerun for this assignment at `76dae5d` (all results below are from this
+Checks rerun for this assignment at `c4bf20b` (all results below are from this
 checkout, not inherited from the earlier verification):
 
 - `run_oracle(inputs = "bucket:4d6cc948")`: **1/1 pass**, queries enabled.
@@ -124,10 +124,10 @@ No bucket work remains. The broader oracle was not rerun in this stop-time
 verification; the all-input results above belong to their stated earlier
 revisions. No deviations from C, unsafe code, or generated-file edits were made.
 
-## Current verification at `2d84e63`
+## Current verification at `b9a452f`
 
 Rechecked the reassigned bucket on the current merged baseline against the C
-scanner source, superseding the verification at `0cd6f10`. The initialization/reset
+scanner source, superseding the verification at `2d84e63`. The initialization/reset
 correction and regression tests are already present, so no further behavior
 change or duplicate test is needed. The current C implementation still uses
 `ts_calloc` and resets both `level` and `token` on invalid-length snapshots;
@@ -140,8 +140,9 @@ Rust matches both operations. All checks below were rerun on this checkout:
   inputs** pass with query checks, including the four assigned bucket inputs.
 - `cargo check --workspace --all-targets`: passes, with only the unchanged
   host-owned YAML unused-assignment warning described above.
-- `cargo test -p ts_port_cmake -p ts_port`: all unit, integration, and doc tests
-  pass, including the three quoted-variable recovery tests covering every bucket
+- `cargo test -p ts_port_cmake -p ts_port`: **212 runtime unit tests**,
+  **24 scanner unit tests**, and **21 integration tests** pass; doc tests pass
+  as well. This includes the three quoted-variable tests covering every bucket
   fixture, parser reuse, chunked input, and incremental repair/restore cycles.
 - `cargo clippy -p ts_port -p ts_port_cmake --all-targets -- -D warnings`: passes.
 
