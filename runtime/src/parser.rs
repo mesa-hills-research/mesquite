@@ -472,7 +472,7 @@ pub(crate) fn ts_parser__can_reuse_first_leaf(
     if current_lex_mode.lex_state == StateId::MAX {
         return false;
     }
-    if !table_entry.actions.is_empty()
+    if !table_entry.actions().is_empty()
         && leaf_lex_mode == current_lex_mode
         && (leaf_symbol != language.tables.keyword_capture_token
             || (!ts_subtree_is_keyword(tree) && ts_subtree_parse_state(tree) == state))
@@ -483,7 +483,7 @@ pub(crate) fn ts_parser__can_reuse_first_leaf(
     if ts_subtree_size(tree).bytes == 0 && leaf_symbol != ts_port_tables::BUILTIN_SYM_END {
         return false;
     }
-    current_lex_mode.external_lex_state == 0 && table_entry.is_reusable
+    current_lex_mode.external_lex_state == 0 && table_entry.is_reusable()
 }
 
 pub(crate) fn ts_parser__lex(
@@ -1346,7 +1346,7 @@ pub(crate) fn ts_parser__do_all_potential_reductions(
         };
         for symbol in first_symbol..end_symbol {
             let entry = parser.parse_table_cache.table_entry(&language, state, symbol);
-            for action in entry.actions {
+            for action in entry.actions() {
                 match *action.action() {
                     ParseAction::Shift {
                         extra: false,
@@ -1865,7 +1865,7 @@ pub(crate) fn ts_parser__advance(
 
         let mut did_reduce = false;
         let mut last_reduction_version = STACK_VERSION_NONE;
-        for entry in table_entry.actions {
+        for entry in table_entry.actions() {
             match *entry.action() {
                 ParseAction::Shift {
                     state: shift_state,
@@ -1914,9 +1914,9 @@ pub(crate) fn ts_parser__advance(
                         u32::from(child_count),
                         i32::from(dynamic_precedence),
                         production_id,
-                        table_entry.actions.len() > 1,
+                        table_entry.actions().len() > 1,
                         lookahead.is_null(),
-                        table_entry.actions.len() == 1,
+                        table_entry.actions().len() == 1,
                     );
                     did_reduce = true;
                     if reduction_version != STACK_VERSION_NONE {
@@ -1976,7 +1976,7 @@ pub(crate) fn ts_parser__advance(
             && !ts_language_is_reserved_word(&language, state, ts_subtree_symbol(&lookahead))
         {
             table_entry = parser.parse_table_cache.table_entry(&language, state, word_symbol);
-            if !table_entry.actions.is_empty() {
+            if !table_entry.actions().is_empty() {
                 parser3_log!(
                     parser,
                     format_args!(

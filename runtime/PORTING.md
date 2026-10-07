@@ -157,15 +157,22 @@ state, scanner, reusable-node path, token cache, old/finished roots and scratch
 buffers. It is automatically Send. `Language` is a Copy/Clone handle to
 `&'static LanguageTables`; conversion from that reference is implemented. Grammar
 strings/action runs can therefore be returned with 'static lifetimes, without
-leaking freshly allocated strings. Parser owns a 4,096-entry direct-mapped cache
-of immutable compact-table lookups (32 KiB). Dense rows bypass it. Each entry
-packs a valid bit, the full state/symbol key, and the u16 value; collisions run
-the original lookup. Clear it whenever setting a language, including rejected
-languages. Ordinary parse resets need not clear it. Cell-backed entries require
-no synchronization because this cache belongs to one Send (not Sync) parser.
-Actions are the host's header-free slices of
-`ParseActionEntry`; use `.action()` on each action entry, do not reinterpret a
-slice or allocate a new action Vec for every lookup. TableEntry count is len().
+leaking freshly allocated strings. Parser owns a 16,384-entry direct-mapped cache
+of immutable compact-table lookups (128 KiB). Dense rows bypass it. Each entry
+packs a nonzero 33-bit key (the full u32 state/symbol pair plus one) and the u16
+value; collisions run the original lookup in a cold helper. Clear it whenever
+setting a language, including rejected languages. Ordinary parse resets need
+not clear it. Cell-backed entries require no synchronization because this cache
+belongs to one Send (not Sync) parser.
+
+`TableEntry` is a two-word borrowed slice that includes the immutable action-list
+header, including for its empty default. Its private constructor checks the
+header and range once. `actions()` returns the header-free host slice and
+`is_reusable()` reads the flag from the retained header, avoiding a separate bool
+and its padding in every copied entry. Internal lookahead iterators still store
+header-free slices. Use `.action()` on each action entry; do not reinterpret a
+slice or allocate a new action Vec for every lookup. TableEntry count is
+`actions().len()`.
 
 `LexerState` is persistent data, while `Lexer<'a>` is a short-lived adapter
 implementing `ts_port_tables::Lexer`. It borrows state, input, and an optional
