@@ -181,10 +181,10 @@ lexer warning noted above. This change only strengthens regression coverage;
 there are no runtime changes, C deviations, new unsafe code, or generated-file
 changes.
 
-### ERROR-range revalidation at `9d5d6eb`
+### ERROR-range revalidation at `126e73b`
 
 Rechecked the previously resolved bucket at this starting revision; all checks
-below were rerun, rather than relying on the earlier verification at `efa5e3f`.
+below were rerun, rather than relying on the earlier verification at `9d5d6eb`.
 Bucket `e0b0bff8` already passes on this starting checkout. Comparing the current
 C scanner with Rust confirms the merged zero-valued creation/reset fix remains
 correct: `ts_calloc` initializes both fields, and empty or wrong-length snapshots
