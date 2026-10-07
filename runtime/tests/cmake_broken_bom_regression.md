@@ -29,11 +29,11 @@ Existing regression coverage is sufficient and was rerun rather than duplicated:
   inputs, chunk sizes 1 through 3, fresh parsers and reuse after bracket arguments
   and comments, node kinds/ids, ranges, flags, child counts, and progress calls.
 
-## Verification on baseline `727244f`
+## Verification on baseline `ae41950`
 
-Reassigned bucket `381f9bd4` already passes on merged baseline `727244f`.
+Reassigned bucket `381f9bd4` already passes on merged baseline `ae41950`.
 Rechecked the current C source and reran the checks below on this baseline;
-all results remain unchanged from the previous verification (`9d1646c`).
+all results remain unchanged from the previous verification (`727244f`).
 The existing tests cover both exact inputs, so no additional behavior change
 or duplicate regression test was needed.
 
