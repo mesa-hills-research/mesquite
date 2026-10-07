@@ -198,9 +198,112 @@ impl Block {
     }
 }
 
+// Matches the C stack's initial allocation, but needs no heap allocation.
+const INLINE_BLOCK_CAPACITY: usize = 8;
+
+/// Keep ordinary block nesting inline and in its native serialized layout.
+/// Deeper stacks spill without imposing a new nesting limit. The inline prefix
+/// stays current even when spilled, so popping back into it needs no copy.
+#[derive(Debug, Default)]
+struct BlockStack {
+    inline: [[u8; 4]; INLINE_BLOCK_CAPACITY],
+    spill: Vec<[u8; 4]>,
+    len: usize,
+}
+
+impl BlockStack {
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn clear(&mut self) {
+        self.len = 0;
+    }
+
+    fn bytes(&self) -> &[u8] {
+        if self.len <= self.inline.len() {
+            self.inline[..self.len].as_flattened()
+        } else {
+            self.spill[..self.len].as_flattened()
+        }
+    }
+
+    fn get(&self, index: usize) -> Block {
+        let blocks = if self.len <= self.inline.len() {
+            &self.inline[..self.len]
+        } else {
+            &self.spill[..self.len]
+        };
+        Block(u32::from_ne_bytes(blocks[index]))
+    }
+
+    fn push(&mut self, block: Block) {
+        if self.len < self.inline.len() {
+            self.inline[self.len] = block.0.to_ne_bytes();
+        } else {
+            if self.len == self.inline.len() {
+                self.spill.clear();
+                self.spill.extend_from_slice(&self.inline);
+            } else {
+                self.spill.truncate(self.len);
+            }
+            self.spill.push(block.0.to_ne_bytes());
+        }
+        self.len += 1;
+    }
+
+    fn pop(&mut self) {
+        self.len = self.len.saturating_sub(1);
+    }
+
+    fn restore(&mut self, bytes: &[u8]) {
+        let blocks = bytes.as_chunks::<4>().0;
+        self.len = blocks.len();
+        if self.len <= self.inline.len() {
+            self.inline[..self.len].copy_from_slice(blocks);
+        } else {
+            self.inline
+                .copy_from_slice(&blocks[..INLINE_BLOCK_CAPACITY]);
+            self.spill.clear();
+            self.spill.extend_from_slice(blocks);
+        }
+    }
+
+    #[cfg(test)]
+    fn capacity(&self) -> usize {
+        self.inline.len().max(self.spill.capacity())
+    }
+}
+
+#[cfg(test)]
+impl FromIterator<Block> for BlockStack {
+    fn from_iter<T: IntoIterator<Item = Block>>(iter: T) -> Self {
+        let mut stack = Self::default();
+        for block in iter {
+            stack.push(block);
+        }
+        stack
+    }
+}
+
+#[cfg(test)]
+impl<const N: usize> PartialEq<[Block; N]> for BlockStack {
+    fn eq(&self, other: &[Block; N]) -> bool {
+        self.len == N
+            && other
+                .iter()
+                .enumerate()
+                .all(|(i, block)| self.get(i) == *block)
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Scanner {
-    open_blocks: Vec<Block>,
+    open_blocks: BlockStack,
     state: u8,
     matched: u8,
     indentation: u8,
@@ -272,11 +375,9 @@ impl ExternalScanner for Scanner {
             self.column,
             self.fenced_code_block_delimiter_length,
         ]);
-        let mut size = 5;
-        for block in &self.open_blocks {
-            buffer[size..size + 4].copy_from_slice(&block.0.to_ne_bytes());
-            size += 4;
-        }
+        let blocks = self.open_blocks.bytes();
+        let size = 5 + blocks.len();
+        buffer[5..size].copy_from_slice(blocks);
         size
     }
 
@@ -298,13 +399,9 @@ impl ExternalScanner for Scanner {
             self.indentation = header[2];
             self.column = header[3];
             self.fenced_code_block_delimiter_length = header[4];
-            self.open_blocks.extend(
-                blocks
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .map(|&bytes| Block(u32::from_ne_bytes(bytes))),
-            );
+            // The stack is already in C's native-endian snapshot layout. Copy
+            // directly into inline storage or reuse the deep-stack allocation.
+            self.open_blocks.restore(blocks);
         }
     }
 }
@@ -1179,7 +1276,7 @@ impl Scanner {
         self.simulate = true;
         let mut matched_temp = 0u8;
         while matched_temp < self.open_blocks.len() as u8 {
-            if self.match_block(lexer, self.open_blocks[usize::from(matched_temp)]) {
+            if self.match_block(lexer, self.open_blocks.get(usize::from(matched_temp))) {
                 matched_temp = matched_temp.wrapping_add(1);
             } else {
                 return false;
@@ -1315,7 +1412,7 @@ impl Scanner {
                     }
                     break;
                 }
-                if self.match_block(lexer, self.open_blocks[usize::from(self.matched)]) {
+                if self.match_block(lexer, self.open_blocks.get(usize::from(self.matched))) {
                     partial_success = true;
                     self.matched = self.matched.wrapping_add(1);
                 } else {
@@ -1360,7 +1457,7 @@ impl Scanner {
                 self.matched = 0;
                 let mut one_will_be_matched = false;
                 while self.matched < self.open_blocks.len() as u8 {
-                    if self.match_block(lexer, self.open_blocks[usize::from(self.matched)]) {
+                    if self.match_block(lexer, self.open_blocks.get(usize::from(self.matched))) {
                         self.matched = self.matched.wrapping_add(1);
                         one_will_be_matched = true;
                     } else {
@@ -1569,7 +1666,7 @@ mod tests {
             {
                 for (state, indentation) in states {
                     let make_scanner = || Scanner {
-                        open_blocks: vec![Block::QUOTE],
+                        open_blocks: [Block::QUOTE].into_iter().collect(),
                         state,
                         indentation,
                         column: 2,
@@ -1599,6 +1696,57 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn block_stack_survives_spilling_backtracking_and_restoration() {
+        fn check(stack: &BlockStack, expected: &[Block]) {
+            assert_eq!(stack.len(), expected.len());
+            assert_eq!(stack.is_empty(), expected.is_empty());
+            let mut bytes = Vec::new();
+            for (index, block) in expected.iter().enumerate() {
+                assert_eq!(stack.get(index), *block);
+                bytes.extend_from_slice(&block.0.to_ne_bytes());
+            }
+            assert_eq!(stack.bytes(), bytes);
+        }
+
+        let mut stack = BlockStack::default();
+        let mut expected = Vec::new();
+        for round in 0..3 {
+            // Cross the inline/spill boundary repeatedly with distinct values.
+            for index in 0..40 {
+                let block = Block(0x10000 * round + index);
+                stack.push(block);
+                expected.push(block);
+                check(&stack, &expected);
+            }
+            for _ in 0..40 {
+                stack.pop();
+                expected.pop();
+                check(&stack, &expected);
+            }
+            stack.pop(); // Same empty-stack behavior as Vec::pop.
+            check(&stack, &expected);
+        }
+        let capacity = stack.capacity();
+        for count in [0, 1, 8, 9, 21, 8, 9, 2] {
+            let blocks: Vec<_> = (0..count).map(|i| Block(u32::MAX - i)).collect();
+            let mut bytes = Vec::new();
+            for block in &blocks {
+                bytes.extend_from_slice(&block.0.to_ne_bytes());
+            }
+            stack.restore(&bytes);
+            check(&stack, &blocks);
+            for remaining in (0..blocks.len()).rev() {
+                stack.pop();
+                check(&stack, &blocks[..remaining]);
+            }
+            assert_eq!(stack.capacity(), capacity);
+        }
+        stack.clear();
+        check(&stack, &[]);
+        assert_eq!(stack.capacity(), capacity);
     }
 
     #[test]
@@ -1881,7 +2029,7 @@ mod tests {
     #[test]
     fn matching_yields_outer_continuation_before_requested_inner_close() {
         let mut scanner = Scanner {
-            open_blocks: vec![Block::QUOTE, Block::FENCED_CODE],
+            open_blocks: [Block::QUOTE, Block::FENCED_CODE].into_iter().collect(),
             state: STATE_MATCHING | STATE_CLOSE_BLOCK,
             ..Scanner::default()
         };
@@ -1900,7 +2048,7 @@ mod tests {
     #[test]
     fn eof_and_error_requests_take_precedence_without_advancing() {
         let mut scanner = Scanner {
-            open_blocks: vec![Block::QUOTE],
+            open_blocks: [Block::QUOTE].into_iter().collect(),
             ..Scanner::default()
         };
         let mut lexer = TestLexer::new("");
