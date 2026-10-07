@@ -181,10 +181,10 @@ lexer warning noted above. This change only strengthens regression coverage;
 there are no runtime changes, C deviations, new unsafe code, or generated-file
 changes.
 
-### ERROR-range revalidation at `e49d25c`
+### ERROR-range revalidation at `309e13e`
 
 Rechecked the previously resolved bucket at this starting revision; all checks
-below were rerun, rather than relying on the earlier verification at `0e2ef72`.
+below were rerun, rather than relying on the earlier verification at `e49d25c`.
 Bucket `e0b0bff8` already passes on this starting checkout. Comparing the current
 C scanner with Rust confirms the merged zero-valued creation/reset fix remains
 correct; no new implementation change or duplicate regression is needed.
@@ -258,7 +258,7 @@ changes are introduced.
 
 ## Unterminated-call bucket `7f8795fb`
 
-Reverified at `1550ea4` (previously at `d0eac7b` and `7212094`): all three
+Reverified at `755e745` (previously at `1550ea4`): all three
 reported inputs already pass on the starting checkout with the merged scanner
 initialization/reset correction above. The current C scanner uses
 `ts_calloc` and clears both fields on empty or invalid-length snapshots, matching
@@ -280,7 +280,7 @@ The C source and Rust scanner were compared directly again at this revision.
 Both still use zero-valued creation/reset, and all three parser regressions were
 already present. No additional behavior change or duplicate test is warranted.
 
-Validation rerun for this bucket at `1550ea4`:
+Validation rerun for this bucket at `755e745`:
 
 - `run_oracle(inputs = "bucket:7f8795fb")`: 3/3 pass.
 - `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs
