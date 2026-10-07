@@ -178,19 +178,45 @@ impl Scanner {
         self.lookahead = lexer.lookahead();
     }
 
-    fn skp(&mut self, lexer: &mut dyn Lexer) {
-        self.cur_col = self.cur_col.wrapping_add(1);
-        self.cur_chr = self.lookahead;
-        lexer.advance(true);
-        self.lookahead = lexer.lookahead();
-    }
-
-    fn skp_nwl(&mut self, lexer: &mut dyn Lexer) {
-        self.cur_row = self.cur_row.wrapping_add(1);
-        self.cur_col = 0;
-        self.cur_chr = self.lookahead;
-        lexer.advance(true);
-        self.lookahead = lexer.lookahead();
+    // Only the final coordinates/character are visible to the rest of the
+    // scanner. Keep whitespace counters local instead of storing each step.
+    #[inline(always)]
+    fn skip_whitespace(&mut self, lexer: &mut dyn Lexer) -> (bool, i16) {
+        let mut row = self.cur_row;
+        let mut col = self.cur_col;
+        let mut previous = self.cur_chr;
+        let mut c = self.lookahead;
+        let mut has_tab = false;
+        let mut leading_spaces: i16 = 0;
+        loop {
+            match c {
+                0x20 => {
+                    if !has_tab {
+                        leading_spaces = leading_spaces.wrapping_add(1);
+                    }
+                    col = col.wrapping_add(1);
+                }
+                0x09 => {
+                    has_tab = true;
+                    col = col.wrapping_add(1);
+                }
+                0x0a | 0x0d => {
+                    has_tab = false;
+                    leading_spaces = 0;
+                    row = row.wrapping_add(1);
+                    col = 0;
+                }
+                _ => break,
+            }
+            previous = c;
+            lexer.advance(true);
+            c = lexer.lookahead();
+        }
+        self.cur_row = row;
+        self.cur_col = col;
+        self.cur_chr = previous;
+        self.lookahead = c;
+        (has_tab, leading_spaces)
     }
 
     fn mrk_end(&mut self, lexer: &mut dyn Lexer) {
@@ -590,10 +616,21 @@ impl Scanner {
         self.finish(lexer, result_symbol)
     }
 
+    // Select the context once: block scalars only need the character-range
+    // test, whereas flow scalars must also exclude collection delimiters.
+    fn scn_pln_cnt(&mut self, lexer: &mut dyn Lexer, is_in_blk: bool) -> ScanResult {
+        if is_in_blk {
+            self.scn_pln_cnt_impl::<true>(lexer)
+        } else {
+            self.scn_pln_cnt_impl::<false>(lexer)
+        }
+    }
+
     // Keep this character loop separate from the large token dispatcher so
     // its live lexer/predicate state does not spill with the dispatcher's locals.
     #[inline(never)]
-    fn scn_pln_cnt(&mut self, lexer: &mut dyn Lexer, is_in_blk: bool) -> ScanResult {
+    fn scn_pln_cnt_impl<const IS_IN_BLK: bool>(&mut self, lexer: &mut dyn Lexer) -> ScanResult {
+        let is_in_blk = IS_IN_BLK;
         let is_plain_safe = |c| is_plain_safe(c, is_in_blk);
         let mut is_cur_saf: bool = is_plain_safe(self.cur_chr);
         let mut is_lka_wsp: bool = is_wsp(self.lookahead);
@@ -606,13 +643,34 @@ impl Scanner {
                     || (is_cur_saf && self.lookahead == i32::from(b'#'))
                 {
                     loop {
+                        if self.sch_stt == SCH_STT_FRZ {
+                            // Content cannot be a schema terminator. Once frozen,
+                            // this entire run is a string, even if the preceding
+                            // whitespace froze a typed scalar.
+                            self.rlt_sch = ResultSchema::String;
+                            let mut c = self.lookahead;
+                            let mut col = self.cur_col;
+                            loop {
+                                col = col.wrapping_add(1);
+                                lexer.advance(false);
+                                let next = lexer.lookahead();
+                                if !is_plain_run(next, is_in_blk) {
+                                    self.cur_col = col;
+                                    self.cur_chr = c;
+                                    self.lookahead = next;
+                                    break;
+                                }
+                                c = next;
+                            }
+                            break;
+                        }
                         self.adv(lexer);
                         self.sch_stt =
                             advance_schema(self.sch_stt, self.cur_chr, &mut self.rlt_sch);
                         // Every plain-safe character except ':' is unconditional
                         // after another safe character. Mark the run once, before
                         // any speculative colon or non-content advance.
-                        if !is_plain_safe(self.lookahead) || self.lookahead == i32::from(b':') {
+                        if !is_plain_run(self.lookahead, is_in_blk) {
                             break;
                         }
                     }
@@ -745,14 +803,32 @@ const ASCII_PLAIN_SAFE: [u8; 128] = {
         } else {
             3
         };
+        // Bits 2 and 3 exclude speculative colons from content runs.
+        if c != b':' as usize {
+            table[c] |= table[c] << 2;
+        }
         c += 1;
     }
     table
 };
 
-fn is_plain_safe(c: i32, is_in_blk: bool) -> bool {
+fn is_plain_run(c: i32, is_in_blk: bool) -> bool {
+    if is_in_blk {
+        return is_ns_char(c) && c != i32::from(b':');
+    }
     if let Some(&flags) = ASCII_PLAIN_SAFE.get(c as usize) {
-        flags & if is_in_blk { 1 } else { 2 } != 0
+        flags & 8 != 0
+    } else {
+        is_non_ascii_ns_char(c)
+    }
+}
+
+fn is_plain_safe(c: i32, is_in_blk: bool) -> bool {
+    if is_in_blk {
+        return is_ns_char(c);
+    }
+    if let Some(&flags) = ASCII_PLAIN_SAFE.get(c as usize) {
+        flags & 2 != 0
     } else {
         is_non_ascii_ns_char(c)
     }
@@ -821,6 +897,12 @@ impl ExternalScanner for Scanner {
         self.lookahead = lexer.lookahead();
         self.mrk_end(lexer);
 
+        let (has_tab_ind, leading_spaces) = if is_wsp(self.lookahead) || is_nwl(self.lookahead) {
+            self.skip_whitespace(lexer)
+        } else {
+            (false, 0)
+        };
+
         let allow_comment: bool = !(valid_symbols[R_DQT_STR_CTN]
             || valid_symbols[BR_DQT_STR_CTN]
             || valid_symbols[R_SQT_STR_CTN]
@@ -835,45 +917,24 @@ impl ExternalScanner for Scanner {
             .map_or(-1, |&indent| Indent::from_bytes(indent).length);
         let cur_ind_typ = current.kind;
 
-        let mut has_tab_ind: bool = false;
-        let mut leading_spaces: i16 = 0;
-
-        loop {
-            if self.lookahead == i32::from(b' ') {
-                if !has_tab_ind {
-                    leading_spaces = leading_spaces.wrapping_add(1);
+        if allow_comment && self.lookahead == i32::from(b'#') {
+            if valid_symbols[BR_BLK_STR_CTN] && valid_symbols[BL] && self.cur_col <= cur_ind {
+                if !self.pop_ind() {
+                    return false;
                 }
-                self.skp(lexer);
-            } else if self.lookahead == i32::from(b'\t') {
-                has_tab_ind = true;
-                self.skp(lexer);
-            } else if is_nwl(self.lookahead) {
-                has_tab_ind = false;
-                leading_spaces = 0;
-                self.skp_nwl(lexer);
-            } else if allow_comment && self.lookahead == i32::from(b'#') {
-                if valid_symbols[BR_BLK_STR_CTN] && valid_symbols[BL] && self.cur_col <= cur_ind {
-                    if !self.pop_ind() {
-                        return false;
-                    }
-                    return self.finish(lexer, BL);
-                }
-                if if valid_symbols[BR_BLK_STR_CTN] {
-                    self.cur_row == self.row
-                } else {
-                    self.cur_col == 0 || self.cur_row != self.row || self.cur_col > self.col
-                } {
-                    self.adv(lexer);
-                    while !is_nwl(self.lookahead) && self.lookahead != 0 {
-                        self.adv(lexer);
-                    }
-                    self.mrk_end(lexer);
-                    return self.finish(lexer, COMMENT);
-                } else {
-                    break;
-                }
+                return self.finish(lexer, BL);
+            }
+            if if valid_symbols[BR_BLK_STR_CTN] {
+                self.cur_row == self.row
             } else {
-                break;
+                self.cur_col == 0 || self.cur_row != self.row || self.cur_col > self.col
+            } {
+                self.adv(lexer);
+                while !is_nwl(self.lookahead) && self.lookahead != 0 {
+                    self.adv(lexer);
+                }
+                self.mrk_end(lexer);
+                return self.finish(lexer, COMMENT);
             }
         }
 
@@ -2312,6 +2373,13 @@ mod tests {
                 || (0x10000..=0x10ffff).contains(&c);
             assert_eq!(is_ns_char(c), expected, "{c:#x}");
             assert_eq!(is_plain_safe(c, true), expected, "{c:#x}");
+            for is_in_blk in [false, true] {
+                assert_eq!(
+                    is_plain_run(c, is_in_blk),
+                    is_plain_safe(c, is_in_blk) && c != i32::from(b':'),
+                    "{c:#x}, block={is_in_blk}"
+                );
+            }
             assert_eq!(
                 is_plain_safe(c, false),
                 expected && !matches!(c, 0x2c | 0x5b | 0x5d | 0x7b | 0x7d),
@@ -2687,6 +2755,107 @@ mod tests {
                 1
             );
         }
+    }
+
+    #[test]
+    fn frozen_content_runs_force_strings_for_every_initial_schema() {
+        for initial_schema in [
+            ResultSchema::String,
+            ResultSchema::Int,
+            ResultSchema::Null,
+            ResultSchema::Bool,
+            ResultSchema::Float,
+        ] {
+            for is_in_blk in [false, true] {
+                let mut scanner = scanner();
+                let mut lexer = TestLexer::new(&format!("{}: tail", "x#é中".repeat(8193)));
+                scanner.cur_col = i16::MAX;
+                scanner.cur_chr = b' ' as i32;
+                scanner.lookahead = lexer.lookahead();
+                scanner.sch_stt = SCH_STT_FRZ;
+                scanner.rlt_sch = initial_schema;
+                assert_eq!(scanner.scn_pln_cnt(&mut lexer, is_in_blk), ScanResult::Fail);
+                assert_eq!(scanner.sch_stt, SCH_STT_FRZ);
+                assert_eq!(scanner.rlt_sch, ResultSchema::String);
+                assert_eq!(lexer.end, 32772);
+                assert_eq!(lexer.position, 32773);
+                assert_eq!(scanner.end_col, 3);
+                assert_eq!(scanner.cur_col, 4);
+                assert_eq!(scanner.cur_chr, b':' as i32);
+                assert_eq!(scanner.lookahead, b' ' as i32);
+            }
+        }
+    }
+
+    #[test]
+    fn whitespace_locals_match_c_counters_and_skip_calls() {
+        let check = |input: &str, row: i16, col: i16| {
+            let mut scanner = scanner();
+            scanner.cur_row = row;
+            scanner.cur_col = col;
+            scanner.cur_chr = b'x' as i32;
+            let mut lexer = TestLexer::new(input);
+            scanner.lookahead = lexer.lookahead();
+            let mut reference = TestLexer::new(input);
+            let mut c = reference.lookahead();
+            let mut previous = scanner.cur_chr;
+            let mut row = row;
+            let mut col = col;
+            let mut leading_spaces: i16 = 0;
+            let mut has_tab = false;
+            loop {
+                if c == b' ' as i32 {
+                    if !has_tab {
+                        leading_spaces = leading_spaces.wrapping_add(1);
+                    }
+                    col = col.wrapping_add(1);
+                } else if c == b'\t' as i32 {
+                    has_tab = true;
+                    col = col.wrapping_add(1);
+                } else if c == b'\r' as i32 || c == b'\n' as i32 {
+                    has_tab = false;
+                    leading_spaces = 0;
+                    row = row.wrapping_add(1);
+                    col = 0;
+                } else {
+                    break;
+                }
+                previous = c;
+                reference.advance(true);
+                c = reference.lookahead();
+            }
+            assert_eq!(
+                scanner.skip_whitespace(&mut lexer),
+                (has_tab, leading_spaces)
+            );
+            assert_eq!(
+                (
+                    scanner.cur_row,
+                    scanner.cur_col,
+                    scanner.cur_chr,
+                    scanner.lookahead
+                ),
+                (row, col, previous, c)
+            );
+            assert_eq!(lexer.events, reference.events);
+            assert_eq!(lexer.position, reference.position);
+            assert_eq!(lexer.lookahead_calls.get(), reference.lookahead_calls.get());
+        };
+        let alphabet = [' ', '\t', '\r', '\n', '\0', '#', 'é', '\u{a0}'];
+        for mut case in 0..alphabet.len().pow(4) {
+            let text: String = (0..4)
+                .map(|_| {
+                    let c = alphabet[case % alphabet.len()];
+                    case /= alphabet.len();
+                    c
+                })
+                .collect();
+            check(&text, i16::MAX - 1, i16::MAX - 1);
+        }
+        // Wrapping applies both to columns/rows and to the leading-space count.
+        check(&" ".repeat(65539), 0, i16::MAX);
+        check(&"\r\n".repeat(32769), i16::MAX, 0);
+        check(&format!(" \t{}#", " ".repeat(32768)), -1, -1);
     }
 
     #[test]
