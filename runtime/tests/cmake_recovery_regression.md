@@ -174,7 +174,7 @@ changes.
 
 ## Empty recovery-content bucket `f5e2762e`
 
-Reverified at `2ab898f`: all 16 reported inputs already pass. The merged scanner
+Reverified at `fd1848c`: all 16 reported inputs already pass. The merged scanner
 initialization/reset correction above allows `bracket_argument_content` at EOF
 without an opener, including after `a` and after skipping the newline in `if(\n`.
 This zero-width token is a real scanner token, not an inserted missing node.
@@ -198,7 +198,7 @@ The current C source was compared directly with the Rust scanner: creation uses
 The matching implementation and all regression cases were already present at
 this starting revision, so no duplicate test or behavior change was warranted.
 
-Checks rerun for this bucket at `2ab898f`:
+Checks rerun for this bucket at `fd1848c`:
 
 - `run_oracle(inputs = "bucket:f5e2762e")`: 16/16 pass.
 - `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs
