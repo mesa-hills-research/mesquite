@@ -55,12 +55,13 @@ This follow-up changes only this verification note; it introduces no deviation
 from C and no new unsafe code.
 
 
-### Revalidation of `4d6cc948` at `25a84d3`
+### Revalidation of `4d6cc948` at `31e563f`
 
 The assigned Registry-query input still passes before any new changes. Direct
 comparison with the current C scanner confirms that the merged zero-valued
 creation/reset behavior above is the required correction; no additional
-runtime change is warranted.
+runtime change is warranted. The checks below were rerun at this revision,
+including the parser regression with both fresh and reused scanner state.
 
 - Bucket: **1/1 passes**, with query checks.
 - All CMake inputs: **270/270 gate** (including incremental/query checks) and
