@@ -125,6 +125,15 @@ struct Indent {
     length: i16,
 }
 
+impl Default for Indent {
+    fn default() -> Self {
+        Self {
+            kind: IND_ROT,
+            length: -1,
+        }
+    }
+}
+
 impl Indent {
     fn from_bytes([k0, k1, l0, l1]: [u8; 4]) -> Self {
         Self {
@@ -151,11 +160,16 @@ pub(crate) struct Scanner {
     // Native-endian pairs for bulk state copies. The constant root indentation
     // is implicit: it is never popped or serialized by the C scanner.
     indents: Vec<[u8; 4]>,
+    // The top is inspected several times in every scan. Cache the decoded
+    // pair, including the implicit root, while keeping wire bytes canonical.
+    top_indent: Indent,
     // Temporary state, not serialized.
     end_row: i16,
     end_col: i16,
     cur_row: i16,
     cur_col: i16,
+    // History used by schema transitions and content entry. Frozen content
+    // runs do not refresh it once no further scanner code can observe it.
     cur_chr: i32,
     // Cached until the next advance; unlike C field reads, Lexer calls are dynamic.
     lookahead: i32,
@@ -261,22 +275,27 @@ impl Scanner {
 
     #[inline(always)]
     fn current_indent(&self) -> Indent {
-        self.indents.last().copied().map_or(
-            Indent {
-                kind: IND_ROT,
-                length: -1,
-            },
-            Indent::from_bytes,
-        )
+        self.top_indent
     }
 
     fn pop_ind(&mut self) -> bool {
-        self.indents.pop().is_some()
+        if self.indents.pop().is_none() {
+            return false;
+        }
+        self.top_indent = self
+            .indents
+            .last()
+            .copied()
+            .map(Indent::from_bytes)
+            .unwrap_or_default();
+        true
     }
 
     #[inline(always)]
     fn push_ind(&mut self, kind: i16, length: i16) {
-        self.indents.push(Indent { kind, length }.to_bytes());
+        let indent = Indent { kind, length };
+        self.indents.push(indent.to_bytes());
+        self.top_indent = indent;
     }
 
     fn may_upd_imp_col(&mut self, row: i16, col: i16, has_tab: bool) {
@@ -669,14 +688,17 @@ impl Scanner {
         if plain_kind::<BLOCK>(self.lookahead) == 0 {
             return ScanResult::Stop;
         }
-        let mut previous_safe =
-            self.lookahead != i32::from(b'#') || plain_kind::<BLOCK>(self.cur_chr) >= 2;
+        if self.lookahead == i32::from(b'#') && plain_kind::<BLOCK>(self.cur_chr) < 2 {
+            return ScanResult::Success;
+        }
         loop {
             match plain_kind::<BLOCK>(self.lookahead) {
                 0 => break,
                 1 => {
                     self.adv(lexer);
-                    previous_safe = false;
+                    if self.lookahead == i32::from(b'#') {
+                        break;
+                    }
                 }
                 2 => {
                     self.adv(lexer);
@@ -684,11 +706,12 @@ impl Scanner {
                         return ScanResult::Fail;
                     }
                     self.mrk_end(lexer);
-                    previous_safe = true;
                 }
-                3 if !previous_safe => break,
                 _ => {
-                    let mut c = self.lookahead;
+                    // After freezing, the run's last character is not needed
+                    // here or by the caller. A following newline refreshes
+                    // cur_chr before the next content call; otherwise the
+                    // scalar is finished.
                     let mut col = self.cur_col;
                     loop {
                         col = col.wrapping_add(1);
@@ -698,14 +721,11 @@ impl Scanner {
                         // Block mode uses a range check instead of an ASCII-table load.
                         if !is_plain_run(next, BLOCK) {
                             self.cur_col = col;
-                            self.cur_chr = c;
                             self.lookahead = next;
                             break;
                         }
-                        c = next;
                     }
                     self.mrk_end(lexer);
-                    previous_safe = true;
                 }
             }
         }
@@ -1114,6 +1134,23 @@ impl ExternalScanner for Scanner {
     }
 
     fn deserialize(&mut self, buffer: &[u8]) {
+        // After a successful scan the parser commonly restores exactly the
+        // state just serialized. All live entries use the native wire format,
+        // so equality is lossless even when serialization truncates deep stacks.
+        if buffer.len() == 10 + 4 * self.indents.len() {
+            let header = [
+                self.row.to_ne_bytes(),
+                self.col.to_ne_bytes(),
+                self.blk_imp_row.to_ne_bytes(),
+                self.blk_imp_col.to_ne_bytes(),
+                self.blk_imp_tab.to_ne_bytes(),
+            ];
+            if buffer[..10] == *header.as_flattened()
+                && buffer[10..] == *self.indents.as_flattened()
+            {
+                return;
+            }
+        }
         self.indents.clear();
         if buffer.is_empty() {
             self.row = 0;
@@ -1136,6 +1173,12 @@ impl ExternalScanner for Scanner {
             self.indents
                 .extend_from_slice(buffer[10..].as_chunks::<4>().0);
         }
+        self.top_indent = self
+            .indents
+            .last()
+            .copied()
+            .map(Indent::from_bytes)
+            .unwrap_or_default();
     }
 }
 
@@ -2596,6 +2639,107 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_equality_checks_every_header_and_indentation_byte() {
+        let mut original = scanner();
+        original.row = i16::MIN;
+        original.col = i16::MAX;
+        original.blk_imp_row = -5;
+        original.blk_imp_col = 42;
+        original.blk_imp_tab = 1;
+        let mut bytes = [0; SERIALIZATION_BUFFER_SIZE];
+        let mut restored = scanner();
+        for depth in 0..20 {
+            let size = original.serialize(&mut bytes);
+            for offset in 0..size {
+                restored.deserialize(&bytes[..size]);
+                // The fast no-op path must leave the decoded top consistent.
+                restored.deserialize(&bytes[..size]);
+                assert_eq!(restored.current_indent(), original.current_indent());
+                let mut changed = bytes;
+                changed[offset] ^= 0xa5;
+                restored.deserialize(&changed[..size]);
+                let mut roundtrip = [0; SERIALIZATION_BUFFER_SIZE];
+                assert_eq!(restored.serialize(&mut roundtrip), size);
+                assert_eq!(&roundtrip[..size], &changed[..size]);
+                assert_eq!(
+                    restored.current_indent(),
+                    restored
+                        .indents
+                        .last()
+                        .copied()
+                        .map(Indent::from_bytes)
+                        .unwrap_or_default(),
+                    "depth {depth}, changed byte {offset}"
+                );
+                restored.deserialize(&changed[..size]);
+                assert_eq!(restored.serialize(&mut roundtrip), size);
+                assert_eq!(&roundtrip[..size], &changed[..size]);
+            }
+            original.push_ind(if depth % 2 == 0 { IND_MAP } else { IND_SEQ }, depth);
+        }
+    }
+
+    #[test]
+    fn cached_indent_restores_truncated_live_stacks_and_survives_pops() {
+        let mut scanner = scanner();
+        let mut bytes = [0; SERIALIZATION_BUFFER_SIZE];
+        for length in 0..300 {
+            scanner.push_ind(IND_MAP, length);
+            assert_eq!(
+                scanner.current_indent(),
+                Indent {
+                    kind: IND_MAP,
+                    length
+                }
+            );
+        }
+        let size = scanner.serialize(&mut bytes);
+        assert_eq!(size, 1022);
+        assert_eq!(scanner.current_indent().length, 299);
+        // Comparing only the serializable prefix would incorrectly preserve
+        // the live 300-entry stack and its cached top instead of restoring 253.
+        scanner.deserialize(&bytes[..size]);
+        assert_eq!(scanner.indents.len(), 253);
+        assert_eq!(scanner.current_indent().length, 252);
+        for length in (0..253).rev() {
+            let size = scanner.serialize(&mut bytes);
+            scanner.deserialize(&bytes[..size]);
+            assert_eq!(scanner.current_indent().length, length);
+            assert!(scanner.pop_ind());
+        }
+        assert_eq!(scanner.current_indent(), Indent::default());
+        assert!(!scanner.pop_ind());
+        scanner.push_ind(IND_STR, -32768);
+        scanner.deserialize(&[]);
+        assert_eq!(scanner.current_indent(), Indent::default());
+        assert!(scanner.indents.is_empty());
+    }
+
+    #[test]
+    fn failed_scan_metadata_changes_cannot_bypass_snapshot_restore() {
+        let mut scanner = scanner();
+        scanner.push_ind(IND_MAP, 0);
+        scanner.push_ind(IND_SEQ, 2);
+        let mut before = [0; SERIALIZATION_BUFFER_SIZE];
+        let size = scanner.serialize(&mut before);
+        let mut lexer = TestLexer::new("!<bad");
+        assert!(!scanner.scan(&mut lexer, &valid(&[R_TAG])));
+        assert_eq!(scanner.blk_imp_row, 0);
+        scanner.deserialize(&before[..size]);
+        assert_eq!(scanner.blk_imp_row, -1);
+        assert_eq!(
+            scanner.current_indent(),
+            Indent {
+                kind: IND_SEQ,
+                length: 2
+            }
+        );
+        let mut after = [0; SERIALIZATION_BUFFER_SIZE];
+        assert_eq!(scanner.serialize(&mut after), size);
+        assert_eq!(&after[..size], &before[..size]);
+    }
+
+    #[test]
     fn serialization_is_native_i16_pairs_without_the_root() {
         let mut scanner = scanner();
         scanner.row = -32_760;
@@ -2854,7 +2998,6 @@ mod tests {
                         s.end_col,
                         s.cur_row,
                         s.cur_col,
-                        s.cur_chr,
                         s.lookahead,
                         s.sch_stt,
                         s.rlt_sch,
@@ -2865,6 +3008,11 @@ mod tests {
                     state(&expected),
                     "{input:?}, block={is_in_blk}"
                 );
+                // Frozen string content no longer maintains an unused last
+                // character. Non-frozen schema transitions still require it.
+                if actual.sch_stt != SCH_STT_FRZ || actual.rlt_sch != ResultSchema::String {
+                    assert_eq!(actual.cur_chr, expected.cur_chr);
+                }
                 assert_eq!(
                     (lexer.position, lexer.end),
                     (reference.position, reference.end)
@@ -3142,6 +3290,47 @@ mod tests {
             let size = scanner.serialize(&mut bytes);
             assert_eq!(size, 10);
             assert_eq!(&bytes[2..4], &scanner.col.to_ne_bytes());
+        }
+    }
+
+    #[test]
+    fn frozen_scalar_continuations_refresh_history_before_comment_checks() {
+        for (input, end, position) in [
+            ("abc\n # comment", 3, 5),
+            ("a#b\n # comment", 3, 5),
+            ("1a\n # comment", 2, 4),
+            ("abc\n :#tail", 11, 11),
+            ("abc\n x#tail", 11, 11),
+            ("abc\n x # comment", 6, 7),
+            ("abc \t# comment", 3, 5),
+        ] {
+            for (single, multi) in [
+                (R_SGL_PLN_STR_BLK, R_MTL_PLN_STR_BLK),
+                (R_SGL_PLN_STR_FLW, R_MTL_PLN_STR_FLW),
+            ] {
+                for (row, col) in [(0i16, 0i16), (i16::MAX, i16::MAX)] {
+                    let mut scanner = scanner();
+                    scanner.row = row;
+                    scanner.col = col;
+                    scanner.push_ind(IND_MAP, 0);
+                    let mut lexer = TestLexer::new(input);
+                    assert!(scanner.scan(&mut lexer, &valid(&[single, multi])));
+                    assert_eq!((lexer.end, lexer.position), (end, position), "{input:?}");
+                    let prefix = &input[..end];
+                    let multiline = prefix.contains('\n');
+                    assert_eq!(
+                        lexer.symbol as usize,
+                        if multiline { multi } else { single }
+                    );
+                    let expected_col = if multiline {
+                        prefix.rsplit('\n').next().unwrap().len() as i16
+                    } else {
+                        col.wrapping_add(end as i16)
+                    };
+                    assert_eq!(scanner.col, expected_col);
+                    assert_eq!(scanner.row, row.wrapping_add(i16::from(multiline)));
+                }
+            }
         }
     }
 
