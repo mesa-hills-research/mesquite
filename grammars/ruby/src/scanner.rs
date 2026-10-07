@@ -60,6 +60,47 @@ pub(crate) struct Scanner {
     open_heredocs: Vec<Heredoc>,
 }
 
+// C reads lookahead directly from TSLexer. Keep the same value locally so
+// repeated character tests do not each dispatch through the Lexer trait object.
+// Only advance changes lookahead; mark_end and result-symbol updates do not.
+struct CachedLexer<'a> {
+    inner: &'a mut dyn Lexer,
+    lookahead: i32,
+}
+
+impl<'a> CachedLexer<'a> {
+    fn new(inner: &'a mut dyn Lexer) -> Self {
+        let lookahead = inner.lookahead();
+        Self { inner, lookahead }
+    }
+
+    fn lookahead(&self) -> i32 {
+        self.lookahead
+    }
+
+    fn advance(&mut self, skip: bool) {
+        self.inner.advance(skip);
+        self.lookahead = self.inner.lookahead();
+    }
+
+    fn mark_end(&mut self) {
+        self.inner.mark_end();
+    }
+
+    fn set_result_symbol(&mut self, symbol: u16) {
+        self.inner.set_result_symbol(symbol);
+    }
+
+    fn is_at_included_range_start(&self) -> bool {
+        self.inner.is_at_included_range_start()
+    }
+
+    fn eof(&self) -> bool {
+        // A nonzero lookahead is never EOF, but zero can be an embedded NUL.
+        self.lookahead == 0 && self.inner.eof()
+    }
+}
+
 // The reference uses wctype in the default C locale, not Unicode categories.
 fn is_space(c: i32) -> bool {
     matches!(c, 0x09..=0x0d | 0x20)
@@ -85,11 +126,11 @@ fn is_alnum(c: i32) -> bool {
     is_alpha(c) || is_digit(c)
 }
 
-fn advance(lexer: &mut dyn Lexer) {
+fn advance(lexer: &mut CachedLexer<'_>) {
     lexer.advance(false);
 }
 
-fn emit(lexer: &mut dyn Lexer, symbol: usize) -> bool {
+fn emit(lexer: &mut CachedLexer<'_>, symbol: usize) -> bool {
     lexer.set_result_symbol(symbol as u16);
     true
 }
@@ -109,7 +150,7 @@ fn is_iden_char(c: u8) -> bool {
     IDENTIFIER_BYTES[usize::from(c)]
 }
 
-fn scan_operator(lexer: &mut dyn Lexer) -> bool {
+fn scan_operator(lexer: &mut CachedLexer<'_>) -> bool {
     // The switches only recognize ASCII, so match the integer lookahead
     // directly instead of validating it as a Unicode scalar on every call.
     match lexer.lookahead() {
@@ -206,7 +247,7 @@ fn scan_operator(lexer: &mut dyn Lexer) -> bool {
     }
 }
 
-fn scan_symbol_identifier(lexer: &mut dyn Lexer) -> bool {
+fn scan_symbol_identifier(lexer: &mut CachedLexer<'_>) -> bool {
     if lexer.lookahead() == i32::from(b'@') {
         advance(lexer);
         if lexer.lookahead() == i32::from(b'@') {
@@ -237,7 +278,7 @@ fn scan_symbol_identifier(lexer: &mut dyn Lexer) -> bool {
     true
 }
 
-fn scan_heredoc_word(lexer: &mut dyn Lexer, heredoc: &mut Heredoc) {
+fn scan_heredoc_word(lexer: &mut CachedLexer<'_>, heredoc: &mut Heredoc) {
     let mut word = Vec::new();
     let mut quote = 0;
     match lexer.lookahead() {
@@ -267,7 +308,7 @@ fn scan_heredoc_word(lexer: &mut dyn Lexer, heredoc: &mut Heredoc) {
 }
 
 fn scan_short_interpolation(
-    lexer: &mut dyn Lexer,
+    lexer: &mut CachedLexer<'_>,
     has_content: bool,
     content_symbol: usize,
 ) -> bool {
@@ -306,8 +347,15 @@ fn scan_short_interpolation(
     false
 }
 
+enum WhitespaceResult {
+    Failed,
+    Skipped,
+    LineBreak,
+    HeredocStart,
+}
+
 impl Scanner {
-    fn skip(&mut self, lexer: &mut dyn Lexer) {
+    fn skip(&mut self, lexer: &mut CachedLexer<'_>) {
         self.has_leading_whitespace = true;
         lexer.advance(true);
     }
@@ -317,7 +365,11 @@ impl Scanner {
         self.open_heredocs.clear();
     }
 
-    fn scan_whitespace(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool; NONE]) -> bool {
+    fn scan_whitespace(
+        &mut self,
+        lexer: &mut CachedLexer<'_>,
+        valid_symbols: &[bool; NONE],
+    ) -> WhitespaceResult {
         let heredoc_body_start_is_valid = !self.open_heredocs.is_empty()
             && !self.open_heredocs[0].started
             && valid_symbols[HEREDOC_BODY_START];
@@ -326,7 +378,7 @@ impl Scanner {
         loop {
             if line_break_is_valid && lexer.is_at_included_range_start() {
                 lexer.mark_end();
-                return emit(lexer, LINE_BREAK);
+                return WhitespaceResult::LineBreak;
             }
             let lookahead = lexer.lookahead();
             match lookahead {
@@ -334,18 +386,16 @@ impl Scanner {
                 0x0d => {
                     // '\r'
                     if heredoc_body_start_is_valid {
-                        lexer.set_result_symbol(HEREDOC_BODY_START as u16);
                         self.open_heredocs[0].started = true;
-                        return true;
+                        return WhitespaceResult::HeredocStart;
                     }
                     self.skip(lexer);
                 }
                 0x0a => {
                     // '\n'
                     if heredoc_body_start_is_valid {
-                        lexer.set_result_symbol(HEREDOC_BODY_START as u16);
                         self.open_heredocs[0].started = true;
-                        return true;
+                        return WhitespaceResult::HeredocStart;
                     } else if line_break_is_valid && !crossed_newline {
                         lexer.mark_end();
                         advance(lexer);
@@ -363,7 +413,7 @@ impl Scanner {
                     if is_space(lexer.lookahead()) {
                         self.skip(lexer);
                     } else {
-                        return false;
+                        return WhitespaceResult::Failed;
                     }
                 }
                 _ => {
@@ -372,18 +422,18 @@ impl Scanner {
                             && lookahead != i32::from(b'&')
                             && lookahead != i32::from(b'#')
                         {
-                            lexer.set_result_symbol(LINE_BREAK as u16);
+                            return WhitespaceResult::LineBreak;
                         } else if lookahead == i32::from(b'.') {
                             // A call operator suppresses the break; a range does not.
                             advance(lexer);
                             if !lexer.eof() && lexer.lookahead() == i32::from(b'.') {
-                                lexer.set_result_symbol(LINE_BREAK as u16);
+                                return WhitespaceResult::LineBreak;
                             } else {
-                                return false;
+                                return WhitespaceResult::Failed;
                             }
                         }
                     }
-                    return true;
+                    return WhitespaceResult::Skipped;
                 }
             }
         }
@@ -391,7 +441,7 @@ impl Scanner {
 
     fn scan_open_delimiter(
         &self,
-        lexer: &mut dyn Lexer,
+        lexer: &mut CachedLexer<'_>,
         literal: &mut Literal,
         valid_symbols: &[bool; NONE],
     ) -> bool {
@@ -509,7 +559,7 @@ impl Scanner {
         }
     }
 
-    fn scan_heredoc_content(&mut self, lexer: &mut dyn Lexer) -> bool {
+    fn scan_heredoc_content(&mut self, lexer: &mut CachedLexer<'_>) -> bool {
         let heredoc = &self.open_heredocs[0];
         let mut position_in_word = 0;
         let mut look_for_heredoc_end = true;
@@ -604,7 +654,7 @@ impl Scanner {
         }
     }
 
-    fn scan_literal_content(&mut self, lexer: &mut dyn Lexer) -> bool {
+    fn scan_literal_content(&mut self, lexer: &mut CachedLexer<'_>) -> bool {
         let literal = self.literal_stack.last_mut().unwrap();
         let mut has_content = false;
         let stop_on_space =
@@ -673,10 +723,8 @@ impl Scanner {
             has_content = true;
         }
     }
-}
 
-impl ExternalScanner for Scanner {
-    fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
+    fn scan_cached(&mut self, lexer: &mut CachedLexer<'_>, valid_symbols: &[bool]) -> bool {
         // The grammar has NONE external tokens. Check that once instead of
         // bounds-checking each individual token lookup in the scanning paths.
         let valid_symbols: &[bool; NONE] = valid_symbols[..NONE].try_into().unwrap();
@@ -694,12 +742,15 @@ impl ExternalScanner for Scanner {
             }
         }
 
-        lexer.set_result_symbol(NONE as u16);
-        if !self.scan_whitespace(lexer, valid_symbols) {
-            return false;
-        }
-        if lexer.result_symbol() != NONE as u16 {
-            return true;
+        // NONE is only a local sentinel in C's whitespace scanner, not an
+        // emitted token. Return an explicit outcome instead of passing that
+        // sentinel through dynamic result-symbol calls on every attempt.
+        // As with C, a failed scan's result symbol is ignored by the parser.
+        match self.scan_whitespace(lexer, valid_symbols) {
+            WhitespaceResult::Failed => return false,
+            WhitespaceResult::Skipped => {}
+            WhitespaceResult::LineBreak => return emit(lexer, LINE_BREAK),
+            WhitespaceResult::HeredocStart => return emit(lexer, HEREDOC_BODY_START),
         }
 
         let lookahead = lexer.lookahead();
@@ -914,6 +965,12 @@ impl ExternalScanner for Scanner {
         }
         false
     }
+}
+
+impl ExternalScanner for Scanner {
+    fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
+        self.scan_cached(&mut CachedLexer::new(lexer), valid_symbols)
+    }
 
     fn serialize(&mut self, buffer: &mut [u8]) -> usize {
         let mut size = 0;
@@ -991,8 +1048,12 @@ impl ExternalScanner for Scanner {
             return;
         };
         size += 1;
-        self.open_heredocs
-            .resize_with(usize::from(open_heredoc_count), Heredoc::default);
+        // Usually both counts are zero. Avoid calling the general resize
+        // routine unless the number of open heredocs actually changed.
+        if self.open_heredocs.len() != usize::from(open_heredoc_count) {
+            self.open_heredocs
+                .resize_with(usize::from(open_heredoc_count), Heredoc::default);
+        }
         for index in 0..usize::from(open_heredoc_count) {
             let Some(bytes) = buffer.get(size..size + 4) else {
                 self.reset();
@@ -1028,6 +1089,7 @@ pub(crate) fn create() -> Box<dyn ExternalScanner> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     #[derive(Debug, PartialEq, Eq)]
     enum Call {
@@ -1043,6 +1105,8 @@ mod tests {
         symbol: u16,
         range_start: bool,
         calls: Vec<Call>,
+        lookahead_calls: Cell<usize>,
+        eof_calls: Cell<usize>,
     }
 
     impl TestLexer {
@@ -1054,12 +1118,15 @@ mod tests {
                 symbol: u16::MAX,
                 range_start: false,
                 calls: Vec::new(),
+                lookahead_calls: Cell::new(0),
+                eof_calls: Cell::new(0),
             }
         }
     }
 
     impl Lexer for TestLexer {
         fn lookahead(&self) -> i32 {
+            self.lookahead_calls.set(self.lookahead_calls.get() + 1);
             self.input.get(self.position).copied().unwrap_or(0)
         }
         fn result_symbol(&self) -> u16 {
@@ -1071,7 +1138,7 @@ mod tests {
         }
         fn advance(&mut self, skip: bool) {
             self.calls.push(Call::Advance(self.position, skip));
-            if !self.eof() {
+            if self.position < self.input.len() {
                 self.position += 1;
             }
         }
@@ -1086,6 +1153,7 @@ mod tests {
             self.range_start
         }
         fn eof(&self) -> bool {
+            self.eof_calls.set(self.eof_calls.get() + 1);
             self.position == self.input.len()
         }
     }
@@ -1121,6 +1189,86 @@ mod tests {
             allows_interpolation: interpolation,
             started: true,
         }
+    }
+
+    #[test]
+    fn cached_lookahead_refreshes_only_after_advance_and_distinguishes_nul() {
+        let mut inner = TestLexer::new("a\0b");
+        {
+            let mut lexer = CachedLexer::new(&mut inner);
+            for _ in 0..4 {
+                assert_eq!(lexer.lookahead(), i32::from(b'a'));
+                assert!(!lexer.eof());
+            }
+            lexer.mark_end();
+            lexer.set_result_symbol(STRING_CONTENT as u16);
+            assert_eq!(lexer.lookahead(), i32::from(b'a'));
+        }
+        assert_eq!(inner.lookahead_calls.get(), 1);
+        assert_eq!(inner.eof_calls.get(), 0);
+        {
+            let mut lexer = CachedLexer::new(&mut inner);
+            lexer.advance(false);
+            assert_eq!(lexer.lookahead(), 0);
+            assert!(!lexer.eof()); // Embedded NUL is still input.
+            lexer.advance(true);
+            assert_eq!(lexer.lookahead(), i32::from(b'b'));
+            assert!(!lexer.eof());
+            lexer.advance(false);
+            assert_eq!(lexer.lookahead(), 0);
+            assert!(lexer.eof());
+        }
+        assert_eq!(inner.lookahead_calls.get(), 5);
+        assert_eq!(inner.eof_calls.get(), 2);
+    }
+
+    #[test]
+    fn whitespace_result_is_local_until_a_token_is_emitted() {
+        let mut scanner = Scanner::default();
+        let (ok, lexer) = scan(&mut scanner, " \tword", &[]);
+        assert!(!ok);
+        assert_eq!(lexer.position, 2);
+        assert_eq!(lexer.symbol, u16::MAX);
+        assert_eq!(
+            lexer.calls,
+            [Call::Advance(0, true), Call::Advance(1, true)]
+        );
+
+        let (ok, lexer) = scan(&mut scanner, " \n a", &[LINE_BREAK]);
+        assert!(ok);
+        assert_eq!(lexer.symbol, LINE_BREAK as u16);
+        assert_eq!(lexer.position, 3);
+        assert_eq!(lexer.end, Some(1));
+        assert_eq!(
+            lexer.calls,
+            [
+                Call::Advance(0, true),
+                Call::MarkEnd(1),
+                Call::Advance(1, false),
+                Call::Advance(2, true),
+                Call::Symbol(LINE_BREAK as u16),
+            ]
+        );
+    }
+
+    #[test]
+    fn nul_does_not_end_literal_or_heredoc_content() {
+        let mut scanner = Scanner::default();
+        scanner
+            .literal_stack
+            .push(literal(STRING_START, b'"', b'"', true));
+        let (ok, lexer) = scan(&mut scanner, "x\0y\"", &[STRING_CONTENT]);
+        assert!(ok);
+        assert_eq!(lexer.symbol, STRING_CONTENT as u16);
+        assert_eq!(lexer.position, 3);
+        assert_eq!(lexer.end, Some(3));
+
+        scanner.open_heredocs.push(heredoc(b"END", false, true));
+        let (ok, lexer) = scan(&mut scanner, "x\0y\nEND\n", &[HEREDOC_CONTENT]);
+        assert!(ok);
+        assert_eq!(lexer.symbol, HEREDOC_CONTENT as u16);
+        assert_eq!(lexer.position, 7);
+        assert_eq!(lexer.end, Some(4));
     }
 
     #[test]
@@ -1266,7 +1414,6 @@ mod tests {
         assert_eq!(
             lexer.calls,
             [
-                Call::Symbol(NONE as u16),
                 Call::MarkEnd(0),
                 Call::Advance(0, false),
                 Call::Advance(1, true),
@@ -1287,11 +1434,7 @@ mod tests {
         assert!(scanner.scan(&mut lexer, &symbols(&[LINE_BREAK])));
         assert_eq!(
             lexer.calls,
-            [
-                Call::Symbol(NONE as u16),
-                Call::MarkEnd(0),
-                Call::Symbol(LINE_BREAK as u16),
-            ]
+            [Call::MarkEnd(0), Call::Symbol(LINE_BREAK as u16),]
         );
     }
 
@@ -1475,15 +1618,31 @@ mod tests {
         assert!(!is_iden_char('Ā' as u32 as u8));
         assert!(is_iden_char('é' as u32 as u8));
         let mut lexer = TestLexer::new("$\0");
-        assert!(scan_short_interpolation(&mut lexer, false, STRING_CONTENT));
+        assert!(scan_short_interpolation(
+            &mut CachedLexer::new(&mut lexer),
+            false,
+            STRING_CONTENT
+        ));
         assert_eq!(usize::from(lexer.symbol), SHORT_INTERPOLATION);
         assert_eq!(lexer.end, Some(0));
         let mut lexer = TestLexer::new("$İ"); // low byte is '0'
-        assert!(!scan_short_interpolation(&mut lexer, false, STRING_CONTENT));
+        assert!(!scan_short_interpolation(
+            &mut CachedLexer::new(&mut lexer),
+            false,
+            STRING_CONTENT
+        ));
         let mut lexer = TestLexer::new("$ā"); // low byte is 1, not punctuation
-        assert!(!scan_short_interpolation(&mut lexer, false, STRING_CONTENT));
+        assert!(!scan_short_interpolation(
+            &mut CachedLexer::new(&mut lexer),
+            false,
+            STRING_CONTENT
+        ));
         let mut lexer = TestLexer::new("$Ā"); // strchr matches low-byte NUL
-        assert!(scan_short_interpolation(&mut lexer, false, STRING_CONTENT));
+        assert!(scan_short_interpolation(
+            &mut CachedLexer::new(&mut lexer),
+            false,
+            STRING_CONTENT
+        ));
     }
 
     #[test]
@@ -1548,13 +1707,7 @@ mod tests {
         let (ok, lexer) = scan(&mut scanner, "\n", &[HEREDOC_BODY_START]);
         assert!(ok);
         assert_eq!(lexer.position, 0);
-        assert_eq!(
-            lexer.calls,
-            [
-                Call::Symbol(NONE as u16),
-                Call::Symbol(HEREDOC_BODY_START as u16),
-            ]
-        );
+        assert_eq!(lexer.calls, [Call::Symbol(HEREDOC_BODY_START as u16),]);
         assert!(scanner.open_heredocs[0].started);
         let (ok, lexer) = scan(&mut scanner, "\n  abc\n  END\n", &[HEREDOC_CONTENT]);
         assert!(ok);
