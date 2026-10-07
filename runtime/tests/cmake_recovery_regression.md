@@ -180,8 +180,10 @@ lexer warning noted above. This change only strengthens regression coverage;
 there are no runtime changes, C deviations, new unsafe code, or generated-file
 changes.
 
-### ERROR-range revalidation at `512817f`
+### ERROR-range revalidation at `5f3aee6`
 
+Rechecked the previously resolved bucket at this starting revision; all checks
+below were rerun, rather than relying on the earlier verification at `512817f`.
 Bucket `e0b0bff8` already passes on this starting checkout. Comparing the current
 C scanner with Rust confirms the merged zero-valued creation/reset fix remains
 correct; no new implementation change or duplicate regression is needed.
