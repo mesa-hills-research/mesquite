@@ -646,11 +646,70 @@ impl Scanner {
     // Select the context once: block scalars only need the character-range
     // test, whereas flow scalars must also exclude collection delimiters.
     fn scn_pln_cnt(&mut self, lexer: &mut dyn Lexer, is_in_blk: bool) -> ScanResult {
+        if self.sch_stt == SCH_STT_FRZ && self.rlt_sch == ResultSchema::String {
+            return if is_in_blk {
+                self.scn_pln_string::<true>(lexer)
+            } else {
+                self.scn_pln_string::<false>(lexer)
+            };
+        }
         if is_in_blk {
             self.scn_pln_cnt_impl::<true>(lexer)
         } else {
             self.scn_pln_cnt_impl::<false>(lexer)
         }
+    }
+
+    // A frozen string has no more schema transitions. Decode each ASCII
+    // character's content role once, sharing it with the next loop iteration.
+    #[inline(never)]
+    fn scn_pln_string<const BLOCK: bool>(&mut self, lexer: &mut dyn Lexer) -> ScanResult {
+        let mut kind = plain_kind::<BLOCK>(self.lookahead);
+        if kind == 0 {
+            return ScanResult::Stop;
+        }
+        let mut previous_safe =
+            self.lookahead != i32::from(b'#') || plain_kind::<BLOCK>(self.cur_chr) >= 2;
+        loop {
+            match kind {
+                0 => break,
+                1 => {
+                    self.adv(lexer);
+                    kind = plain_kind::<BLOCK>(self.lookahead);
+                    previous_safe = false;
+                }
+                2 => {
+                    self.adv(lexer);
+                    kind = plain_kind::<BLOCK>(self.lookahead);
+                    if kind < 2 {
+                        return ScanResult::Fail;
+                    }
+                    self.mrk_end(lexer);
+                    previous_safe = true;
+                }
+                3 if !previous_safe => break,
+                _ => {
+                    let mut c = self.lookahead;
+                    let mut col = self.cur_col;
+                    loop {
+                        col = col.wrapping_add(1);
+                        lexer.advance(false);
+                        let next = lexer.lookahead();
+                        kind = plain_kind::<BLOCK>(next);
+                        if kind < 3 {
+                            self.cur_col = col;
+                            self.cur_chr = c;
+                            self.lookahead = next;
+                            break;
+                        }
+                        c = next;
+                    }
+                    self.mrk_end(lexer);
+                    previous_safe = true;
+                }
+            }
+        }
+        ScanResult::Success
     }
 
     // Keep this character loop separate from the large token dispatcher so
@@ -812,6 +871,44 @@ fn is_c_flow_indicator(c: i32) -> bool {
         || c == i32::from(b']')
         || c == i32::from(b'{')
         || c == i32::from(b'}')
+}
+
+// 0: stop; 1: whitespace; 2: speculative colon; 3: hash; 4: content.
+const PLAIN_KINDS: [[u8; 128]; 2] = {
+    let mut tables = [[0; 128]; 2];
+    let mut c = 0x21;
+    while c <= 0x7e {
+        let kind = if c == b':' as usize {
+            2
+        } else if c == b'#' as usize {
+            3
+        } else {
+            4
+        };
+        tables[1][c] = kind;
+        tables[0][c] = if matches!(c, 0x2c | 0x5b | 0x5d | 0x7b | 0x7d) {
+            0
+        } else {
+            kind
+        };
+        c += 1;
+    }
+    tables[0][b' ' as usize] = 1;
+    tables[0][b'\t' as usize] = 1;
+    tables[1][b' ' as usize] = 1;
+    tables[1][b'\t' as usize] = 1;
+    tables
+};
+
+#[inline(always)]
+fn plain_kind<const BLOCK: bool>(c: i32) -> u8 {
+    if let Some(&kind) = PLAIN_KINDS[BLOCK as usize].get(c as usize) {
+        kind
+    } else if is_non_ascii_ns_char(c) {
+        4
+    } else {
+        0
+    }
 }
 
 const ASCII_PLAIN_SAFE: [u8; 128] = {
@@ -2705,7 +2802,9 @@ mod tests {
                     c
                 })
                 .collect();
-            for is_in_blk in [false, true] {
+            for (is_in_blk, frozen_string) in
+                [(false, false), (true, false), (false, true), (true, true)]
+            {
                 let mut actual = scanner();
                 let mut expected = scanner();
                 let mut lexer = TestLexer::new("");
@@ -2723,6 +2822,10 @@ mod tests {
                         scanner.sch_stt += 1;
                     }
                     scanner.rlt_sch = schemas[case % schemas.len()];
+                    if frozen_string {
+                        scanner.sch_stt = SCH_STT_FRZ;
+                        scanner.rlt_sch = ResultSchema::String;
+                    }
                     scanner.end_row = -8;
                     scanner.end_col = 13;
                 }
@@ -2990,6 +3093,31 @@ mod tests {
                 assert_eq!(next.symbol, R_FLW_SEQ_END as u16);
                 assert_eq!(next.end, 1);
                 assert_eq!(next.lookahead_calls.get(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn plain_character_kinds_match_predicates_for_every_codepoint() {
+        for c in -1..=0x110000 {
+            for block in [false, true] {
+                let expected = if is_wsp(c) {
+                    1
+                } else if !is_plain_safe(c, block) {
+                    0
+                } else if c == i32::from(b':') {
+                    2
+                } else if c == i32::from(b'#') {
+                    3
+                } else {
+                    4
+                };
+                let actual = if block {
+                    plain_kind::<true>(c)
+                } else {
+                    plain_kind::<false>(c)
+                };
+                assert_eq!(actual, expected, "codepoint {c:#x}, block={block}");
             }
         }
     }
