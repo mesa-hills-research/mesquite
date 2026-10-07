@@ -174,6 +174,8 @@ impl ExternalScanner for Scanner {
             self.token = u32::from_ne_bytes(buffer[4..STATE_SIZE].try_into().unwrap());
         } else {
             // C resets both fields when there is no complete saved state.
+            // Zero is BRACKET_ARGUMENT_OPEN, so a reset permits argument content
+            // when error recovery enables all symbols, even without an opener.
             *self = Self::default();
         }
     }
@@ -297,6 +299,28 @@ mod tests {
                 assert_eq!(eof.symbol, BRACKET_ARGUMENT_CONTENT as u16);
             }
         }
+    }
+
+    #[test]
+    fn reset_allows_empty_argument_content_during_recovery() {
+        let mut scanner = Scanner::default();
+        // Start in a different bracket context before resetting, as can happen
+        // when the parser moves back to a stack with no external token.
+        let mut comment = TestLexer::new("#[==[");
+        assert!(scanner.scan(&mut comment, &valid(&[BRACKET_COMMENT_OPEN])));
+        assert_eq!(scanner.level, 2);
+        assert_eq!(scanner.token, BRACKET_COMMENT_OPEN as u32);
+
+        scanner.deserialize(&[]);
+        let mut eof = TestLexer::new("");
+        assert!(scanner.scan(&mut eof, &[true; 7]));
+        assert_eq!(eof.events, [Event::Symbol(BRACKET_ARGUMENT_CONTENT as u16)]);
+        assert_eq!(eof.end, None);
+        assert_eq!(scanner.level, 0);
+        assert_eq!(scanner.token, BRACKET_ARGUMENT_CONTENT as u32);
+
+        // A second scan without a reset must not emit content again.
+        assert!(!scanner.scan(&mut eof, &[true; 7]));
     }
 
     #[test]
