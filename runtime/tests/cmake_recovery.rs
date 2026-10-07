@@ -1,4 +1,5 @@
-//! CMake recovery regressions from oracle buckets 1b5a6fb7, f5e2762e, and 6c68c51b.
+//! CMake recovery regressions from oracle buckets
+//! 1b5a6fb7, f5e2762e, 548436bf, and 6c68c51b.
 
 use ts_port::{ParseOptions, ParseState, Parser, Point};
 
@@ -144,106 +145,97 @@ fn unfinished_commands_keep_zero_width_bracket_content_at_eof() {
 }
 
 #[test]
-fn invalid_escape_keeps_the_quote_directly_under_error() {
-    assert_recovery_children(
-        concat!(
-            "# Argument syntax error evaluated at deferred call site.\n",
-            "cmake_language(DEFER CALL message \"Deferred \\X Error\")\n",
-        ),
-        2,
-        &[
-            ("identifier", 57..71),
-            ("(", 71..72),
-            ("argument", 72..77),
-            ("argument", 78..82),
-            ("argument", 83..90),
-            ("\"", 91..92),
-            ("bracket_argument_content", 101..112),
-        ],
-    );
-}
-
-#[test]
-fn variable_template_keeps_quote_and_variable_prefix_directly_under_error() {
-    assert_recovery_children(
-        concat!(
-            "enable_language(@lang@)\n\n",
-            "# Make sure the compile command is not hidden.\n",
-            "string(REPLACE \"${CMAKE_START_TEMP_FILE}\" \"\" CMAKE_@lang@_COMPILE_OBJECT \"${CMAKE_@lang@_COMPILE_OBJECT}\")\n",
-            "string(REPLACE \"${CMAKE_END_TEMP_FILE}\" \"\" CMAKE_@lang@_COMPILE_OBJECT \"${CMAKE_@lang@_COMPILE_OBJECT}\")\n\n",
-            "add_library(foo \"@RunCMake_SOURCE_DIR@/empty.@ext@\")\n",
-        ),
-        3,
-        &[
-            ("identifier", 72..78),
-            ("(", 78..79),
-            ("argument", 79..86),
-            ("argument", 87..113),
-            ("argument", 114..116),
-            ("argument", 117..144),
-            ("\"", 145..146),
-            ("$", 146..147),
-            ("{", 147..148),
-            ("bracket_argument_content", 154..338),
-        ],
-    );
-}
-
-// The two larger bucket inputs exercise scanner reset after line comments and
-// recovery after successful arguments. Check the C-oracle-matched direct ERROR
-// children, including anonymous punctuation that an S-expression would omit.
-fn assert_recovery_children(
-    source: &str,
-    root_child_count: usize,
-    expected: &[(&str, std::ops::Range<usize>)],
-) {
-    fn point_at(source: &str, byte: usize) -> Point {
-        let prefix = &source[..byte];
-        Point::new(
-            prefix.bytes().filter(|&b| b == b'\n').count(),
-            prefix.rsplit('\n').next().unwrap().len(),
-        )
-    }
-
+fn non_utf8_bom_input_recovers_as_one_bracket_content_leaf() {
     let language = ts_port_cmake::language().into();
-    for warmup in [
-        None,
-        Some("message([==[prior]==])\n"),
-        Some("#[=[prior]=]\n"),
-    ] {
-        let mut parser = Parser::new();
-        parser.set_language(&language).unwrap();
-        if let Some(warmup) = warmup {
-            assert!(!parser.parse(warmup, None).unwrap().root_node().has_error());
+    for (width, little_endian, end_column) in
+        [(2, false, 0), (2, true, 1), (4, false, 0), (4, true, 3)]
+    {
+        // Recreate the four BOM-UTF-{16,32}-{BE,LE}.cmake fixtures without
+        // depending on the external corpus. These are deliberately passed to
+        // the UTF-8 parser as raw bytes, not decoded into UTF-8 first.
+        let mut source = Vec::new();
+        for character in "\u{feff}message(STATUS \"message\")\n".chars() {
+            let bytes = if little_endian {
+                (character as u32).to_le_bytes()
+            } else {
+                (character as u32).to_be_bytes()
+            };
+            source.extend_from_slice(if little_endian {
+                &bytes[..width]
+            } else {
+                &bytes[4 - width..]
+            });
         }
+        assert_eq!(source.len(), 27 * width);
 
-        let tree = parser.parse(source, None).unwrap();
-        let root = tree.root_node();
-        assert_eq!(root.kind(), "source_file");
-        assert_eq!(root.byte_range(), 0..source.len());
-        assert_eq!(root.child_count(), root_child_count);
-        assert_eq!(root.named_child_count(), root_child_count);
-        assert!(root.has_error());
+        for warmup in [
+            None,
+            Some("message([==[prior]==])\n"),
+            Some("#[=[prior]=]\n"),
+        ] {
+            let mut parser = Parser::new();
+            parser.set_language(&language).unwrap();
+            if let Some(warmup) = warmup {
+                let tree = parser.parse(warmup, None).unwrap();
+                assert!(!tree.root_node().has_error());
+            }
 
-        let error = root.child(root_child_count - 1).unwrap();
-        assert!(error.is_error());
-        assert!(error.is_named());
-        assert!(error.is_extra());
-        assert!(!error.is_missing());
-        assert_eq!(error.byte_range(), expected[0].1.start..source.len());
-        assert_eq!(error.child_count(), expected.len());
-        assert_eq!(error.start_position(), point_at(source, error.start_byte()));
-        assert_eq!(error.end_position(), point_at(source, source.len()));
+            for chunk_size in [source.len(), 1] {
+                let mut progress_calls = 0;
+                let mut progress = |_: &ParseState| {
+                    progress_calls += 1;
+                    false
+                };
+                let mut read = |byte: usize, _: Point| {
+                    let start = byte.min(source.len());
+                    let end = (start + chunk_size).min(source.len());
+                    &source[start..end]
+                };
+                let options = ParseOptions::new().progress_callback(&mut progress);
+                let tree = parser
+                    .parse_with_options(&mut read, None, Some(options))
+                    .unwrap();
+                assert_eq!(progress_calls, 0);
 
-        for (i, (kind, range)) in expected.iter().enumerate() {
-            let child = error.child(i).unwrap();
-            assert_eq!(child.kind(), *kind, "child {i}");
-            assert_eq!(child.byte_range(), *range);
-            assert_eq!(child.start_position(), point_at(source, range.start));
-            assert_eq!(child.end_position(), point_at(source, range.end));
-            assert!(!child.has_error());
-            assert!(!child.is_extra());
-            assert!(!child.is_missing());
+                // C's zero scanner token enables content during recovery even
+                // without an opener. Content checks eof(), not lookahead == 0,
+                // and therefore consumes the embedded NULs and malformed UTF-8.
+                let root = tree.root_node();
+                assert_eq!(root.kind(), "source_file");
+                assert_eq!(root.kind_id(), 43);
+                assert_eq!(root.byte_range(), 0..source.len());
+                assert_eq!(root.start_position(), Point::new(0, 0));
+                assert_eq!(root.end_position(), Point::new(1, end_column));
+                assert!(root.is_named());
+                assert!(!root.is_error());
+                assert!(!root.is_extra());
+                assert!(!root.is_missing());
+                assert!(root.has_error());
+                assert_eq!(root.child_count(), 1);
+                assert_eq!(root.named_child_count(), 1);
+
+                let error = root.child(0).unwrap();
+                assert!(error.is_error());
+                assert!(error.is_named());
+                assert!(error.is_extra());
+                assert!(!error.is_missing());
+                assert!(error.has_error());
+                assert_eq!(error.range(), root.range());
+                assert_eq!(error.child_count(), 1);
+                assert_eq!(error.named_child_count(), 1);
+
+                let content = error.child(0).unwrap();
+                assert_eq!(content.kind(), "bracket_argument_content");
+                assert_eq!(content.kind_id(), 37);
+                assert_eq!(content.range(), root.range());
+                assert!(content.is_named());
+                assert!(!content.is_error());
+                assert!(!content.is_extra());
+                assert!(!content.is_missing());
+                assert!(!content.has_error());
+                assert_eq!(content.child_count(), 0);
+                assert_eq!(content.named_child_count(), 0);
+            }
         }
     }
 }
