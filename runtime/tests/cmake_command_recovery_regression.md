@@ -109,3 +109,15 @@ Checks rerun on this revision:
 
 This follow-up adds regression coverage only. It introduces no runtime changes,
 C deviations, unsafe code, new warnings, or host-owned generated-file changes.
+
+## Stop-request revalidation at `48519b9`
+
+The assigned bucket is already fixed in this checkout. A fresh oracle run passes
+**7/7 inputs** with queries enabled; direct comparison against the current C
+scanner confirms the zero initialization and whole-state reset remain correct.
+`cargo check --workspace --all-targets` passes (with the existing host-owned YAML
+unused-assignment warning), and both `cmake_command_recovery` integration tests
+pass. No scanner/runtime changes or duplicate tests were needed. The operator
+stopped this run, so broader oracle and clippy checks were not rerun in this
+session; their earlier results above are historical. Nothing remains to fix in
+the assigned bucket on this checkout.
