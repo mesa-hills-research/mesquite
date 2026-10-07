@@ -722,6 +722,30 @@ pub(crate) fn ts_stack_pop_count(
     )
 }
 
+/// Transfer a unary reduction's child without constructing a temporary array.
+/// All guards precede mutation so extras and shared paths use ordinary popping.
+pub(crate) fn ts_stack_pop_one_in_place(stack: &mut Stack) -> Option<Subtree> {
+    if stack.heads.len() != 1 || stack.heads[0].status != StackStatus::Active {
+        return None;
+    }
+    let top = stack.heads[0].node;
+    let node = stack.arena.node_mut(top);
+    if node.ref_count != 1 || node.link_count != 1 {
+        return None;
+    }
+    let link = node.links[0].as_ref()?;
+    if link.subtree.is_null() || ts_subtree_extra(&link.subtree) {
+        return None;
+    }
+    let link = node.links[0].take().unwrap();
+    stack.arena.nodes[top.0] = None;
+    stack.arena.free.push(top);
+    stack.heads[0].node = link.node;
+    stack.slices.clear();
+    stack.iterators.clear();
+    Some(link.subtree)
+}
+
 /// Fuse a single-path pop with removal of its original version. The caller must
 /// be committed to replacing that version (no alternative reduction/shift).
 /// Refuse shared or branching prefixes without changing anything, so the full

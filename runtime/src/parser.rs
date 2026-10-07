@@ -987,7 +987,7 @@ pub(crate) fn ts_parser__select_children(
     let result = ts_parser__select_tree(parser, left, &scratch_tree);
     // C builds a non-owning header at the end of its scratch array. Rust owns
     // these temporary child handles, then recovers the Vec allocation for reuse.
-    parser.scratch_trees = std::mem::take(&mut scratch_tree.heap_mut().unwrap().children);
+    parser.scratch_trees = std::mem::take(&mut scratch_tree.heap_mut().unwrap().children).into_vec();
     parser.scratch_trees.clear();
     result
 }
@@ -1032,6 +1032,25 @@ pub(crate) fn ts_parser__reduce(
     replace_version: bool,
 ) -> StackVersion {
     let language = parser.language.unwrap();
+    if replace_version && count == 1 && !is_fragile
+        && let Some(child) = ts_stack_pop_one_in_place(&mut parser.stack)
+    {
+        let state = ts_stack_state(&parser.stack, version);
+        let next_state = parser.parse_table_cache.next_state(&language, state, symbol);
+        let parent = ts_subtree_new_node_with(
+            symbol, SubtreeChildren::One([child]), production_id as u32, &language,
+            |data| {
+                data.parse_state = state;
+                data.extra = end_of_non_terminal_extra && next_state == state;
+                let SubtreePayload::Branch(branch) = &mut data.payload else {
+                    unreachable!("a reduced node has branch data");
+                };
+                branch.dynamic_precedence += dynamic_precedence;
+            },
+        );
+        ts_stack_push(&mut parser.stack, &mut parser.tree_pool, version, parent, false, next_state);
+        return version;
+    }
     let initial_version_count = ts_stack_version_count(&parser.stack);
     // A sole action on the sole version will immediately replace the original
     // head. Move uniquely owned children instead of cloning them into a new
@@ -2493,7 +2512,7 @@ impl<'tree> BalanceCursor<'tree> {
         matches!(tree, Subtree::Heap(data) if !data.children.is_empty() && Arc::strong_count(data) == 1)
     }
 
-    fn children_mut(tree: &mut Subtree) -> &mut Vec<Subtree> {
+    fn children_mut(tree: &mut Subtree) -> &mut [Subtree] {
         let Subtree::Heap(data) = tree else {
             unreachable!("only heap branches are balanced");
         };
