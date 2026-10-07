@@ -66,6 +66,13 @@ Heap children are a contiguous Vec rather than the allocation prefix immediately
 preceding the C header. This adds a child-buffer allocation;
 measure it before proposing a different layout. Do not heap-box every leaf.
 
+The Inline variant stores `PackedInlineLeaf([u8; 8])`, constructed as a packed
+word via safe integer shifts and `to_le_bytes`. `InlineLeaf` is the expanded field
+view; construct fixtures via `Subtree::inline(InlineLeaf { ... })` and match the
+variant normally. This preserves a single-word write in token construction and
+byte loads for field readers; storing a u64 instead slowed cursor traversal.
+The format is internal and endian-independent, not a C-memory reinterpretation.
+
 Inline flag bits are named constants. `padding_rows_and_lookahead` has rows in the
 low nibble and lookahead byte count in the high nibble; padding columns occupy a
 full byte. Symbol fits in u8. Keep **C's** inline eligibility conditions, including

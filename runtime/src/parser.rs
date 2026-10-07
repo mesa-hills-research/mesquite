@@ -2874,7 +2874,7 @@ mod parser3_tests {
                     // Token and scanner snapshot can be the very same header.
                     snapshots[snapshot].clone()
                 } else if step % 2 == 0 {
-                    Subtree::Inline(InlineLeaf {
+                    Subtree::inline(InlineLeaf {
                         symbol: step as u8 + 1,
                         size_bytes: 1,
                         ..InlineLeaf::default()
@@ -2966,7 +2966,7 @@ mod parser3_tests {
             parser.language = Some(language);
             let child = ts_subtree_new_node_with(
                 symbol,
-                vec![Subtree::Inline(InlineLeaf {
+                vec![Subtree::inline(InlineLeaf {
                     symbol: 1,
                     size_bytes: 3,
                     parse_state: 9,
@@ -2987,7 +2987,7 @@ mod parser3_tests {
                     &mut parser.stack,
                     &mut parser.tree_pool,
                     0,
-                    Subtree::Inline(InlineLeaf {
+                    Subtree::inline(InlineLeaf {
                         symbol,
                         flags: EXTRA,
                         ..InlineLeaf::default()
@@ -3054,7 +3054,7 @@ mod parser3_tests {
                                         &mut parser.stack,
                                         &mut parser.tree_pool,
                                         0,
-                                        Subtree::Inline(InlineLeaf {
+                                        Subtree::inline(InlineLeaf {
                                             symbol: (i + 1) as u8,
                                             size_bytes: 1,
                                             flags,
@@ -3120,7 +3120,7 @@ mod parser3_tests {
                                         let child = if null && i + 1 == count {
                                             Subtree::Null
                                         } else {
-                                            Subtree::Inline(InlineLeaf {
+                                            Subtree::inline(InlineLeaf {
                                                 symbol: i as u8 + 1,
                                                 flags: VISIBLE | NAMED,
                                                 size_bytes: 2,
@@ -3167,7 +3167,7 @@ mod parser3_tests {
                                         target_state,
                                     );
                                     for _ in 0..extra_count {
-                                        let extra = Subtree::Inline(InlineLeaf {
+                                        let extra = Subtree::inline(InlineLeaf {
                                             symbol: 4,
                                             flags: VISIBLE | EXTRA,
                                             size_bytes: 1,
@@ -3292,7 +3292,7 @@ mod parser3_tests {
                         &mut parser.stack,
                         &mut parser.tree_pool,
                         0,
-                        Subtree::Inline(InlineLeaf {
+                        Subtree::inline(InlineLeaf {
                             symbol: 1,
                             size_bytes: 1,
                             ..InlineLeaf::default()
@@ -3337,7 +3337,7 @@ mod parser3_tests {
                         let tree = if null {
                             Subtree::Null
                         } else {
-                            Subtree::Inline(InlineLeaf {
+                            Subtree::inline(InlineLeaf {
                                 flags: VISIBLE,
                                 size_bytes: 1,
                                 ..InlineLeaf::default()
@@ -3424,7 +3424,7 @@ mod parser3_tests {
                 for (version, precedence) in precedences.into_iter().enumerate() {
                     let child = ts_subtree_new_node_with(
                         (precedence + 1) as Symbol,
-                        vec![Subtree::Inline(InlineLeaf {
+                        vec![Subtree::inline(InlineLeaf {
                             symbol: 1,
                             size_bytes: 1,
                             ..InlineLeaf::default()
@@ -3596,15 +3596,15 @@ mod parser3_tests {
 
     #[test]
     fn balancing_cursor_preserves_ownership_and_lifo_order() {
-        let shared = branch(7, vec![Subtree::Inline(InlineLeaf::default())]);
+        let shared = branch(7, vec![Subtree::inline(InlineLeaf::default())]);
         let mut tree = branch(
             1,
             vec![
-                branch(2, vec![Subtree::Inline(InlineLeaf::default())]),
+                branch(2, vec![Subtree::inline(InlineLeaf::default())]),
                 shared.clone(),
                 branch(
                     3,
-                    vec![branch(4, vec![Subtree::Inline(InlineLeaf::default())])],
+                    vec![branch(4, vec![Subtree::inline(InlineLeaf::default())])],
                 ),
             ],
         );
@@ -3632,8 +3632,8 @@ mod parser3_tests {
 
     #[test]
     fn balancing_resume_rebuilds_pending_left_siblings_at_every_boundary() {
-        let shared = branch(7, vec![Subtree::Inline(InlineLeaf::default())]);
-        let leaf = || Subtree::Inline(InlineLeaf::default());
+        let shared = branch(7, vec![Subtree::inline(InlineLeaf::default())]);
+        let leaf = || Subtree::inline(InlineLeaf::default());
         let mut tree = branch(
             1,
             vec![
@@ -3673,7 +3673,7 @@ mod parser3_tests {
     fn balancing_cursor_resumes_before_every_child_including_earlier_siblings() {
         let expected = [1, 5, 7, 6, 4, 2, 3];
         for stop in 0..expected.len() {
-            let leaf = || Subtree::Inline(InlineLeaf::default());
+            let leaf = || Subtree::inline(InlineLeaf::default());
             let mut tree = branch(
                 1,
                 vec![
@@ -3731,7 +3731,7 @@ mod parser3_tests {
     #[test]
     fn canceled_balancing_restores_tree_and_resumes_at_same_node() {
         let mut parser = parser();
-        let mut tree = Subtree::Inline(InlineLeaf::default());
+        let mut tree = Subtree::inline(InlineLeaf::default());
         for symbol in 1..=250 {
             tree = branch(symbol, vec![tree]);
         }
@@ -3776,7 +3776,7 @@ mod parser3_tests {
     fn shared_root_is_not_balanced_or_counted() {
         let root = branch(
             1,
-            vec![branch(2, vec![Subtree::Inline(InlineLeaf::default())])],
+            vec![branch(2, vec![Subtree::inline(InlineLeaf::default())])],
         );
         let mut parser = parser();
         parser.finished_tree = root.clone();

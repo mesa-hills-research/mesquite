@@ -858,14 +858,14 @@ mod tests {
             tree::Tree,
         };
         let tree = Tree {
-            root: Box::new(Subtree::Inline(InlineLeaf {
+            root: Box::new(Subtree::inline(InlineLeaf {
                 size_bytes: 10,
                 ..InlineLeaf::default()
             })),
             language: language(),
             included_ranges: Vec::new(),
         };
-        let shorter = Subtree::Inline(InlineLeaf {
+        let shorter = Subtree::inline(InlineLeaf {
             size_bytes: 5,
             ..InlineLeaf::default()
         });

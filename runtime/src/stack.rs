@@ -1565,7 +1565,7 @@ mod stack2_tests {
     use std::sync::Arc;
 
     fn leaf(size: u8) -> Subtree {
-        Subtree::Inline(InlineLeaf {
+        Subtree::inline(InlineLeaf {
             size_bytes: size,
             flags: VISIBLE | NAMED,
             symbol: 2,
@@ -2078,7 +2078,7 @@ mod stack2_tests {
         assert!(!ts_stack_has_advanced_since_error(&stack, 0));
         stack.heads[0].node_count_at_last_error = 4;
         let top = &mut stack.arena.nodes[2];
-        top.links[0].as_mut().unwrap().subtree = Subtree::Inline(InlineLeaf {
+        top.links[0].as_mut().unwrap().subtree = Subtree::inline(InlineLeaf {
             flags: MISSING,
             ..InlineLeaf::default()
         });
@@ -2113,7 +2113,7 @@ mod stack_1_tests {
     use std::sync::Arc;
 
     fn leaf(symbol: u8, flags: u8) -> Subtree {
-        Subtree::Inline(InlineLeaf {
+        Subtree::inline(InlineLeaf {
             symbol,
             flags,
             size_bytes: 1,
@@ -2367,7 +2367,7 @@ mod stack_1_tests {
     fn node_metrics_count_invisible_errors_and_add_extents() {
         let mut arena = StackArena::default();
         let base = stack_node_new(&mut arena, None, Subtree::Null, false, 1);
-        let first_tree = Subtree::Inline(InlineLeaf {
+        let first_tree = Subtree::inline(InlineLeaf {
             symbol: 3,
             flags: VISIBLE,
             size_bytes: 2,

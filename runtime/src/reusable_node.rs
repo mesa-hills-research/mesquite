@@ -112,7 +112,7 @@ mod tests {
     use std::sync::Arc;
 
     fn leaf(symbol: u8, padding: u8, size: u8) -> Subtree {
-        Subtree::Inline(InlineLeaf {
+        Subtree::inline(InlineLeaf {
             symbol,
             padding_bytes: padding,
             padding_columns: padding,

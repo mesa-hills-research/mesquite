@@ -19,6 +19,60 @@ pub(crate) struct InlineLeaf {
     pub size_bytes: u8,
     pub padding_rows_and_lookahead: u8,
 }
+/// Construct the payload as one packed word, but expose bytes to field readers.
+/// Separate struct-field stores followed by a word load stall the parser's hot
+/// lex/shift path. Conversely, storing a u64 here makes traversal unpack fields
+/// with shifts instead of byte loads. Packing into bytes avoids both costs, with
+/// no pointer tagging, transmutation, or changes to C's inline limits.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(transparent)]
+pub(crate) struct PackedInlineLeaf([u8; 8]);
+
+impl PackedInlineLeaf {
+    #[inline]
+    fn new(data: InlineLeaf) -> Self {
+        Self(
+            (u64::from(data.parse_state)
+                | (u64::from(data.symbol) << 16)
+                | (u64::from(data.flags) << 24)
+                | (u64::from(data.padding_bytes) << 32)
+                | (u64::from(data.padding_columns) << 40)
+                | (u64::from(data.size_bytes) << 48)
+                | (u64::from(data.padding_rows_and_lookahead) << 56))
+                .to_le_bytes(),
+        )
+    }
+
+    #[inline]
+    fn fields(self) -> InlineLeaf {
+        InlineLeaf {
+            parse_state: StateId::from_le_bytes([self.0[0], self.0[1]]),
+            symbol: self.0[2],
+            flags: self.0[3],
+            padding_bytes: self.0[4],
+            padding_columns: self.0[5],
+            size_bytes: self.0[6],
+            padding_rows_and_lookahead: self.0[7],
+        }
+    }
+
+    #[inline]
+    pub(crate) fn update(&mut self, update: impl FnOnce(&mut InlineLeaf)) {
+        let mut fields = self.fields();
+        update(&mut fields);
+        *self = Self::new(fields);
+    }
+
+    #[inline]
+    fn set_flag(&mut self, flag: u8, value: bool) {
+        if value {
+            self.0[3] |= flag;
+        } else {
+            self.0[3] &= !flag;
+        }
+    }
+}
+
 // padding_rows_and_lookahead: low 4 bits = rows, high 4 bits = lookahead bytes.
 pub(crate) const VISIBLE: u8 = 1;
 pub(crate) const NAMED: u8 = 2;
@@ -35,7 +89,7 @@ pub(crate) const KEYWORD: u8 = 32;
 pub(crate) enum Subtree {
     #[default]
     Null,
-    Inline(InlineLeaf),
+    Inline(PackedInlineLeaf),
     Heap(Arc<SubtreeHeapData>),
 }
 /// A mutable subtree is an owned handle. `Arc::make_mut` before heap mutation.
@@ -287,7 +341,7 @@ pub(crate) fn ts_subtree_new_leaf_with(
         && !has_external_tokens
         && ts_subtree_can_inline(padding, size, lookahead_bytes)
     {
-        Subtree::Inline(InlineLeaf {
+        Subtree::inline(InlineLeaf {
             parse_state,
             symbol: symbol as u8,
             flags: ((metadata.visible as u8) * VISIBLE)
@@ -300,7 +354,7 @@ pub(crate) fn ts_subtree_new_leaf_with(
             padding_rows_and_lookahead: padding.extent.row as u8 | ((lookahead_bytes as u8) << 4),
         })
     } else {
-        new_heap_leaf(
+        Subtree::Heap(new_heap_leaf(
             pool,
             symbol,
             padding,
@@ -312,11 +366,13 @@ pub(crate) fn ts_subtree_new_leaf_with(
             is_keyword,
             language,
             initialize,
-        )
+        ))
     }
 }
 
 // Keep allocation/pool cleanup off the common inline-leaf construction path.
+// Return only the Arc, not an aggregate Subtree return slot: the caller supplies
+// the known heap tag and keeps the inline-token path independent of that slot.
 #[inline(never)]
 fn new_heap_leaf(
     pool: &mut SubtreePool,
@@ -330,7 +386,7 @@ fn new_heap_leaf(
     is_keyword: bool,
     language: &Language,
     initialize: impl FnOnce(&mut SubtreeHeapData),
-) -> Subtree {
+) -> Arc<SubtreeHeapData> {
     let metadata = ts_language_symbol_metadata(language, symbol);
     let extra = symbol == BUILTIN_SYM_END;
     let mut header = SubtreeHeapData {
@@ -359,15 +415,14 @@ fn new_heap_leaf(
         is_missing: false,
     };
     initialize(&mut header);
-    let data = if let Some(mut data) = pool.free_trees.pop() {
+    if let Some(mut data) = pool.free_trees.pop() {
         *Arc::get_mut(&mut data).expect("pooled subtrees must be unique") = header;
         data
     } else {
         // Initialize fresh allocations directly: no default header to
         // overwrite, and no uniqueness synchronization before first use.
         Arc::new(header)
-    };
-    Subtree::Heap(data)
+    }
 }
 
 pub(crate) fn ts_subtree_set_symbol(tree: &mut Subtree, symbol: Symbol, language: &Language) {
@@ -375,10 +430,12 @@ pub(crate) fn ts_subtree_set_symbol(tree: &mut Subtree, symbol: Symbol, language
     match tree {
         Subtree::Inline(data) => {
             assert!(symbol < u8::MAX as Symbol);
-            data.symbol = symbol as u8;
-            data.flags = (data.flags & !(NAMED | VISIBLE))
-                | ((metadata.named as u8) * NAMED)
-                | ((metadata.visible as u8) * VISIBLE);
+            data.update(|data| {
+                data.symbol = symbol as u8;
+                data.flags = (data.flags & !(NAMED | VISIBLE))
+                    | ((metadata.named as u8) * NAMED)
+                    | ((metadata.visible as u8) * VISIBLE);
+            });
         }
         Subtree::Heap(data) => {
             let data = Arc::make_mut(data);
@@ -597,6 +654,7 @@ fn summarize_unary(data: &mut ChildSummary, child: &Subtree) {
         has_external_scanner_state_change,
     ) = match child {
         Subtree::Inline(leaf) => {
+            let leaf = leaf.fields();
             summary.first_leaf = FirstLeaf {
                 symbol: leaf.symbol as Symbol,
                 parse_state: leaf.parse_state,
@@ -722,6 +780,7 @@ fn summarize_child_slice_general(data: &mut ChildSummary, children: &[Subtree], 
             child_branch,
         ) = match child {
             Subtree::Inline(leaf) => {
+                let leaf = leaf.fields();
                 if leaf.flags & MISSING != 0 {
                     error_cost = error_cost
                         .wrapping_add(ERROR_COST_PER_MISSING_TREE + ERROR_COST_PER_RECOVERY);
@@ -991,7 +1050,7 @@ pub(crate) fn ts_subtree_new_missing_leaf(
         language,
     );
     match &mut result {
-        Subtree::Inline(data) => data.flags |= MISSING,
+        Subtree::Inline(data) => data.set_flag(MISSING, true),
         Subtree::Heap(data) => Arc::make_mut(data).is_missing = true,
         Subtree::Null => unreachable!(),
     }
@@ -1085,7 +1144,7 @@ pub(crate) fn ts_subtree_compare(left: &Subtree, right: &Subtree, pool: &mut Sub
 
 pub(crate) fn ts_subtree_set_has_changes(tree: &mut Subtree) {
     match tree {
-        Subtree::Inline(data) => data.flags |= HAS_CHANGES,
+        Subtree::Inline(data) => data.set_flag(HAS_CHANGES, true),
         Subtree::Heap(data) => Arc::make_mut(data).has_changes = true,
         Subtree::Null => panic!("cannot mark a null subtree as changed"),
     }
@@ -1146,12 +1205,15 @@ pub(crate) fn ts_subtree_edit(
         match tree {
             Subtree::Inline(data) => {
                 if ts_subtree_can_inline(padding, size, lookahead_bytes) {
-                    data.padding_bytes = padding.bytes as u8;
-                    data.padding_columns = padding.extent.column as u8;
-                    data.padding_rows_and_lookahead =
-                        (data.padding_rows_and_lookahead & 0xf0) | padding.extent.row as u8;
-                    data.size_bytes = size.bytes as u8;
+                    data.update(|data| {
+                        data.padding_bytes = padding.bytes as u8;
+                        data.padding_columns = padding.extent.column as u8;
+                        data.padding_rows_and_lookahead =
+                            (data.padding_rows_and_lookahead & 0xf0) | padding.extent.row as u8;
+                        data.size_bytes = size.bytes as u8;
+                    });
                 } else {
+                    let data = data.fields();
                     let mut heap = ts_subtree_pool_allocate(pool);
                     *Arc::get_mut(&mut heap).expect("pooled heaps are unique") = SubtreeHeapData {
                         padding,
@@ -1539,6 +1601,11 @@ pub(crate) fn ts_subtree_external_scanner_state_eq(tree: &Subtree, other: &Subtr
 pub(crate) const TS_TREE_STATE_NONE: StateId = StateId::MAX;
 pub(crate) const TS_MAX_INLINE_TREE_LENGTH: u32 = 255;
 impl Subtree {
+    #[inline]
+    pub(crate) fn inline(data: InlineLeaf) -> Self {
+        Self::Inline(PackedInlineLeaf::new(data))
+    }
+
     pub fn is_null(&self) -> bool {
         matches!(self, Self::Null)
     }
@@ -1576,7 +1643,7 @@ impl Subtree {
 #[inline]
 pub(crate) fn ts_subtree_visible(tree: &Subtree) -> bool {
     match tree {
-        Subtree::Inline(d) => d.flags & VISIBLE != 0,
+        Subtree::Inline(d) => d.fields().flags & VISIBLE != 0,
         Subtree::Heap(d) => d.visible,
         Subtree::Null => false,
     }
@@ -1585,7 +1652,7 @@ pub(crate) fn ts_subtree_visible(tree: &Subtree) -> bool {
 #[inline]
 pub(crate) fn ts_subtree_named(tree: &Subtree) -> bool {
     match tree {
-        Subtree::Inline(d) => d.flags & NAMED != 0,
+        Subtree::Inline(d) => d.fields().flags & NAMED != 0,
         Subtree::Heap(d) => d.named,
         Subtree::Null => false,
     }
@@ -1594,7 +1661,7 @@ pub(crate) fn ts_subtree_named(tree: &Subtree) -> bool {
 #[inline]
 pub(crate) fn ts_subtree_extra(tree: &Subtree) -> bool {
     match tree {
-        Subtree::Inline(d) => d.flags & EXTRA != 0,
+        Subtree::Inline(d) => d.fields().flags & EXTRA != 0,
         Subtree::Heap(d) => d.extra,
         Subtree::Null => false,
     }
@@ -1602,7 +1669,7 @@ pub(crate) fn ts_subtree_extra(tree: &Subtree) -> bool {
 
 pub(crate) fn ts_subtree_has_changes(tree: &Subtree) -> bool {
     match tree {
-        Subtree::Inline(d) => d.flags & HAS_CHANGES != 0,
+        Subtree::Inline(d) => d.fields().flags & HAS_CHANGES != 0,
         Subtree::Heap(d) => d.has_changes,
         Subtree::Null => false,
     }
@@ -1610,7 +1677,7 @@ pub(crate) fn ts_subtree_has_changes(tree: &Subtree) -> bool {
 
 pub(crate) fn ts_subtree_missing(tree: &Subtree) -> bool {
     match tree {
-        Subtree::Inline(d) => d.flags & MISSING != 0,
+        Subtree::Inline(d) => d.fields().flags & MISSING != 0,
         Subtree::Heap(d) => d.is_missing,
         Subtree::Null => false,
     }
@@ -1618,7 +1685,7 @@ pub(crate) fn ts_subtree_missing(tree: &Subtree) -> bool {
 
 pub(crate) fn ts_subtree_is_keyword(tree: &Subtree) -> bool {
     match tree {
-        Subtree::Inline(d) => d.flags & KEYWORD != 0,
+        Subtree::Inline(d) => d.fields().flags & KEYWORD != 0,
         Subtree::Heap(d) => d.is_keyword,
         Subtree::Null => false,
     }
@@ -1627,7 +1694,7 @@ pub(crate) fn ts_subtree_is_keyword(tree: &Subtree) -> bool {
 #[inline]
 pub(crate) fn ts_subtree_symbol(tree: &Subtree) -> Symbol {
     match tree {
-        Subtree::Inline(d) => d.symbol as Symbol,
+        Subtree::Inline(d) => d.fields().symbol as Symbol,
         Subtree::Heap(d) => d.symbol,
         Subtree::Null => 0,
     }
@@ -1635,7 +1702,7 @@ pub(crate) fn ts_subtree_symbol(tree: &Subtree) -> Symbol {
 
 pub(crate) fn ts_subtree_parse_state(tree: &Subtree) -> StateId {
     match tree {
-        Subtree::Inline(d) => d.parse_state,
+        Subtree::Inline(d) => d.fields().parse_state,
         Subtree::Heap(d) => d.parse_state,
         Subtree::Null => 0,
     }
@@ -1643,7 +1710,7 @@ pub(crate) fn ts_subtree_parse_state(tree: &Subtree) -> StateId {
 
 pub(crate) fn ts_subtree_lookahead_bytes(tree: &Subtree) -> u32 {
     match tree {
-        Subtree::Inline(d) => (d.padding_rows_and_lookahead >> 4) as u32,
+        Subtree::Inline(d) => (d.fields().padding_rows_and_lookahead >> 4) as u32,
         Subtree::Heap(d) => d.lookahead_bytes,
         Subtree::Null => 0,
     }
@@ -1721,13 +1788,7 @@ pub(crate) fn ts_subtree_child_count(tree: &Subtree) -> u32 {
 }
 pub(crate) fn ts_subtree_set_extra(tree: &mut Subtree, extra: bool) {
     match tree {
-        Subtree::Inline(d) => {
-            if extra {
-                d.flags |= EXTRA;
-            } else {
-                d.flags &= !EXTRA;
-            }
-        }
+        Subtree::Inline(d) => d.set_flag(EXTRA, extra),
         Subtree::Heap(d) => Arc::make_mut(d).extra = extra,
         Subtree::Null => panic!("cannot set extra on a null subtree"),
     }
@@ -1749,10 +1810,10 @@ pub(crate) fn ts_subtree_leaf_parse_state(tree: &Subtree) -> StateId {
 pub(crate) fn ts_subtree_padding(tree: &Subtree) -> Length {
     match tree {
         Subtree::Inline(d) => Length {
-            bytes: d.padding_bytes as u32,
+            bytes: d.fields().padding_bytes as u32,
             extent: Point {
-                row: (d.padding_rows_and_lookahead & 15) as u32,
-                column: d.padding_columns as u32,
+                row: (d.fields().padding_rows_and_lookahead & 15) as u32,
+                column: d.fields().padding_columns as u32,
             },
         },
         Subtree::Heap(d) => d.padding,
@@ -1763,10 +1824,10 @@ pub(crate) fn ts_subtree_padding(tree: &Subtree) -> Length {
 pub(crate) fn ts_subtree_size(tree: &Subtree) -> Length {
     match tree {
         Subtree::Inline(d) => Length {
-            bytes: d.size_bytes as u32,
+            bytes: d.fields().size_bytes as u32,
             extent: Point {
                 row: 0,
-                column: d.size_bytes as u32,
+                column: d.fields().size_bytes as u32,
             },
         },
         Subtree::Heap(d) => d.size,
@@ -1812,12 +1873,53 @@ mod layout_tests {
     #[test]
     fn compact_handles() {
         assert_eq!(std::mem::size_of::<InlineLeaf>(), 8);
+        assert_eq!(std::mem::size_of::<PackedInlineLeaf>(), 8);
         #[cfg(target_pointer_width = "64")]
         {
             assert_eq!(std::mem::size_of::<Subtree>(), 16);
             assert_eq!(std::mem::size_of::<Option<Subtree>>(), 16);
         }
     }
+    #[test]
+    fn packed_inline_fields_round_trip_and_update_independently() {
+        for value in 0..=u16::MAX {
+            let byte = value as u8;
+            let fields = InlineLeaf {
+                parse_state: value,
+                symbol: byte,
+                flags: byte.wrapping_add(1),
+                padding_bytes: byte.wrapping_add(2),
+                padding_columns: byte.wrapping_add(3),
+                size_bytes: byte.wrapping_add(4),
+                padding_rows_and_lookahead: byte.wrapping_add(5),
+            };
+            let packed = PackedInlineLeaf::new(fields);
+            assert_eq!(packed.fields(), fields);
+            for flag in [VISIBLE, NAMED, EXTRA, HAS_CHANGES, MISSING, KEYWORD] {
+                for enabled in [false, true] {
+                    let mut actual = packed;
+                    actual.set_flag(flag, enabled);
+                    let mut expected = fields;
+                    if enabled {
+                        expected.flags |= flag;
+                    } else {
+                        expected.flags &= !flag;
+                    }
+                    assert_eq!(actual.fields(), expected);
+                }
+            }
+            let mut actual = packed;
+            actual.update(|data| data.parse_state = !value);
+            assert_eq!(
+                actual.fields(),
+                InlineLeaf {
+                    parse_state: !value,
+                    ..fields
+                }
+            );
+        }
+    }
+
     #[test]
     fn heap_mutation_is_shallow_copy_on_write() {
         let child = Subtree::Heap(Arc::new(SubtreeHeapData::default()));
@@ -1890,7 +1992,7 @@ mod layout_tests {
 
     #[test]
     fn small_leaf_extents() {
-        let tree = Subtree::Inline(InlineLeaf {
+        let tree = Subtree::inline(InlineLeaf {
             padding_bytes: 21,
             padding_columns: 200,
             padding_rows_and_lookahead: 0x73,
@@ -1924,7 +2026,7 @@ mod construction_tests {
     use super::*;
 
     fn leaf(symbol: u8, extra: bool) -> Subtree {
-        Subtree::Inline(InlineLeaf {
+        Subtree::inline(InlineLeaf {
             symbol,
             flags: if extra { EXTRA } else { 0 },
             ..InlineLeaf::default()
@@ -2156,7 +2258,7 @@ mod subtree_2_tests {
     use super::*;
 
     fn leaf(symbol: u8, size: u8) -> Subtree {
-        Subtree::Inline(InlineLeaf {
+        Subtree::inline(InlineLeaf {
             symbol,
             size_bytes: size,
             flags: VISIBLE | NAMED,
@@ -2492,7 +2594,7 @@ mod summary_tests {
     #[test]
     fn fresh_summary_matches_resummarization_for_empty_unary_and_multiple_children() {
         let language = language();
-        let inline = Subtree::Inline(InlineLeaf {
+        let inline = Subtree::inline(InlineLeaf {
             symbol: 1,
             parse_state: 7,
             flags: VISIBLE | NAMED | MISSING,
@@ -2559,7 +2661,7 @@ mod summary_tests {
             EXTRA | VISIBLE,
             MISSING | VISIBLE,
         ] {
-            children.push(Subtree::Inline(InlineLeaf {
+            children.push(Subtree::inline(InlineLeaf {
                 parse_state: 23,
                 symbol: 1,
                 flags,
@@ -2595,7 +2697,7 @@ mod summary_tests {
                         lookahead_bytes: u32::MAX - 7,
                         error_cost: 97,
                         children: if has_children {
-                            vec![Subtree::Inline(InlineLeaf::default())]
+                            vec![Subtree::inline(InlineLeaf::default())]
                         } else {
                             Vec::new()
                         },
@@ -2669,7 +2771,7 @@ mod summary_tests {
 
     #[test]
     fn summaries_combine_missing_errors_hidden_branches_and_external_extras() {
-        let missing = Subtree::Inline(InlineLeaf {
+        let missing = Subtree::inline(InlineLeaf {
             symbol: 1,
             parse_state: 7,
             flags: VISIBLE | NAMED | MISSING,
@@ -2819,7 +2921,7 @@ mod summary_tests {
     #[test]
     fn aliases_skip_extras_and_never_make_eof_visible() {
         let leaf = |symbol, flags| {
-            Subtree::Inline(InlineLeaf {
+            Subtree::inline(InlineLeaf {
                 symbol,
                 flags,
                 ..InlineLeaf::default()

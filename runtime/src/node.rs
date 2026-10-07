@@ -854,7 +854,7 @@ mod node_2_tests {
 
     #[test]
     fn identity_uses_tree_and_slot_not_subtree_value_or_context() {
-        let leaf = Subtree::Inline(subtree::InlineLeaf::default());
+        let leaf = Subtree::inline(subtree::InlineLeaf::default());
         let mut data = subtree::SubtreeHeapData::default();
         data.children = vec![leaf.clone(), leaf];
         let tree = Tree {

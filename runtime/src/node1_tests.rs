@@ -59,7 +59,7 @@ fn length(bytes: u32, row: u32, column: u32) -> Length {
 }
 
 fn leaf(symbol: u8, size: u8, padding: u8, flags: u8) -> Subtree {
-    Subtree::Inline(InlineLeaf {
+    Subtree::inline(InlineLeaf {
         symbol,
         size_bytes: size,
         padding_bytes: padding,
