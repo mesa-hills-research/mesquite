@@ -203,6 +203,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn recovery_content_consumes_non_utf8_boms_and_embedded_nuls() {
+        // UTF-16/32 encodings of "m\n", passed to the runtime as UTF-8 bytes.
+        // Each FE/FF byte decodes to TS_DECODE_ERROR (-1). The zero bytes
+        // are actual NUL lookahead, not EOF. All must remain in one content
+        // token during recovery, both on creation and after an empty reset.
+        for input in [
+            &b"\xfe\xff\0m\0\n"[..],
+            &b"\xff\xfem\0\n\0"[..],
+            &b"\0\0\xfe\xff\0\0\0m\0\0\0\n"[..],
+            &b"\xff\xfe\0\0m\0\0\0\n\0\0\0"[..],
+        ] {
+            let mut scanner = create();
+            for _ in 0..2 {
+                let mut lexer = TestLexer {
+                    input: input
+                        .iter()
+                        .map(|&byte| if byte.is_ascii() { i32::from(byte) } else { -1 })
+                        .collect(),
+                    ..TestLexer::new("")
+                };
+                assert!(scanner.scan(&mut lexer, &[true; 7]));
+                assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
+                assert_eq!(lexer.position, input.len());
+                assert_eq!(lexer.end, Some(input.len()));
+                assert!(lexer.eof());
+                scanner.deserialize(&[]);
+            }
+        }
+    }
+
     #[derive(Debug, PartialEq, Eq)]
     enum Event {
         Advance(usize, bool),
@@ -211,7 +242,7 @@ mod tests {
     }
 
     struct TestLexer {
-        input: Vec<char>,
+        input: Vec<i32>,
         position: usize,
         end: Option<usize>,
         symbol: u16,
@@ -221,7 +252,7 @@ mod tests {
     impl TestLexer {
         fn new(input: &str) -> Self {
             Self {
-                input: input.chars().collect(),
+                input: input.chars().map(|c| c as i32).collect(),
                 position: 0,
                 end: None,
                 symbol: u16::MAX,
@@ -232,7 +263,7 @@ mod tests {
 
     impl Lexer for TestLexer {
         fn lookahead(&self) -> i32 {
-            self.input.get(self.position).copied().unwrap_or('\0') as i32
+            self.input.get(self.position).copied().unwrap_or(0)
         }
 
         fn result_symbol(&self) -> u16 {
