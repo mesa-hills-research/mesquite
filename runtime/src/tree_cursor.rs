@@ -52,9 +52,6 @@ pub(crate) struct CursorStatus {
     pub can_have_later_siblings_with_this_field: bool,
     pub supertypes: Vec<Symbol>,
 }
-pub(crate) type AdvanceChild =
-    for<'a> fn(&mut CursorChildIterator<'a>) -> Option<(TreeCursorEntry<'a>, bool)>;
-
 #[inline]
 pub(crate) fn ts_tree_cursor_is_entry_visible(cursor: &TreeCursor<'_>, index: u32) -> bool {
     index == 0 || cursor.stack[index as usize].visible
@@ -199,10 +196,11 @@ pub(crate) fn ts_tree_cursor_child_iterator_previous<'tree>(
     };
     iterator.position = length_backtrack(iterator.position, ts_subtree_padding(child));
     iterator.child_index = iterator.child_index.wrapping_sub(1);
-    if !ts_subtree_extra(child) && !iterator.alias_sequence.is_empty() {
-        if iterator.structural_child_index > 0 {
-            iterator.structural_child_index -= 1;
-        }
+    if !ts_subtree_extra(child)
+        && !iterator.alias_sequence.is_empty()
+        && iterator.structural_child_index > 0
+    {
+        iterator.structural_child_index -= 1;
     }
     if let Some(previous_child) = children.get(iterator.child_index as usize) {
         iterator.position = length_backtrack(iterator.position, ts_subtree_size(previous_child));
@@ -352,9 +350,8 @@ pub(crate) fn ts_tree_cursor_goto_first_child_for_point(
     ts_tree_cursor_goto_first_child_for_byte_and_point(cursor, 0, goal_point)
 }
 
-pub(crate) fn ts_tree_cursor_goto_sibling_internal(
+fn ts_tree_cursor_goto_sibling_internal<const REVERSE: bool>(
     cursor: &mut TreeCursor<'_>,
-    advance: AdvanceChild,
 ) -> TreeCursorStep {
     let initial_size = cursor.stack.len();
     let mut size = initial_size;
@@ -366,11 +363,34 @@ pub(crate) fn ts_tree_cursor_goto_sibling_internal(
         iterator.structural_child_index = entry.structural_child_index;
         iterator.position = entry.position;
         iterator.descendant_index = entry.descendant_index;
-        let visible = advance(&mut iterator).is_some_and(|(_, visible)| visible);
-        if visible && size + 1 < initial_size {
-            break;
+        if REVERSE {
+            let visible = ts_tree_cursor_child_iterator_previous(&mut iterator)
+                .is_some_and(|(_, visible)| visible);
+            if visible && size + 1 < initial_size {
+                break;
+            }
+        } else {
+            if entry.visible && size + 1 < initial_size {
+                break;
+            }
+            // The current edge is already resolved. Advance over it without
+            // looking up its alias and field map for a second time.
+            iterator.child_index = entry.child_index.wrapping_add(1);
+            iterator.structural_child_index = entry.structural_child_index
+                .wrapping_add(u32::from(!ts_subtree_extra(entry.subtree)));
+            iterator.descendant_index = entry.descendant_index
+                .wrapping_add(ts_subtree_visible_descendant_count(entry.subtree))
+                .wrapping_add(u32::from(entry.visible));
+            iterator.position = length_add(entry.position, ts_subtree_size(entry.subtree));
+            if let Some(next) = ts_subtree_children(iterator.parent).get(iterator.child_index as usize) {
+                iterator.position = length_add(iterator.position, ts_subtree_padding(next));
+            }
         }
-        while let Some((entry, visible)) = advance(&mut iterator) {
+        while let Some((entry, visible)) = if REVERSE {
+            ts_tree_cursor_child_iterator_previous(&mut iterator)
+        } else {
+            ts_tree_cursor_child_iterator_next(&mut iterator)
+        } {
             let step = if visible {
                 TreeCursorStep::Visible
             } else if ts_subtree_visible_child_count(entry.subtree) > 0 {
@@ -389,7 +409,7 @@ pub(crate) fn ts_tree_cursor_goto_sibling_internal(
 pub(crate) fn ts_tree_cursor_goto_next_sibling_internal(
     cursor: &mut TreeCursor<'_>,
 ) -> TreeCursorStep {
-    ts_tree_cursor_goto_sibling_internal(cursor, ts_tree_cursor_child_iterator_next)
+    ts_tree_cursor_goto_sibling_internal::<false>(cursor)
 }
 
 pub(crate) fn ts_tree_cursor_goto_next_sibling(cursor: &mut TreeCursor<'_>) -> bool {
@@ -406,7 +426,7 @@ pub(crate) fn ts_tree_cursor_goto_next_sibling(cursor: &mut TreeCursor<'_>) -> b
 pub(crate) fn ts_tree_cursor_goto_previous_sibling_internal(
     cursor: &mut TreeCursor<'_>,
 ) -> TreeCursorStep {
-    let step = ts_tree_cursor_goto_sibling_internal(cursor, ts_tree_cursor_child_iterator_previous);
+    let step = ts_tree_cursor_goto_sibling_internal::<true>(cursor);
     if step == TreeCursorStep::None {
         return step;
     }
@@ -840,6 +860,31 @@ mod tests {
         assert_eq!(iterator.position, LENGTH_UNDEFINED);
         let (entry, _) = ts_tree_cursor_child_iterator_previous(&mut iterator).unwrap();
         assert_eq!(entry.position, LENGTH_UNDEFINED);
+    }
+
+    #[test]
+    fn cached_edge_metadata_preserves_field_precedence_and_extra_boundaries() {
+        use ts_port_tables::FieldMapEntry;
+        let parent = parent(vec![leaf(1, 0, 0), leaf(1, 0, EXTRA), leaf(1, 0, VISIBLE)]);
+        let mut iter = iterator(&parent, &[5, 0]);
+        iter.inherited_field_id = 7;
+        iter.field_map = &[
+            FieldMapEntry { field_id: 2, child_index: 0, inherited: true },
+            FieldMapEntry { field_id: 3, child_index: 0, inherited: false },
+            FieldMapEntry { field_id: 4, child_index: 0, inherited: false },
+        ];
+        let (first, visible) = ts_tree_cursor_child_iterator_next(&mut iter).unwrap();
+        assert_eq!(first.alias, 5);
+        assert_eq!(first.field_id, 3);
+        assert!(visible && first.visible);
+        let (extra, visible) = ts_tree_cursor_child_iterator_next(&mut iter).unwrap();
+        assert_eq!(extra.alias, 0);
+        assert_eq!(extra.field_id, 0);
+        assert!(!visible && !extra.visible);
+        let (last, visible) = ts_tree_cursor_child_iterator_next(&mut iter).unwrap();
+        assert_eq!(last.alias, 0);
+        assert_eq!(last.field_id, 7);
+        assert!(visible && last.visible);
     }
 
     #[test]
