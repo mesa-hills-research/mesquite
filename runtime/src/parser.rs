@@ -739,6 +739,9 @@ fn parser2_log_stack(parser: &mut Parser) {
     }
 }
 
+// A miss is the usual case on the next token. Keep it at the call site rather
+// than returning and copying an owning Null handle through an aggregate ABI.
+#[inline(always)]
 pub(crate) fn ts_parser__get_cached_token(
     parser: &Parser,
     state: StateId,
@@ -763,6 +766,30 @@ pub(crate) fn ts_parser__get_cached_token(
     Subtree::Null
 }
 
+/// Updating an unchanged scanner snapshot need not retain and release the
+/// very same Arc. Borrow the head until we know the cache needs a new handle.
+#[inline(always)]
+fn ts_parser__cache_lookahead(
+    parser: &mut Parser,
+    version: StackVersion,
+    position: u32,
+    lookahead: &Subtree,
+) {
+    let external = ts_stack_last_external_token(&parser.stack, version);
+    let old_token = std::mem::replace(&mut parser.token_cache.token, lookahead.clone());
+    let old_external = if parser.token_cache.last_external_token.ptr_eq(external) {
+        Subtree::Null
+    } else {
+        std::mem::replace(&mut parser.token_cache.last_external_token, external.clone())
+    };
+    // Retain the new handles before releasing the old token and then its
+    // scanner snapshot, in the same order as the owning cache setter.
+    ts_subtree_release(&mut parser.tree_pool, old_token);
+    ts_subtree_release(&mut parser.tree_pool, old_external);
+    parser.token_cache.byte_index = position;
+}
+
+#[inline(always)]
 pub(crate) fn ts_parser__set_cached_token(
     parser: &mut Parser,
     byte_index: u32,
@@ -1195,6 +1222,8 @@ fn ts_parser__finish_committed_reduction(
     version
 }
 
+// This large GLR worklist otherwise gets folded back into the committed path.
+#[inline(never)]
 fn ts_parser__reduce_general(
     parser: &mut Parser,
     version: StackVersion,
@@ -1937,12 +1966,7 @@ pub(crate) fn ts_parser__advance<const LOGGING: bool>(
                 return false;
             }
             let symbol = if !lookahead.is_null() {
-                ts_parser__set_cached_token(
-                    parser,
-                    position,
-                    ts_stack_last_external_token(&parser.stack, version).clone(),
-                    lookahead.clone(),
-                );
+                ts_parser__cache_lookahead(parser, version, position, &lookahead);
                 ts_subtree_symbol(&lookahead)
             } else {
                 // Null lookahead terminates a non-terminal extra; its fixed
@@ -2116,6 +2140,8 @@ pub(crate) fn ts_parser__condense_stack(parser: &mut Parser) -> u32 {
     ts_parser__condense_stack_general(parser)
 }
 
+// Preserve the small sole-active-head entry separately from GLR/recovery.
+#[inline(never)]
 fn ts_parser__condense_stack_general(parser: &mut Parser) -> u32 {
     let mut made_changes = false;
     let mut min_error_cost = u32::MAX;
@@ -2812,6 +2838,83 @@ mod parser3_tests {
                 )
             });
         Language::from(&*TABLES)
+    }
+
+    #[test]
+    fn borrowed_cache_updates_match_owning_updates_and_keep_snapshot_identity() {
+        fn external(symbol: Symbol, bytes: &[u8]) -> Subtree {
+            Subtree::Heap(Arc::new(SubtreeHeapData {
+                symbol,
+                has_external_tokens: true,
+                payload: SubtreePayload::External(ts_external_scanner_state_init(bytes)),
+                children: Vec::new(),
+                ..SubtreeHeapData::default()
+            }))
+        }
+
+        fn run(borrowed: bool) -> Vec<(String, Vec<usize>, usize)> {
+            let mut parser = ts_parser_new();
+            // The two nonempty snapshots have equal scanner bytes but distinct
+            // headers. Identity, not byte equality, controls handle retention.
+            let snapshots = [
+                Subtree::Null,
+                external(17, b"same"),
+                external(18, b"same"),
+                external(19, b""),
+            ];
+            let mut observations = Vec::new();
+            for (step, snapshot) in [0, 1, 1, 2, 2, 3, 3, 0].into_iter().enumerate() {
+                ts_stack_set_last_external_token(
+                    &mut parser.stack,
+                    &mut parser.tree_pool,
+                    0,
+                    snapshots[snapshot].clone(),
+                );
+                let token = if step == 2 || step == 4 {
+                    // Token and scanner snapshot can be the very same header.
+                    snapshots[snapshot].clone()
+                } else if step % 2 == 0 {
+                    Subtree::Inline(InlineLeaf {
+                        symbol: step as u8 + 1,
+                        size_bytes: 1,
+                        ..InlineLeaf::default()
+                    })
+                } else {
+                    external(step as Symbol + 1, b"token")
+                };
+                let position = (step * 3) as u32;
+                if borrowed {
+                    ts_parser__cache_lookahead(&mut parser, 0, position, &token);
+                } else {
+                    ts_parser__set_cached_token(
+                        &mut parser,
+                        position,
+                        snapshots[snapshot].clone(),
+                        token.clone(),
+                    );
+                }
+                assert!(parser.token_cache.token.ptr_eq(&token));
+                assert!(parser.token_cache.last_external_token.ptr_eq(&snapshots[snapshot]));
+                assert!(parser.tree_pool.tree_stack.is_empty());
+                observations.push((
+                    format!("{:?}", parser.token_cache),
+                    snapshots
+                        .iter()
+                        .map(|tree| match tree {
+                            Subtree::Heap(data) => Arc::strong_count(data),
+                            _ => 0,
+                        })
+                        .collect(),
+                    parser.tree_pool.free_trees.len(),
+                ));
+            }
+            ts_parser_reset(&mut parser);
+            assert!(parser.token_cache.token.is_null());
+            assert!(parser.token_cache.last_external_token.is_null());
+            observations
+        }
+
+        assert_eq!(run(false), run(true));
     }
 
     #[test]

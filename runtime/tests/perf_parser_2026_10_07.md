@@ -1,5 +1,9 @@
 # Parser optimization experiments (worker-2)
 
+> Historical investigation log. The resumed task ultimately retained a measured
+> cache optimization; see `parser_cache_performance.md` for the final outcome.
+> The deferred owned-header patch was tested, rejected, and removed.
+
 Baseline: `cc1559622c7e5ddd98e3838cf549ccc9ef2d1856`.
 
 ## Outcome
@@ -110,3 +114,20 @@ succeeds against the merged sources; however, the saved experiment's unit-test
 and clippy results above predate this merge. Revalidate and benchmark on current
 main before considering it for integration. The earlier timing results must
 not be interpreted as measurements against the newly merged main.
+
+## Resumed outcome
+
+The deferred owned-header candidate measured 0.754 against main's 0.743 after
+restart and was rejected. The patch file was removed rather than preserving an
+unmeasured optimization. Further experiments with binary reductions, branch
+metadata packing, alias-free summary specialization, action-run caches, range
+lookup shortcuts, word-packed inline leaves, and alternate return types also
+failed the speed threshold and were reverted.
+
+The successful combination instead keeps token-cache handling inline, skips
+clone/release traffic for an identical scanner snapshot, and explicitly keeps
+large GLR fallbacks out of line. Its final post-test benchmark median is 0.727
+against main 0.743 (about 2.2% faster). All 4,712 differential/incremental/query
+gate files match C. Details and retained changes are in
+`parser_cache_performance.md`; the older report-only outcomes above are not the
+final branch state.

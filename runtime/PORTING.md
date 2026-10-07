@@ -198,6 +198,14 @@ header-free slices. Use `.action()` on each action entry; do not reinterpret a
 slice or allocate a new action Vec for every lookup. TableEntry count is
 `actions().len()`.
 
+Token-cache lookups and updates keep their small miss/null paths inline. When
+installing newly lexed lookahead, borrow the stack's scanner token and retain the
+cache's existing snapshot handle if it is pointer-identical. Distinct snapshot
+headers must still replace one another even if their serialized bytes match.
+Clone new handles before releasing the old token, then the old snapshot, in that
+order. Keep the larger GLR reduction and condensation routines out of line so
+they do not absorb the committed/single-head paths during optimization.
+
 `LexerState` is persistent data, while `Lexer<'a>` is a short-lived adapter
 implementing `ts_port_tables::Lexer`. It borrows state, input, and an optional
 logger, and is constructed only while calling a generated lexer/scanner. State-only
