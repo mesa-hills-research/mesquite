@@ -667,7 +667,7 @@ pub(crate) fn ts_parser__lex(
                 symbol = parser.lexer.result_symbol;
             }
         }
-        let mut result = ts_subtree_new_leaf(
+        ts_subtree_new_leaf_with(
             &mut parser.tree_pool,
             symbol,
             padding,
@@ -678,17 +678,15 @@ pub(crate) fn ts_parser__lex(
             called_get_column,
             is_keyword,
             &language,
-        );
-        if found_external_token {
-            let data = result
-                .heap_mut()
-                .expect("external tokens are heap subtrees");
-            data.payload = SubtreePayload::External(ts_external_scanner_state_init(
-                &parser.scanner_buffer[..external_scanner_state_len as usize],
-            ));
-            data.has_external_scanner_state_change = external_scanner_state_changed;
-        }
-        result
+            |data| {
+                if found_external_token {
+                    data.payload = SubtreePayload::External(ts_external_scanner_state_init(
+                        &parser.scanner_buffer[..external_scanner_state_len as usize],
+                    ));
+                    data.has_external_scanner_state_change = external_scanner_state_changed;
+                }
+            },
+        )
     };
     parser_log_lookahead!(
         parser,
