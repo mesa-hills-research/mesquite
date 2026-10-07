@@ -1,5 +1,5 @@
 //! YAML's external scanner and core-schema resolver, translated from `scanner.c`
-//! and `schema.core.c`. Token order and speculative lexer calls follow the C scanner.
+//! and `schema.core.c`. Token order and speculative advances follow the C scanner.
 
 use ts_port_tables::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE};
 
@@ -140,6 +140,8 @@ pub(crate) struct Scanner {
     cur_row: i16,
     cur_col: i16,
     cur_chr: i32,
+    // Cached until the next advance; unlike C field reads, Lexer calls are dynamic.
+    lookahead: i32,
     sch_stt: i8,
     rlt_sch: ResultSchema,
 }
@@ -147,28 +149,32 @@ pub(crate) struct Scanner {
 impl Scanner {
     fn adv(&mut self, lexer: &mut dyn Lexer) {
         self.cur_col = self.cur_col.wrapping_add(1);
-        self.cur_chr = lexer.lookahead();
+        self.cur_chr = self.lookahead;
         lexer.advance(false);
+        self.lookahead = lexer.lookahead();
     }
 
     fn adv_nwl(&mut self, lexer: &mut dyn Lexer) {
         self.cur_row = self.cur_row.wrapping_add(1);
         self.cur_col = 0;
-        self.cur_chr = lexer.lookahead();
+        self.cur_chr = self.lookahead;
         lexer.advance(false);
+        self.lookahead = lexer.lookahead();
     }
 
     fn skp(&mut self, lexer: &mut dyn Lexer) {
         self.cur_col = self.cur_col.wrapping_add(1);
-        self.cur_chr = lexer.lookahead();
+        self.cur_chr = self.lookahead;
         lexer.advance(true);
+        self.lookahead = lexer.lookahead();
     }
 
     fn skp_nwl(&mut self, lexer: &mut dyn Lexer) {
         self.cur_row = self.cur_row.wrapping_add(1);
         self.cur_col = 0;
-        self.cur_chr = lexer.lookahead();
+        self.cur_chr = self.lookahead;
         lexer.advance(true);
+        self.lookahead = lexer.lookahead();
     }
 
     fn mrk_end(&mut self, lexer: &mut dyn Lexer) {
@@ -227,16 +233,16 @@ impl Scanner {
     }
 
     fn scn_uri_esc(&mut self, lexer: &mut dyn Lexer) -> ScanResult {
-        if lexer.lookahead() != i32::from(b'%') {
+        if self.lookahead != i32::from(b'%') {
             return ScanResult::Stop;
         }
         self.mrk_end(lexer);
         self.adv(lexer);
-        if !is_ns_hex_digit(lexer.lookahead()) {
+        if !is_ns_hex_digit(self.lookahead) {
             return ScanResult::Fail;
         }
         self.adv(lexer);
-        if !is_ns_hex_digit(lexer.lookahead()) {
+        if !is_ns_hex_digit(self.lookahead) {
             return ScanResult::Fail;
         }
         self.adv(lexer);
@@ -244,7 +250,7 @@ impl Scanner {
     }
 
     fn scn_ns_uri_char(&mut self, lexer: &mut dyn Lexer) -> ScanResult {
-        if is_ns_uri_char(lexer.lookahead()) {
+        if is_ns_uri_char(self.lookahead) {
             self.adv(lexer);
             return ScanResult::Success;
         }
@@ -252,7 +258,7 @@ impl Scanner {
     }
 
     fn scn_ns_tag_char(&mut self, lexer: &mut dyn Lexer) -> ScanResult {
-        if is_ns_tag_char(lexer.lookahead()) {
+        if is_ns_tag_char(self.lookahead) {
             self.adv(lexer);
             return ScanResult::Success;
         }
@@ -261,28 +267,28 @@ impl Scanner {
 
     fn scn_dir_bgn(&mut self, lexer: &mut dyn Lexer) -> bool {
         self.adv(lexer);
-        if lexer.lookahead() == i32::from(b'Y') {
+        if self.lookahead == i32::from(b'Y') {
             self.adv(lexer);
-            if lexer.lookahead() == i32::from(b'A') {
+            if self.lookahead == i32::from(b'A') {
                 self.adv(lexer);
-                if lexer.lookahead() == i32::from(b'M') {
+                if self.lookahead == i32::from(b'M') {
                     self.adv(lexer);
-                    if lexer.lookahead() == i32::from(b'L') {
+                    if self.lookahead == i32::from(b'L') {
                         self.adv(lexer);
-                        if is_wht(lexer.lookahead()) {
+                        if is_wht(self.lookahead) {
                             self.mrk_end(lexer);
                             return self.finish(lexer, S_DIR_YML_BGN);
                         }
                     }
                 }
             }
-        } else if lexer.lookahead() == i32::from(b'T') {
+        } else if self.lookahead == i32::from(b'T') {
             self.adv(lexer);
-            if lexer.lookahead() == i32::from(b'A') {
+            if self.lookahead == i32::from(b'A') {
                 self.adv(lexer);
-                if lexer.lookahead() == i32::from(b'G') {
+                if self.lookahead == i32::from(b'G') {
                     self.adv(lexer);
-                    if is_wht(lexer.lookahead()) {
+                    if is_wht(self.lookahead) {
                         self.mrk_end(lexer);
                         return self.finish(lexer, S_DIR_TAG_BGN);
                     }
@@ -290,12 +296,12 @@ impl Scanner {
             }
         }
         loop {
-            if !is_ns_char(lexer.lookahead()) {
+            if !is_ns_char(self.lookahead) {
                 break;
             }
             self.adv(lexer);
         }
-        if self.cur_col > 1 && is_wht(lexer.lookahead()) {
+        if self.cur_col > 1 && is_wht(self.lookahead) {
             self.mrk_end(lexer);
             return self.finish(lexer, S_DIR_RSV_BGN);
         }
@@ -305,15 +311,15 @@ impl Scanner {
     fn scn_dir_yml_ver(&mut self, lexer: &mut dyn Lexer, result_symbol: usize) -> bool {
         let mut n1: u16 = 0;
         let mut n2: u16 = 0;
-        while is_ns_dec_digit(lexer.lookahead()) {
+        while is_ns_dec_digit(self.lookahead) {
             self.adv(lexer);
             n1 = n1.wrapping_add(1);
         }
-        if lexer.lookahead() != i32::from(b'.') {
+        if self.lookahead != i32::from(b'.') {
             return false;
         }
         self.adv(lexer);
-        while is_ns_dec_digit(lexer.lookahead()) {
+        while is_ns_dec_digit(self.lookahead) {
             self.adv(lexer);
             n2 = n2.wrapping_add(1);
         }
@@ -325,19 +331,19 @@ impl Scanner {
     }
 
     fn scn_tag_hdl_tal(&mut self, lexer: &mut dyn Lexer) -> bool {
-        if lexer.lookahead() == i32::from(b'!') {
+        if self.lookahead == i32::from(b'!') {
             self.adv(lexer);
             return true;
         }
         let mut n: u16 = 0;
-        while is_ns_word_char(lexer.lookahead()) {
+        while is_ns_word_char(self.lookahead) {
             self.adv(lexer);
             n = n.wrapping_add(1);
         }
         if n == 0 {
             return true;
         }
-        if lexer.lookahead() == i32::from(b'!') {
+        if self.lookahead == i32::from(b'!') {
             self.adv(lexer);
             return true;
         }
@@ -345,7 +351,7 @@ impl Scanner {
     }
 
     fn scn_dir_tag_hdl(&mut self, lexer: &mut dyn Lexer, result_symbol: usize) -> bool {
-        if lexer.lookahead() == i32::from(b'!') {
+        if self.lookahead == i32::from(b'!') {
             self.adv(lexer);
             if self.scn_tag_hdl_tal(lexer) {
                 self.mrk_end(lexer);
@@ -356,11 +362,11 @@ impl Scanner {
     }
 
     fn scn_dir_rsv_prm(&mut self, lexer: &mut dyn Lexer, result_symbol: usize) -> bool {
-        if !is_ns_char(lexer.lookahead()) {
+        if !is_ns_char(self.lookahead) {
             return false;
         }
         self.adv(lexer);
-        while is_ns_char(lexer.lookahead()) {
+        while is_ns_char(self.lookahead) {
             self.adv(lexer);
         }
         self.mrk_end(lexer);
@@ -368,11 +374,11 @@ impl Scanner {
     }
 
     fn scn_acr_bgn(&mut self, lexer: &mut dyn Lexer, result_symbol: usize) -> bool {
-        if lexer.lookahead() != i32::from(b'&') {
+        if self.lookahead != i32::from(b'&') {
             return false;
         }
         self.adv(lexer);
-        if !is_ns_anchor_char(lexer.lookahead()) {
+        if !is_ns_anchor_char(self.lookahead) {
             return false;
         }
         self.mrk_end(lexer);
@@ -380,7 +386,7 @@ impl Scanner {
     }
 
     fn scn_acr_ctn(&mut self, lexer: &mut dyn Lexer, result_symbol: usize) -> bool {
-        while is_ns_anchor_char(lexer.lookahead()) {
+        while is_ns_anchor_char(self.lookahead) {
             self.adv(lexer);
         }
         self.mrk_end(lexer);
@@ -388,11 +394,11 @@ impl Scanner {
     }
 
     fn scn_als_bgn(&mut self, lexer: &mut dyn Lexer, result_symbol: usize) -> bool {
-        if lexer.lookahead() != i32::from(b'*') {
+        if self.lookahead != i32::from(b'*') {
             return false;
         }
         self.adv(lexer);
-        if !is_ns_anchor_char(lexer.lookahead()) {
+        if !is_ns_anchor_char(self.lookahead) {
             return false;
         }
         self.mrk_end(lexer);
@@ -400,7 +406,7 @@ impl Scanner {
     }
 
     fn scn_als_ctn(&mut self, lexer: &mut dyn Lexer, result_symbol: usize) -> bool {
-        while is_ns_anchor_char(lexer.lookahead()) {
+        while is_ns_anchor_char(self.lookahead) {
             self.adv(lexer);
         }
         self.mrk_end(lexer);
@@ -408,16 +414,16 @@ impl Scanner {
     }
 
     fn scn_drs_doc_end(&mut self, lexer: &mut dyn Lexer) -> bool {
-        if lexer.lookahead() != i32::from(b'-') && lexer.lookahead() != i32::from(b'.') {
+        if self.lookahead != i32::from(b'-') && self.lookahead != i32::from(b'.') {
             return false;
         }
-        let delimeter: i32 = lexer.lookahead();
+        let delimeter: i32 = self.lookahead;
         self.adv(lexer);
-        if lexer.lookahead() == delimeter {
+        if self.lookahead == delimeter {
             self.adv(lexer);
-            if lexer.lookahead() == delimeter {
+            if self.lookahead == delimeter {
                 self.adv(lexer);
-                if is_wht(lexer.lookahead()) {
+                if is_wht(self.lookahead) {
                     return true;
                 }
             }
@@ -427,7 +433,7 @@ impl Scanner {
     }
 
     fn scn_dqt_str_cnt(&mut self, lexer: &mut dyn Lexer, result_symbol: usize) -> bool {
-        if !is_nb_double_char(lexer.lookahead()) {
+        if !is_nb_double_char(self.lookahead) {
             return false;
         }
         if self.cur_col == 0 && self.scn_drs_doc_end(lexer) {
@@ -443,7 +449,7 @@ impl Scanner {
         } else {
             self.adv(lexer);
         }
-        while is_nb_double_char(lexer.lookahead()) {
+        while is_nb_double_char(self.lookahead) {
             self.adv(lexer);
         }
         self.mrk_end(lexer);
@@ -451,7 +457,7 @@ impl Scanner {
     }
 
     fn scn_sqt_str_cnt(&mut self, lexer: &mut dyn Lexer, result_symbol: usize) -> bool {
-        if !is_nb_single_char(lexer.lookahead()) {
+        if !is_nb_single_char(self.lookahead) {
             return false;
         }
         if self.cur_col == 0 && self.scn_drs_doc_end(lexer) {
@@ -467,7 +473,7 @@ impl Scanner {
         } else {
             self.adv(lexer);
         }
-        while is_nb_single_char(lexer.lookahead()) {
+        while is_nb_single_char(self.lookahead) {
             self.adv(lexer);
         }
         self.mrk_end(lexer);
@@ -475,26 +481,26 @@ impl Scanner {
     }
 
     fn scn_blk_str_bgn(&mut self, lexer: &mut dyn Lexer, result_symbol: usize) -> bool {
-        if lexer.lookahead() != i32::from(b'|') && lexer.lookahead() != i32::from(b'>') {
+        if self.lookahead != i32::from(b'|') && self.lookahead != i32::from(b'>') {
             return false;
         }
         self.adv(lexer);
         let cur_ind: i16 = self.indents.last().unwrap().length;
         let mut ind: i16 = -1;
-        if lexer.lookahead() >= i32::from(b'1') && lexer.lookahead() <= i32::from(b'9') {
-            ind = (lexer.lookahead() - i32::from(b'1')) as i16;
+        if self.lookahead >= i32::from(b'1') && self.lookahead <= i32::from(b'9') {
+            ind = (self.lookahead - i32::from(b'1')) as i16;
             self.adv(lexer);
-            if lexer.lookahead() == i32::from(b'+') || lexer.lookahead() == i32::from(b'-') {
+            if self.lookahead == i32::from(b'+') || self.lookahead == i32::from(b'-') {
                 self.adv(lexer);
             }
-        } else if lexer.lookahead() == i32::from(b'+') || lexer.lookahead() == i32::from(b'-') {
+        } else if self.lookahead == i32::from(b'+') || self.lookahead == i32::from(b'-') {
             self.adv(lexer);
-            if lexer.lookahead() >= i32::from(b'1') && lexer.lookahead() <= i32::from(b'9') {
-                ind = (lexer.lookahead() - i32::from(b'1')) as i16;
+            if self.lookahead >= i32::from(b'1') && self.lookahead <= i32::from(b'9') {
+                ind = (self.lookahead - i32::from(b'1')) as i16;
                 self.adv(lexer);
             }
         }
-        if !is_wht(lexer.lookahead()) {
+        if !is_wht(self.lookahead) {
             return false;
         }
         self.mrk_end(lexer);
@@ -502,22 +508,22 @@ impl Scanner {
             ind = ind.wrapping_add(cur_ind);
         } else {
             ind = cur_ind;
-            while is_wsp(lexer.lookahead()) {
+            while is_wsp(self.lookahead) {
                 self.adv(lexer);
             }
-            if lexer.lookahead() == i32::from(b'#') {
+            if self.lookahead == i32::from(b'#') {
                 self.adv(lexer);
-                while !is_nwl(lexer.lookahead()) && lexer.lookahead() != 0 {
+                while !is_nwl(self.lookahead) && self.lookahead != 0 {
                     self.adv(lexer);
                 }
             }
-            if is_nwl(lexer.lookahead()) {
+            if is_nwl(self.lookahead) {
                 self.adv_nwl(lexer);
             }
-            while lexer.lookahead() != 0 {
-                if lexer.lookahead() == i32::from(b' ') {
+            while self.lookahead != 0 {
+                if self.lookahead == i32::from(b' ') {
                     self.adv(lexer);
-                } else if is_nwl(lexer.lookahead()) {
+                } else if is_nwl(self.lookahead) {
                     if i32::from(self.cur_col) - 1 < i32::from(ind) {
                         break;
                     }
@@ -536,7 +542,7 @@ impl Scanner {
     }
 
     fn scn_blk_str_cnt(&mut self, lexer: &mut dyn Lexer, result_symbol: usize) -> bool {
-        if !is_ns_char(lexer.lookahead()) {
+        if !is_ns_char(self.lookahead) {
             return false;
         }
         if self.cur_col == 0 && self.scn_drs_doc_end(lexer) {
@@ -549,16 +555,16 @@ impl Scanner {
         }
         self.mrk_end(lexer);
         loop {
-            if is_ns_char(lexer.lookahead()) {
+            if is_ns_char(self.lookahead) {
                 self.adv(lexer);
-                while is_ns_char(lexer.lookahead()) {
+                while is_ns_char(self.lookahead) {
                     self.adv(lexer);
                 }
                 self.mrk_end(lexer);
             }
-            if is_wsp(lexer.lookahead()) {
+            if is_wsp(self.lookahead) {
                 self.adv(lexer);
-                while is_wsp(lexer.lookahead()) {
+                while is_wsp(self.lookahead) {
                     self.adv(lexer);
                 }
             } else {
@@ -568,16 +574,17 @@ impl Scanner {
         self.finish(lexer, result_symbol)
     }
 
-    fn scn_pln_cnt(&mut self, lexer: &mut dyn Lexer, is_plain_safe: fn(i32) -> bool) -> ScanResult {
+    fn scn_pln_cnt(&mut self, lexer: &mut dyn Lexer, is_in_blk: bool) -> ScanResult {
+        let is_plain_safe = |c| is_plain_safe(c, is_in_blk);
         let mut is_cur_saf: bool = is_plain_safe(self.cur_chr);
-        let mut is_lka_wsp: bool = is_wsp(lexer.lookahead());
-        let mut is_lka_saf: bool = is_plain_safe(lexer.lookahead());
+        let mut is_lka_wsp: bool = is_wsp(self.lookahead);
+        let mut is_lka_saf: bool = is_plain_safe(self.lookahead);
         if is_lka_saf || is_lka_wsp {
             loop {
                 if (is_lka_saf
-                    && lexer.lookahead() != i32::from(b'#')
-                    && lexer.lookahead() != i32::from(b':'))
-                    || (is_cur_saf && lexer.lookahead() == i32::from(b'#'))
+                    && self.lookahead != i32::from(b'#')
+                    && self.lookahead != i32::from(b':'))
+                    || (is_cur_saf && self.lookahead == i32::from(b'#'))
                 {
                     self.adv(lexer);
                     self.mrk_end(lexer);
@@ -585,14 +592,14 @@ impl Scanner {
                 } else if is_lka_wsp {
                     self.adv(lexer);
                     self.sch_stt = advance_schema(self.sch_stt, self.cur_chr, &mut self.rlt_sch);
-                } else if lexer.lookahead() == i32::from(b':') {
+                } else if self.lookahead == i32::from(b':') {
                     self.adv(lexer); // check later
                 } else {
                     break;
                 }
                 is_cur_saf = is_lka_saf;
-                is_lka_wsp = is_wsp(lexer.lookahead());
-                is_lka_saf = is_plain_safe(lexer.lookahead());
+                is_lka_wsp = is_wsp(self.lookahead);
+                is_lka_saf = is_plain_safe(self.lookahead);
 
                 if self.cur_chr == i32::from(b':') {
                     if is_lka_saf {
@@ -691,12 +698,8 @@ fn is_c_flow_indicator(c: i32) -> bool {
         || c == i32::from(b'}')
 }
 
-fn is_plain_safe_in_block(c: i32) -> bool {
-    is_ns_char(c)
-}
-
-fn is_plain_safe_in_flow(c: i32) -> bool {
-    is_ns_char(c) && !is_c_flow_indicator(c)
+fn is_plain_safe(c: i32, is_in_blk: bool) -> bool {
+    is_ns_char(c) && (is_in_blk || !is_c_flow_indicator(c))
 }
 
 fn is_ns_uri_char(c: i32) -> bool {
@@ -752,6 +755,9 @@ fn is_ns_anchor_char(c: i32) -> bool {
 impl ExternalScanner for Scanner {
     fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
         self.init();
+        // The runtime can rewind between scans. Only cache within this scan;
+        // the advance helpers refresh the value at every subsequent position.
+        self.lookahead = lexer.lookahead();
         self.mrk_end(lexer);
 
         let allow_comment: bool = !(valid_symbols[R_DQT_STR_CTN]
@@ -772,19 +778,19 @@ impl ExternalScanner for Scanner {
         let mut leading_spaces: i16 = 0;
 
         loop {
-            if lexer.lookahead() == i32::from(b' ') {
+            if self.lookahead == i32::from(b' ') {
                 if !has_tab_ind {
                     leading_spaces = leading_spaces.wrapping_add(1);
                 }
                 self.skp(lexer);
-            } else if lexer.lookahead() == i32::from(b'\t') {
+            } else if self.lookahead == i32::from(b'\t') {
                 has_tab_ind = true;
                 self.skp(lexer);
-            } else if is_nwl(lexer.lookahead()) {
+            } else if is_nwl(self.lookahead) {
                 has_tab_ind = false;
                 leading_spaces = 0;
                 self.skp_nwl(lexer);
-            } else if allow_comment && lexer.lookahead() == i32::from(b'#') {
+            } else if allow_comment && self.lookahead == i32::from(b'#') {
                 if valid_symbols[BR_BLK_STR_CTN] && valid_symbols[BL] && self.cur_col <= cur_ind {
                     if !self.pop_ind() {
                         return false;
@@ -797,7 +803,7 @@ impl ExternalScanner for Scanner {
                     self.cur_col == 0 || self.cur_row != self.row || self.cur_col > self.col
                 } {
                     self.adv(lexer);
-                    while !is_nwl(lexer.lookahead()) && lexer.lookahead() != 0 {
+                    while !is_nwl(self.lookahead) && self.lookahead != 0 {
                         self.adv(lexer);
                     }
                     self.mrk_end(lexer);
@@ -810,7 +816,7 @@ impl ExternalScanner for Scanner {
             }
         }
 
-        if lexer.lookahead() == 0 {
+        if self.lookahead == 0 {
             if valid_symbols[BL] {
                 self.mrk_end(lexer);
                 if !self.pop_ind() {
@@ -827,13 +833,13 @@ impl ExternalScanner for Scanner {
 
         let bgn_row: i16 = self.cur_row;
         let bgn_col: i16 = self.cur_col;
-        let bgn_chr: i32 = lexer.lookahead();
+        let bgn_chr: i32 = self.lookahead;
 
         if valid_symbols[BL]
             && bgn_col <= cur_ind
             && !has_tab_ind
             && if cur_ind == prt_ind && cur_ind_typ == IND_SEQ {
-                bgn_col < cur_ind || lexer.lookahead() != i32::from(b'-')
+                bgn_col < cur_ind || self.lookahead != i32::from(b'-')
             } else {
                 bgn_col <= prt_ind || cur_ind_typ == IND_STR
             }
@@ -889,11 +895,11 @@ impl ExternalScanner for Scanner {
             return self.scn_als_ctn(lexer, R_ALS_CTN);
         }
 
-        if lexer.lookahead() == i32::from(b'%') {
+        if self.lookahead == i32::from(b'%') {
             if valid_symbols[S_DIR_YML_BGN] && is_s {
                 return self.scn_dir_bgn(lexer);
             }
-        } else if lexer.lookahead() == i32::from(b'*') {
+        } else if self.lookahead == i32::from(b'*') {
             if valid_symbols[R_ALS_BGN] && is_r {
                 self.may_upd_imp_col(bgn_row, bgn_col, has_tab_ind);
                 return self.scn_als_bgn(lexer, R_ALS_BGN);
@@ -906,7 +912,7 @@ impl ExternalScanner for Scanner {
                 self.may_upd_imp_col(bgn_row, bgn_col, has_tab_ind);
                 return self.scn_als_bgn(lexer, B_ALS_BGN);
             }
-        } else if lexer.lookahead() == i32::from(b'&') {
+        } else if self.lookahead == i32::from(b'&') {
             if valid_symbols[R_ACR_BGN] && is_r {
                 self.may_upd_imp_col(bgn_row, bgn_col, has_tab_ind);
                 return self.scn_acr_bgn(lexer, R_ACR_BGN);
@@ -919,7 +925,7 @@ impl ExternalScanner for Scanner {
                 self.may_upd_imp_col(bgn_row, bgn_col, has_tab_ind);
                 return self.scn_acr_bgn(lexer, B_ACR_BGN);
             }
-        } else if lexer.lookahead() == i32::from(b'!') {
+        } else if self.lookahead == i32::from(b'!') {
             if valid_symbols[R_TAG] && is_r {
                 self.may_upd_imp_col(bgn_row, bgn_col, has_tab_ind);
                 return self.scn_tag(lexer, R_TAG);
@@ -932,7 +938,7 @@ impl ExternalScanner for Scanner {
                 self.may_upd_imp_col(bgn_row, bgn_col, has_tab_ind);
                 return self.scn_tag(lexer, B_TAG);
             }
-        } else if lexer.lookahead() == i32::from(b'[') {
+        } else if self.lookahead == i32::from(b'[') {
             if valid_symbols[R_FLW_SEQ_BGN] && is_r {
                 self.may_upd_imp_col(bgn_row, bgn_col, has_tab_ind);
                 self.adv(lexer);
@@ -951,7 +957,7 @@ impl ExternalScanner for Scanner {
                 self.mrk_end(lexer);
                 return self.finish(lexer, B_FLW_SEQ_BGN);
             }
-        } else if lexer.lookahead() == i32::from(b']') {
+        } else if self.lookahead == i32::from(b']') {
             if valid_symbols[R_FLW_SEQ_END] && is_r {
                 self.adv(lexer);
                 self.mrk_end(lexer);
@@ -967,7 +973,7 @@ impl ExternalScanner for Scanner {
                 self.mrk_end(lexer);
                 return self.finish(lexer, BR_FLW_SEQ_END);
             }
-        } else if lexer.lookahead() == i32::from(b'{') {
+        } else if self.lookahead == i32::from(b'{') {
             if valid_symbols[R_FLW_MAP_BGN] && is_r {
                 self.may_upd_imp_col(bgn_row, bgn_col, has_tab_ind);
                 self.adv(lexer);
@@ -986,7 +992,7 @@ impl ExternalScanner for Scanner {
                 self.mrk_end(lexer);
                 return self.finish(lexer, B_FLW_MAP_BGN);
             }
-        } else if lexer.lookahead() == i32::from(b'}') {
+        } else if self.lookahead == i32::from(b'}') {
             if valid_symbols[R_FLW_MAP_END] && is_r {
                 self.adv(lexer);
                 self.mrk_end(lexer);
@@ -1002,7 +1008,7 @@ impl ExternalScanner for Scanner {
                 self.mrk_end(lexer);
                 return self.finish(lexer, BR_FLW_MAP_END);
             }
-        } else if lexer.lookahead() == i32::from(b',') {
+        } else if self.lookahead == i32::from(b',') {
             if valid_symbols[R_FLW_SEP_BGN] && is_r {
                 self.adv(lexer);
                 self.mrk_end(lexer);
@@ -1013,7 +1019,7 @@ impl ExternalScanner for Scanner {
                 self.mrk_end(lexer);
                 return self.finish(lexer, BR_FLW_SEP_BGN);
             }
-        } else if lexer.lookahead() == i32::from(b'"') {
+        } else if self.lookahead == i32::from(b'"') {
             if valid_symbols[R_DQT_STR_BGN] && is_r {
                 self.may_upd_imp_col(bgn_row, bgn_col, has_tab_ind);
                 self.adv(lexer);
@@ -1042,7 +1048,7 @@ impl ExternalScanner for Scanner {
                 self.mrk_end(lexer);
                 return self.finish(lexer, BR_DQT_STR_END);
             }
-        } else if lexer.lookahead() == i32::from(b'\'') {
+        } else if self.lookahead == i32::from(b'\'') {
             if valid_symbols[R_SQT_STR_BGN] && is_r {
                 self.may_upd_imp_col(bgn_row, bgn_col, has_tab_ind);
                 self.adv(lexer);
@@ -1063,7 +1069,7 @@ impl ExternalScanner for Scanner {
             }
             if valid_symbols[R_SQT_STR_END] && is_r {
                 self.adv(lexer);
-                if lexer.lookahead() == i32::from(b'\'') {
+                if self.lookahead == i32::from(b'\'') {
                     self.adv(lexer);
                     self.mrk_end(lexer);
                     return self.finish(lexer, R_SQT_ESC_SQT);
@@ -1074,7 +1080,7 @@ impl ExternalScanner for Scanner {
             }
             if valid_symbols[BR_SQT_STR_END] && is_br {
                 self.adv(lexer);
-                if lexer.lookahead() == i32::from(b'\'') {
+                if self.lookahead == i32::from(b'\'') {
                     self.adv(lexer);
                     self.mrk_end(lexer);
                     return self.finish(lexer, BR_SQT_ESC_SQT);
@@ -1083,7 +1089,7 @@ impl ExternalScanner for Scanner {
                     return self.finish(lexer, BR_SQT_STR_END);
                 }
             }
-        } else if lexer.lookahead() == i32::from(b'?') {
+        } else if self.lookahead == i32::from(b'?') {
             let is_r_blk_key_bgn: bool = valid_symbols[R_BLK_KEY_BGN] && is_r;
             let is_br_blk_key_bgn: bool = valid_symbols[BR_BLK_KEY_BGN] && is_br;
             let is_b_blk_key_bgn: bool = valid_symbols[B_BLK_KEY_BGN] && is_b;
@@ -1096,7 +1102,7 @@ impl ExternalScanner for Scanner {
                 || is_br_flw_key_bgn
             {
                 self.adv(lexer);
-                if is_wht(lexer.lookahead()) {
+                if is_wht(self.lookahead) {
                     self.mrk_end(lexer);
                     if is_r_blk_key_bgn {
                         if has_tab_ind {
@@ -1123,7 +1129,7 @@ impl ExternalScanner for Scanner {
                     }
                 }
             }
-        } else if lexer.lookahead() == i32::from(b':') {
+        } else if self.lookahead == i32::from(b':') {
             if valid_symbols[R_FLW_JSV_BGN] && is_r {
                 self.adv(lexer);
                 self.mrk_end(lexer);
@@ -1148,7 +1154,7 @@ impl ExternalScanner for Scanner {
                 || is_br_flw_njv_bgn
             {
                 self.adv(lexer);
-                let is_lka_wht: bool = is_wht(lexer.lookahead());
+                let is_lka_wht: bool = is_wht(self.lookahead);
                 if is_lka_wht {
                     if is_r_blk_val_bgn {
                         if has_tab_ind {
@@ -1182,9 +1188,9 @@ impl ExternalScanner for Scanner {
                     }
                 }
                 if is_lka_wht
-                    || lexer.lookahead() == i32::from(b',')
-                    || lexer.lookahead() == i32::from(b']')
-                    || lexer.lookahead() == i32::from(b'}')
+                    || self.lookahead == i32::from(b',')
+                    || self.lookahead == i32::from(b']')
+                    || self.lookahead == i32::from(b'}')
                 {
                     if is_r_flw_njv_bgn {
                         self.mrk_end(lexer);
@@ -1196,14 +1202,14 @@ impl ExternalScanner for Scanner {
                     }
                 }
             }
-        } else if lexer.lookahead() == i32::from(b'-') {
+        } else if self.lookahead == i32::from(b'-') {
             let is_r_blk_seq_bgn: bool = valid_symbols[R_BLK_SEQ_BGN] && is_r;
             let is_br_blk_seq_bgn: bool = valid_symbols[BR_BLK_SEQ_BGN] && is_br;
             let is_b_blk_seq_bgn: bool = valid_symbols[B_BLK_SEQ_BGN] && is_b;
             let is_s_drs_end: bool = is_s;
             if is_r_blk_seq_bgn || is_br_blk_seq_bgn || is_b_blk_seq_bgn || is_s_drs_end {
                 self.adv(lexer);
-                if is_wht(lexer.lookahead()) {
+                if is_wht(self.lookahead) {
                     if is_r_blk_seq_bgn {
                         if has_tab_ind {
                             return false;
@@ -1227,11 +1233,11 @@ impl ExternalScanner for Scanner {
                         self.mrk_end(lexer);
                         return self.finish(lexer, B_BLK_SEQ_BGN);
                     }
-                } else if lexer.lookahead() == i32::from(b'-') && is_s_drs_end {
+                } else if self.lookahead == i32::from(b'-') && is_s_drs_end {
                     self.adv(lexer);
-                    if lexer.lookahead() == i32::from(b'-') {
+                    if self.lookahead == i32::from(b'-') {
                         self.adv(lexer);
-                        if is_wht(lexer.lookahead()) {
+                        if is_wht(self.lookahead) {
                             if valid_symbols[BL] {
                                 if !self.pop_ind() {
                                     return false;
@@ -1244,14 +1250,14 @@ impl ExternalScanner for Scanner {
                     }
                 }
             }
-        } else if lexer.lookahead() == i32::from(b'.') {
+        } else if self.lookahead == i32::from(b'.') {
             if is_s {
                 self.adv(lexer);
-                if lexer.lookahead() == i32::from(b'.') {
+                if self.lookahead == i32::from(b'.') {
                     self.adv(lexer);
-                    if lexer.lookahead() == i32::from(b'.') {
+                    if self.lookahead == i32::from(b'.') {
                         self.adv(lexer);
-                        if is_wht(lexer.lookahead()) {
+                        if is_wht(self.lookahead) {
                             if valid_symbols[BL] {
                                 if !self.pop_ind() {
                                     return false;
@@ -1264,14 +1270,14 @@ impl ExternalScanner for Scanner {
                     }
                 }
             }
-        } else if lexer.lookahead() == i32::from(b'\\') {
+        } else if self.lookahead == i32::from(b'\\') {
             let is_r_dqt_esc_nwl: bool = valid_symbols[R_DQT_ESC_NWL] && is_r;
             let is_br_dqt_esc_nwl: bool = valid_symbols[BR_DQT_ESC_NWL] && is_br;
             let is_r_dqt_esc_seq: bool = valid_symbols[R_DQT_ESC_SEQ] && is_r;
             let is_br_dqt_esc_seq: bool = valid_symbols[BR_DQT_ESC_SEQ] && is_br;
             if is_r_dqt_esc_nwl || is_br_dqt_esc_nwl || is_r_dqt_esc_seq || is_br_dqt_esc_seq {
                 self.adv(lexer);
-                if is_nwl(lexer.lookahead()) {
+                if is_nwl(self.lookahead) {
                     if is_r_dqt_esc_nwl {
                         self.mrk_end(lexer);
                         return self.finish(lexer, R_DQT_ESC_NWL);
@@ -1289,14 +1295,14 @@ impl ExternalScanner for Scanner {
                 }
                 return false;
             }
-        } else if lexer.lookahead() == i32::from(b'|') {
+        } else if self.lookahead == i32::from(b'|') {
             if valid_symbols[R_BLK_LIT_BGN] && is_r {
                 return self.scn_blk_str_bgn(lexer, R_BLK_LIT_BGN);
             }
             if valid_symbols[BR_BLK_LIT_BGN] && is_br {
                 return self.scn_blk_str_bgn(lexer, BR_BLK_LIT_BGN);
             }
-        } else if lexer.lookahead() == i32::from(b'>') {
+        } else if self.lookahead == i32::from(b'>') {
             if valid_symbols[R_BLK_FLD_BGN] && is_r {
                 return self.scn_blk_str_bgn(lexer, R_BLK_FLD_BGN);
             }
@@ -1317,11 +1323,7 @@ impl ExternalScanner for Scanner {
 
         if maybe_sgl_pln_blk || maybe_sgl_pln_flw || maybe_mtl_pln_blk || maybe_mtl_pln_flw {
             let is_in_blk: bool = maybe_sgl_pln_blk || maybe_mtl_pln_blk;
-            let is_plain_safe: fn(i32) -> bool = if is_in_blk {
-                is_plain_safe_in_block
-            } else {
-                is_plain_safe_in_flow
-            };
+            let is_plain_safe = |c| is_plain_safe(c, is_in_blk);
             if (i32::from(self.cur_col) - i32::from(bgn_col)) == 0 {
                 self.adv(lexer);
             }
@@ -1330,7 +1332,7 @@ impl ExternalScanner for Scanner {
                     || ((bgn_chr == i32::from(b'-')
                         || bgn_chr == i32::from(b'?')
                         || bgn_chr == i32::from(b':'))
-                        && is_plain_safe(lexer.lookahead()));
+                        && is_plain_safe(self.lookahead));
                 if !is_plain_first {
                     return false;
                 }
@@ -1348,24 +1350,24 @@ impl ExternalScanner for Scanner {
             self.mrk_end(lexer);
 
             loop {
-                if !is_nwl(lexer.lookahead())
-                    && self.scn_pln_cnt(lexer, is_plain_safe) != ScanResult::Success
+                if !is_nwl(self.lookahead)
+                    && self.scn_pln_cnt(lexer, is_in_blk) != ScanResult::Success
                 {
                     break;
                 }
-                if lexer.lookahead() == 0 || !is_nwl(lexer.lookahead()) {
+                if self.lookahead == 0 || !is_nwl(self.lookahead) {
                     break;
                 }
                 loop {
-                    if is_nwl(lexer.lookahead()) {
+                    if is_nwl(self.lookahead) {
                         self.adv_nwl(lexer);
-                    } else if is_wsp(lexer.lookahead()) {
+                    } else if is_wsp(self.lookahead) {
                         self.adv(lexer);
                     } else {
                         break;
                     }
                 }
-                if lexer.lookahead() == 0 || self.cur_col <= cur_ind {
+                if self.lookahead == 0 || self.cur_col <= cur_ind {
                     break;
                 }
                 if self.cur_col == 0 && self.scn_drs_doc_end(lexer) {
@@ -1479,7 +1481,7 @@ impl ExternalScanner for Scanner {
 
 impl Scanner {
     fn scn_dir_tag_pfx(&mut self, lexer: &mut dyn Lexer, result_symbol: usize) -> bool {
-        if lexer.lookahead() == i32::from(b'!') {
+        if self.lookahead == i32::from(b'!') {
             self.adv(lexer);
         } else if self.scn_ns_tag_char(lexer) != ScanResult::Success {
             return false;
@@ -1497,15 +1499,15 @@ impl Scanner {
     }
 
     fn scn_tag(&mut self, lexer: &mut dyn Lexer, result_symbol: usize) -> bool {
-        if lexer.lookahead() != i32::from(b'!') {
+        if self.lookahead != i32::from(b'!') {
             return false;
         }
         self.adv(lexer);
-        if is_wht(lexer.lookahead()) {
+        if is_wht(self.lookahead) {
             self.mrk_end(lexer);
             return self.finish(lexer, result_symbol);
         }
-        if lexer.lookahead() == i32::from(b'<') {
+        if self.lookahead == i32::from(b'<') {
             self.adv(lexer);
             if self.scn_ns_uri_char(lexer) != ScanResult::Success {
                 return false;
@@ -1513,7 +1515,7 @@ impl Scanner {
             loop {
                 match self.scn_ns_uri_char(lexer) {
                     ScanResult::Stop => {
-                        if lexer.lookahead() == i32::from(b'>') {
+                        if self.lookahead == i32::from(b'>') {
                             self.adv(lexer);
                             self.mrk_end(lexer);
                             return self.finish(lexer, result_symbol);
@@ -1542,7 +1544,7 @@ impl Scanner {
     }
 
     fn scn_dqt_esc_seq(&mut self, lexer: &mut dyn Lexer, result_symbol: usize) -> bool {
-        let digits = match char::from_u32(lexer.lookahead() as u32) {
+        let digits = match char::from_u32(self.lookahead as u32) {
             Some(
                 '0' | 'a' | 'b' | 't' | '\t' | 'n' | 'v' | 'r' | 'e' | 'f' | ' ' | '"' | '/' | '\\'
                 | 'N' | '_' | 'L' | 'P',
@@ -1554,7 +1556,7 @@ impl Scanner {
         };
         self.adv(lexer);
         for _ in 0..digits {
-            if !is_ns_hex_digit(lexer.lookahead()) {
+            if !is_ns_hex_digit(self.lookahead) {
                 return false;
             }
             self.adv(lexer);
@@ -1978,6 +1980,7 @@ fn advance_schema(state: i8, c: i32, result: &mut ResultSchema) -> i8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     #[derive(Debug, PartialEq, Eq)]
     enum Event {
@@ -1992,6 +1995,7 @@ mod tests {
         end: usize,
         symbol: u16,
         events: Vec<Event>,
+        lookahead_calls: Cell<usize>,
     }
 
     impl TestLexer {
@@ -2002,12 +2006,14 @@ mod tests {
                 end: 0,
                 symbol: u16::MAX,
                 events: Vec::new(),
+                lookahead_calls: Cell::new(0),
             }
         }
     }
 
     impl Lexer for TestLexer {
         fn lookahead(&self) -> i32 {
+            self.lookahead_calls.set(self.lookahead_calls.get() + 1);
             self.input.get(self.position).copied().unwrap_or(0)
         }
         fn result_symbol(&self) -> u16 {
@@ -2048,6 +2054,58 @@ mod tests {
             valid[symbol] = true;
         }
         valid
+    }
+
+    #[test]
+    fn lookahead_is_read_once_at_entry_and_after_each_advance() {
+        let cases: &[(&str, &[usize], usize)] = &[
+            ("- value", &[R_BLK_SEQ_BGN], R_BLK_SEQ_BGN),
+            ("\r\n# comment", &[], COMMENT),
+            ("| # comment\n    content", &[R_BLK_LIT_BGN], R_BLK_LIT_BGN),
+            (
+                "café 中 text: value",
+                &[R_SGL_PLN_STR_BLK],
+                R_SGL_PLN_STR_BLK,
+            ),
+            ("true,", &[R_SGL_PLN_STR_FLW], R_SGL_PLN_BOL_BLK + 3),
+            ("12 # comment", &[R_SGL_PLN_STR_BLK], R_SGL_PLN_INT_BLK),
+            ("''", &[R_SQT_STR_END], R_SQT_ESC_SQT),
+            ("", &[END_OF_FILE], END_OF_FILE),
+        ];
+        let mut scanner = scanner();
+        for &(input, symbols, expected) in cases {
+            // Reusing the scanner must not reuse the preceding scan's lookahead.
+            scanner.deserialize(&[]);
+            let mut lexer = TestLexer::new(input);
+            assert!(scanner.scan(&mut lexer, &valid(symbols)), "{input:?}");
+            assert_eq!(lexer.symbol, expected as u16, "{input:?}");
+            let advances = lexer
+                .events
+                .iter()
+                .filter(|event| matches!(event, Event::Advance(..)))
+                .count();
+            assert_eq!(lexer.lookahead_calls.get(), advances + 1, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn lookahead_refreshes_after_speculative_rewind() {
+        let mut scanner = scanner();
+        let mut lexer = TestLexer::new("12: x");
+        assert!(scanner.scan(&mut lexer, &valid(&[R_SGL_PLN_STR_BLK])));
+        assert_eq!(lexer.position, 3);
+        assert_eq!(lexer.end, 2);
+        assert_eq!(scanner.lookahead, i32::from(b' '));
+
+        // The parser resumes at mark_end, not at the speculative lexer position.
+        let mut snapshot = [0; SERIALIZATION_BUFFER_SIZE];
+        let size = scanner.serialize(&mut snapshot);
+        scanner.deserialize(&snapshot[..size]);
+        lexer.position = lexer.end;
+        assert!(scanner.scan(&mut lexer, &valid(&[R_BLK_IMP_BGN])));
+        assert_eq!(lexer.symbol, R_BLK_IMP_BGN as u16);
+        assert_eq!(lexer.end, 3);
+        assert_eq!(scanner.col, 3);
     }
 
     #[test]
@@ -2278,10 +2336,13 @@ mod tests {
         assert_eq!((scanner.row, scanner.col), (2, 2));
         scanner.cur_col = i16::MAX;
         let mut lexer = TestLexer::new("a\n");
+        scanner.lookahead = lexer.lookahead();
         scanner.adv(&mut lexer);
+        assert_eq!(scanner.cur_chr, i32::from(b'a'));
         assert_eq!(scanner.cur_col, i16::MIN);
         scanner.cur_row = i16::MAX;
         scanner.adv_nwl(&mut lexer);
+        assert_eq!(scanner.cur_chr, i32::from(b'\n'));
         assert_eq!((scanner.cur_row, scanner.cur_col), (i16::MIN, 0));
     }
 }

@@ -96,13 +96,26 @@ fn emit(lexer: &mut dyn Lexer, symbol: usize) -> bool {
 
 // Unlike wctype, C's is_iden_char first narrows the code point to char.
 fn is_iden_char(c: u8) -> bool {
-    !b"\0\n\r\t :;`\"'@$#.,|^&<=>+-*/\\%?!~()[]{}".contains(&c)
+    const IDENTIFIER_BYTES: [bool; 256] = {
+        let mut table = [true; 256];
+        let excluded = b"\0\n\r\t :;`\"'@$#.,|^&<=>+-*/\\%?!~()[]{}";
+        let mut i = 0;
+        while i < excluded.len() {
+            table[excluded[i] as usize] = false;
+            i += 1;
+        }
+        table
+    };
+    IDENTIFIER_BYTES[usize::from(c)]
 }
 
 fn scan_operator(lexer: &mut dyn Lexer) -> bool {
-    match char::from_u32(lexer.lookahead() as u32) {
+    // The switches only recognize ASCII, so match the integer lookahead
+    // directly instead of validating it as a Unicode scalar on every call.
+    match lexer.lookahead() {
         // <, <=, <<, <=>
-        Some('<') => {
+        0x3c => {
+            // '<'
             advance(lexer);
             if lexer.lookahead() == i32::from(b'<') {
                 advance(lexer);
@@ -114,14 +127,16 @@ fn scan_operator(lexer: &mut dyn Lexer) -> bool {
             }
             true
         }
-        Some('>') => {
+        0x3e => {
+            // '>'
             advance(lexer);
             if lexer.lookahead() == i32::from(b'>') || lexer.lookahead() == i32::from(b'=') {
                 advance(lexer);
             }
             true
         }
-        Some('=') => {
+        0x3d => {
+            // '='
             advance(lexer);
             if lexer.lookahead() == i32::from(b'~') {
                 advance(lexer);
@@ -136,14 +151,16 @@ fn scan_operator(lexer: &mut dyn Lexer) -> bool {
             }
             false
         }
-        Some('+' | '-' | '~') => {
+        0x2b | 0x2d | 0x7e => {
+            // '+', '-', '~'
             advance(lexer);
             if lexer.lookahead() == i32::from(b'@') {
                 advance(lexer);
             }
             true
         }
-        Some('.') => {
+        0x2e => {
+            // '.'
             advance(lexer);
             if lexer.lookahead() == i32::from(b'.') {
                 advance(lexer);
@@ -151,25 +168,29 @@ fn scan_operator(lexer: &mut dyn Lexer) -> bool {
             }
             false
         }
-        Some('&' | '^' | '|' | '/' | '%' | '`') => {
+        0x26 | 0x5e | 0x7c | 0x2f | 0x25 | 0x60 => {
+            // '&', '^', '|', '/', '%', '`'
             advance(lexer);
             true
         }
-        Some('!') => {
+        0x21 => {
+            // '!'
             advance(lexer);
             if lexer.lookahead() == i32::from(b'=') || lexer.lookahead() == i32::from(b'~') {
                 advance(lexer);
             }
             true
         }
-        Some('*') => {
+        0x2a => {
+            // '*'
             advance(lexer);
             if lexer.lookahead() == i32::from(b'*') {
                 advance(lexer);
             }
             true
         }
-        Some('[') => {
+        0x5b => {
+            // '['
             advance(lexer);
             if lexer.lookahead() == i32::from(b']') {
                 advance(lexer);
@@ -219,8 +240,9 @@ fn scan_symbol_identifier(lexer: &mut dyn Lexer) -> bool {
 fn scan_heredoc_word(lexer: &mut dyn Lexer, heredoc: &mut Heredoc) {
     let mut word = Vec::new();
     let mut quote = 0;
-    match char::from_u32(lexer.lookahead() as u32) {
-        Some('\'' | '"' | '`') => {
+    match lexer.lookahead() {
+        0x27 | 0x22 | 0x60 => {
+            // "'", '"', '`'
             quote = lexer.lookahead();
             advance(lexer);
             while lexer.lookahead() != quote && !lexer.eof() {
@@ -291,26 +313,26 @@ impl Scanner {
     }
 
     fn reset(&mut self) {
-        self.literal_stack = Vec::new();
-        self.open_heredocs = Vec::new();
+        self.literal_stack.clear();
+        self.open_heredocs.clear();
     }
 
-    fn scan_whitespace(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
+    fn scan_whitespace(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool; NONE]) -> bool {
         let heredoc_body_start_is_valid = !self.open_heredocs.is_empty()
             && !self.open_heredocs[0].started
             && valid_symbols[HEREDOC_BODY_START];
+        let line_break_is_valid = !valid_symbols[NO_LINE_BREAK] && valid_symbols[LINE_BREAK];
         let mut crossed_newline = false;
         loop {
-            if !valid_symbols[NO_LINE_BREAK]
-                && valid_symbols[LINE_BREAK]
-                && lexer.is_at_included_range_start()
-            {
+            if line_break_is_valid && lexer.is_at_included_range_start() {
                 lexer.mark_end();
                 return emit(lexer, LINE_BREAK);
             }
-            match char::from_u32(lexer.lookahead() as u32) {
-                Some(' ' | '\t') => self.skip(lexer),
-                Some('\r') => {
+            let lookahead = lexer.lookahead();
+            match lookahead {
+                0x20 | 0x09 => self.skip(lexer), // ' ', '\t'
+                0x0d => {
+                    // '\r'
                     if heredoc_body_start_is_valid {
                         lexer.set_result_symbol(HEREDOC_BODY_START as u16);
                         self.open_heredocs[0].started = true;
@@ -318,15 +340,13 @@ impl Scanner {
                     }
                     self.skip(lexer);
                 }
-                Some('\n') => {
+                0x0a => {
+                    // '\n'
                     if heredoc_body_start_is_valid {
                         lexer.set_result_symbol(HEREDOC_BODY_START as u16);
                         self.open_heredocs[0].started = true;
                         return true;
-                    } else if !valid_symbols[NO_LINE_BREAK]
-                        && valid_symbols[LINE_BREAK]
-                        && !crossed_newline
-                    {
+                    } else if line_break_is_valid && !crossed_newline {
                         lexer.mark_end();
                         advance(lexer);
                         crossed_newline = true;
@@ -334,7 +354,8 @@ impl Scanner {
                         self.skip(lexer);
                     }
                 }
-                Some('\\') => {
+                0x5c => {
+                    // '\\'
                     advance(lexer);
                     if lexer.lookahead() == i32::from(b'\r') {
                         self.skip(lexer);
@@ -347,12 +368,12 @@ impl Scanner {
                 }
                 _ => {
                     if crossed_newline {
-                        if lexer.lookahead() != i32::from(b'.')
-                            && lexer.lookahead() != i32::from(b'&')
-                            && lexer.lookahead() != i32::from(b'#')
+                        if lookahead != i32::from(b'.')
+                            && lookahead != i32::from(b'&')
+                            && lookahead != i32::from(b'#')
                         {
                             lexer.set_result_symbol(LINE_BREAK as u16);
-                        } else if lexer.lookahead() == i32::from(b'.') {
+                        } else if lookahead == i32::from(b'.') {
                             // A call operator suppresses the break; a range does not.
                             advance(lexer);
                             if !lexer.eof() && lexer.lookahead() == i32::from(b'.') {
@@ -372,10 +393,11 @@ impl Scanner {
         &self,
         lexer: &mut dyn Lexer,
         literal: &mut Literal,
-        valid_symbols: &[bool],
+        valid_symbols: &[bool; NONE],
     ) -> bool {
-        match char::from_u32(lexer.lookahead() as u32) {
-            Some('"' | '\'') => {
+        match lexer.lookahead() {
+            0x22 | 0x27 => {
+                // '"', "'"
                 literal.kind = STRING_START;
                 literal.open_delimiter = lexer.lookahead();
                 literal.close_delimiter = lexer.lookahead();
@@ -383,7 +405,8 @@ impl Scanner {
                 advance(lexer);
                 true
             }
-            Some('`') => {
+            0x60 => {
+                // '`'
                 if !valid_symbols[SUBSHELL_START] {
                     return false;
                 }
@@ -394,7 +417,8 @@ impl Scanner {
                 advance(lexer);
                 true
             }
-            Some('/') => {
+            0x2f => {
+                // '/'
                 if !valid_symbols[REGEX_START] {
                     return false;
                 }
@@ -416,21 +440,21 @@ impl Scanner {
                 }
                 true
             }
-            Some('%') => {
+            0x25 => {
+                // '%'
                 advance(lexer);
-                let (required, kind, interpolation, has_modifier) =
-                    match char::from_u32(lexer.lookahead() as u32) {
-                        Some('s') => (SIMPLE_SYMBOL, SYMBOL_START, false, true),
-                        Some('r') => (REGEX_START, REGEX_START, true, true),
-                        Some('x') => (SUBSHELL_START, SUBSHELL_START, true, true),
-                        Some('q') => (STRING_START, STRING_START, false, true),
-                        Some('Q') => (STRING_START, STRING_START, true, true),
-                        Some('w') => (STRING_ARRAY_START, STRING_ARRAY_START, false, true),
-                        Some('i') => (SYMBOL_ARRAY_START, SYMBOL_ARRAY_START, false, true),
-                        Some('W') => (STRING_ARRAY_START, STRING_ARRAY_START, true, true),
-                        Some('I') => (SYMBOL_ARRAY_START, SYMBOL_ARRAY_START, true, true),
-                        _ => (STRING_START, STRING_START, true, false),
-                    };
+                let (required, kind, interpolation, has_modifier) = match lexer.lookahead() {
+                    0x73 => (SIMPLE_SYMBOL, SYMBOL_START, false, true), // 's'
+                    0x72 => (REGEX_START, REGEX_START, true, true),     // 'r'
+                    0x78 => (SUBSHELL_START, SUBSHELL_START, true, true), // 'x'
+                    0x71 => (STRING_START, STRING_START, false, true),  // 'q'
+                    0x51 => (STRING_START, STRING_START, true, true),   // 'Q'
+                    0x77 => (STRING_ARRAY_START, STRING_ARRAY_START, false, true), // 'w'
+                    0x69 => (SYMBOL_ARRAY_START, SYMBOL_ARRAY_START, false, true), // 'i'
+                    0x57 => (STRING_ARRAY_START, STRING_ARRAY_START, true, true), // 'W'
+                    0x49 => (SYMBOL_ARRAY_START, SYMBOL_ARRAY_START, true, true), // 'I'
+                    _ => (STRING_START, STRING_START, true, false),
+                };
                 if !valid_symbols[required] {
                     return false;
                 }
@@ -439,35 +463,39 @@ impl Scanner {
                 if has_modifier {
                     advance(lexer);
                 }
-                match char::from_u32(lexer.lookahead() as u32) {
-                    Some('(') => {
+                match lexer.lookahead() {
+                    0x28 => {
+                        // '('
                         literal.open_delimiter = i32::from(b'(');
                         literal.close_delimiter = i32::from(b')');
                     }
-                    Some('[') => {
+                    0x5b => {
+                        // '['
                         literal.open_delimiter = i32::from(b'[');
                         literal.close_delimiter = i32::from(b']');
                     }
-                    Some('{') => {
+                    0x7b => {
+                        // '{'
                         literal.open_delimiter = i32::from(b'{');
                         literal.close_delimiter = i32::from(b'}');
                     }
-                    Some('<') => {
+                    0x3c => {
+                        // '<'
                         literal.open_delimiter = i32::from(b'<');
                         literal.close_delimiter = i32::from(b'>');
                     }
-                    Some('\r' | '\n' | ' ' | '\t') => {
+                    0x0d | 0x0a | 0x20 | 0x09 => {
+                        // '\r', '\n', ' ', '\t'
                         // Preserve C's zero delimiters in this branch. Where `/`
                         // is valid, `%` plus whitespace must be an operator.
                         if valid_symbols[FORWARD_SLASH] {
                             return false;
                         }
                     }
-                    Some(
-                        '|' | '!' | '#' | '/' | '\\' | '@' | '$' | '%' | '^' | '&' | '*' | ')'
-                        | ']' | '}' | '>' | '+' | '-' | '~' | '`' | ',' | '.' | '?' | ':' | ';'
-                        | '_' | '"' | '\'',
-                    ) => {
+                    // Other ASCII punctuation allowed as a percent delimiter.
+                    0x7c | 0x21 | 0x23 | 0x2f | 0x5c | 0x40 | 0x24 | 0x25 | 0x5e | 0x26 | 0x2a
+                    | 0x29 | 0x5d | 0x7d | 0x3e | 0x2b | 0x2d | 0x7e | 0x60 | 0x2c | 0x2e
+                    | 0x3f | 0x3a | 0x3b | 0x5f | 0x22 | 0x27 => {
                         // As in C, '=' is not a percent-literal delimiter.
                         literal.open_delimiter = lexer.lookahead();
                         literal.close_delimiter = lexer.lookahead();
@@ -582,14 +610,15 @@ impl Scanner {
         let stop_on_space =
             literal.kind == SYMBOL_ARRAY_START || literal.kind == STRING_ARRAY_START;
         loop {
-            if stop_on_space && is_space(lexer.lookahead()) {
+            let lookahead = lexer.lookahead();
+            if stop_on_space && is_space(lookahead) {
                 if has_content {
                     lexer.mark_end();
                     return emit(lexer, STRING_CONTENT);
                 }
                 return false;
             }
-            if lexer.lookahead() == literal.close_delimiter {
+            if lookahead == literal.close_delimiter {
                 lexer.mark_end();
                 if literal.nesting_depth == 1 {
                     if has_content {
@@ -609,10 +638,10 @@ impl Scanner {
                 }
                 literal.nesting_depth -= 1;
                 advance(lexer);
-            } else if lexer.lookahead() == literal.open_delimiter {
+            } else if lookahead == literal.open_delimiter {
                 literal.nesting_depth += 1;
                 advance(lexer);
-            } else if literal.allows_interpolation && lexer.lookahead() == i32::from(b'#') {
+            } else if literal.allows_interpolation && lookahead == i32::from(b'#') {
                 lexer.mark_end();
                 advance(lexer);
                 if lexer.lookahead() == i32::from(b'{') {
@@ -624,7 +653,7 @@ impl Scanner {
                 if scan_short_interpolation(lexer, has_content, STRING_CONTENT) {
                     return true;
                 }
-            } else if lexer.lookahead() == i32::from(b'\\') {
+            } else if lookahead == i32::from(b'\\') {
                 if literal.allows_interpolation {
                     if has_content {
                         lexer.mark_end();
@@ -648,6 +677,9 @@ impl Scanner {
 
 impl ExternalScanner for Scanner {
     fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
+        // The grammar has NONE external tokens. Check that once instead of
+        // bounds-checking each individual token lookup in the scanning paths.
+        let valid_symbols: &[bool; NONE] = valid_symbols[..NONE].try_into().unwrap();
         self.has_leading_whitespace = false;
         if !valid_symbols[STRING_START] {
             if (valid_symbols[STRING_CONTENT] || valid_symbols[STRING_END])
@@ -670,8 +702,10 @@ impl ExternalScanner for Scanner {
             return true;
         }
 
-        match char::from_u32(lexer.lookahead() as u32) {
-            Some('&') => {
+        let lookahead = lexer.lookahead();
+        match lookahead {
+            0x26 => {
+                // '&'
                 if valid_symbols[BLOCK_AMPERSAND] {
                     advance(lexer);
                     if lexer.lookahead() != i32::from(b'&')
@@ -684,7 +718,8 @@ impl ExternalScanner for Scanner {
                     return false;
                 }
             }
-            Some('<') => {
+            0x3c => {
+                // '<'
                 if valid_symbols[SINGLETON_CLASS_LEFT_ANGLE_LEFT_ANGLE] {
                     advance(lexer);
                     if lexer.lookahead() == i32::from(b'<') {
@@ -694,7 +729,8 @@ impl ExternalScanner for Scanner {
                     return false;
                 }
             }
-            Some('*') => {
+            0x2a => {
+                // '*'
                 if valid_symbols[SPLAT_STAR]
                     || valid_symbols[BINARY_STAR]
                     || valid_symbols[HASH_SPLAT_STAR_STAR]
@@ -741,7 +777,8 @@ impl ExternalScanner for Scanner {
                     return false;
                 }
             }
-            Some('-') => {
+            0x2d => {
+                // '-'
                 if valid_symbols[UNARY_MINUS]
                     || valid_symbols[UNARY_MINUS_NUM]
                     || valid_symbols[BINARY_MINUS]
@@ -770,7 +807,8 @@ impl ExternalScanner for Scanner {
                     return false;
                 }
             }
-            Some(':') => {
+            0x3a => {
+                // ':'
                 if valid_symbols[SYMBOL_START] {
                     let mut literal = Literal {
                         kind: SYMBOL_START,
@@ -778,8 +816,9 @@ impl ExternalScanner for Scanner {
                         ..Literal::default()
                     };
                     advance(lexer);
-                    match char::from_u32(lexer.lookahead() as u32) {
-                        Some('"') => {
+                    match lexer.lookahead() {
+                        0x22 => {
+                            // '"'
                             advance(lexer);
                             literal.open_delimiter = i32::from(b'"');
                             literal.close_delimiter = i32::from(b'"');
@@ -787,7 +826,8 @@ impl ExternalScanner for Scanner {
                             self.literal_stack.push(literal);
                             return emit(lexer, SYMBOL_START);
                         }
-                        Some('\'') => {
+                        0x27 => {
+                            // "'"
                             advance(lexer);
                             literal.open_delimiter = i32::from(b'\'');
                             literal.close_delimiter = i32::from(b'\'');
@@ -804,9 +844,8 @@ impl ExternalScanner for Scanner {
                     return false;
                 }
             }
-            Some('[')
-                if valid_symbols[ELEMENT_REFERENCE_BRACKET]
-                    && (!self.has_leading_whitespace || !valid_symbols[STRING_START]) =>
+            0x5b if valid_symbols[ELEMENT_REFERENCE_BRACKET]
+                && (!self.has_leading_whitespace || !valid_symbols[STRING_START]) =>
             {
                 advance(lexer);
                 return emit(lexer, ELEMENT_REFERENCE_BRACKET);
@@ -815,16 +854,18 @@ impl ExternalScanner for Scanner {
         }
 
         if ((valid_symbols[HASH_KEY_SYMBOL] || valid_symbols[IDENTIFIER_SUFFIX])
-            && (is_alpha(lexer.lookahead()) || lexer.lookahead() == i32::from(b'_')))
-            || (valid_symbols[CONSTANT_SUFFIX] && is_upper(lexer.lookahead()))
+            && (is_alpha(lookahead) || lookahead == i32::from(b'_')))
+            || (valid_symbols[CONSTANT_SUFFIX] && is_upper(lookahead))
         {
-            let valid_identifier_symbol = if is_upper(lexer.lookahead()) {
+            let valid_identifier_symbol = if is_upper(lookahead) {
                 CONSTANT_SUFFIX
             } else {
                 IDENTIFIER_SUFFIX
             };
-            while is_alnum(lexer.lookahead()) || lexer.lookahead() == i32::from(b'_') {
+            let mut lookahead = lookahead;
+            while is_alnum(lookahead) || lookahead == i32::from(b'_') {
                 advance(lexer);
+                lookahead = lexer.lookahead();
             }
             if valid_symbols[HASH_KEY_SYMBOL] && lexer.lookahead() == i32::from(b':') {
                 lexer.mark_end();
@@ -921,8 +962,11 @@ impl ExternalScanner for Scanner {
 
     fn deserialize(&mut self, buffer: &[u8]) {
         self.has_leading_whitespace = false;
-        self.reset();
+        // Keep the literal allocation and each still-open heredoc's word buffer:
+        // the parser restores a snapshot before every external scan.
+        self.literal_stack.clear();
         if buffer.is_empty() {
+            self.open_heredocs.clear();
             return;
         }
         let mut size = 0;
@@ -947,7 +991,9 @@ impl ExternalScanner for Scanner {
             return;
         };
         size += 1;
-        for _ in 0..open_heredoc_count {
+        self.open_heredocs
+            .resize_with(usize::from(open_heredoc_count), Heredoc::default);
+        for index in 0..usize::from(open_heredoc_count) {
             let Some(bytes) = buffer.get(size..size + 4) else {
                 self.reset();
                 return;
@@ -958,12 +1004,12 @@ impl ExternalScanner for Scanner {
                 self.reset();
                 return;
             };
-            self.open_heredocs.push(Heredoc {
-                end_word_indentation_allowed: bytes[0] != 0,
-                allows_interpolation: bytes[1] != 0,
-                started: bytes[2] != 0,
-                word: word.to_vec(),
-            });
+            let heredoc = &mut self.open_heredocs[index];
+            heredoc.end_word_indentation_allowed = bytes[0] != 0;
+            heredoc.allows_interpolation = bytes[1] != 0;
+            heredoc.started = bytes[2] != 0;
+            heredoc.word.clear();
+            heredoc.word.extend_from_slice(word);
             size += word_length;
         }
         // The C scanner asserts this invariant. Invalid/truncated snapshots are
@@ -1123,6 +1169,60 @@ mod tests {
         assert!(scanner.open_heredocs.is_empty());
         assert_eq!(scanner.serialize(&mut buffer), 2);
         assert_eq!(&buffer[..2], &[0, 0]);
+    }
+
+    #[test]
+    fn restoring_snapshots_reuses_literal_and_heredoc_allocations() {
+        let mut scanner = Scanner {
+            literal_stack: vec![literal(STRING_START, b'{', b'}', true)],
+            open_heredocs: vec![
+                heredoc(b"FIRST", true, false),
+                heredoc(b"LAST", false, true),
+            ],
+            ..Scanner::default()
+        };
+        scanner.literal_stack.reserve(32);
+        scanner.open_heredocs.reserve(8);
+        for heredoc in &mut scanner.open_heredocs {
+            heredoc.word.reserve(64);
+        }
+        let literal_capacity = scanner.literal_stack.capacity();
+        let heredoc_capacity = scanner.open_heredocs.capacity();
+        let word_capacities = [
+            scanner.open_heredocs[0].word.capacity(),
+            scanner.open_heredocs[1].word.capacity(),
+        ];
+        let mut buffer = [0; SERIALIZATION_BUFFER_SIZE];
+        let size = scanner.serialize(&mut buffer);
+        for _ in 0..8 {
+            // Simulate a scan that changed state before the parser backtracked.
+            scanner.literal_stack.clear();
+            for heredoc in &mut scanner.open_heredocs {
+                heredoc.word.clear();
+                heredoc.started = false;
+                heredoc.allows_interpolation = false;
+            }
+            scanner.deserialize(&buffer[..size]);
+            assert_eq!(scanner.literal_stack.capacity(), literal_capacity);
+            assert_eq!(scanner.open_heredocs.capacity(), heredoc_capacity);
+            for (heredoc, capacity) in scanner.open_heredocs.iter().zip(word_capacities) {
+                assert_eq!(heredoc.word.capacity(), capacity);
+            }
+            let mut restored = [0; SERIALIZATION_BUFFER_SIZE];
+            assert_eq!(scanner.serialize(&mut restored), size);
+            assert_eq!(&restored[..size], &buffer[..size]);
+        }
+        // A shorter snapshot must discard stale entries, not serialize them.
+        scanner.deserialize(&[0, 1, 0, 1, 0, 1, b'X']);
+        assert!(scanner.literal_stack.is_empty());
+        assert_eq!(scanner.open_heredocs.len(), 1);
+        assert_eq!(scanner.open_heredocs[0].word, b"X");
+        assert_eq!(scanner.open_heredocs[0].word.capacity(), word_capacities[0]);
+        assert!(!scanner.open_heredocs[0].started);
+        scanner.deserialize(&[]);
+        assert!(scanner.open_heredocs.is_empty());
+        assert_eq!(scanner.literal_stack.capacity(), literal_capacity);
+        assert_eq!(scanner.open_heredocs.capacity(), heredoc_capacity);
     }
 
     #[test]
@@ -1337,6 +1437,34 @@ mod tests {
             &lexer.calls[lexer.calls.len() - 2..],
             &[Call::Advance(3, false), Call::MarkEnd(3),]
         );
+    }
+
+    #[test]
+    fn integer_dispatch_does_not_narrow_non_ascii_lookahead() {
+        let mut scanner = Scanner::default();
+        for lookahead in [
+            -1,
+            0xd800,
+            0x110000,
+            0x100 + i32::from(b'['),
+            0x100 + i32::from(b'"'),
+        ] {
+            let mut lexer = TestLexer::new("");
+            lexer.input.push(lookahead);
+            assert!(!scanner.scan(
+                &mut lexer,
+                &symbols(&[STRING_START, ELEMENT_REFERENCE_BRACKET, BLOCK_AMPERSAND]),
+            ));
+            assert_eq!(lexer.position, 0);
+            assert!(scanner.literal_stack.is_empty());
+        }
+        // Only is_iden_char uses the narrowed byte, including bytes >= 128.
+        for byte in 0..=u8::MAX {
+            assert_eq!(
+                is_iden_char(byte),
+                !b"\0\n\r\t :;`\"'@$#.,|^&<=>+-*/\\%?!~()[]{}".contains(&byte),
+            );
+        }
     }
 
     #[test]
