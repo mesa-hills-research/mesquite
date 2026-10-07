@@ -55,7 +55,7 @@ This follow-up changes only this verification note; it introduces no deviation
 from C and no new unsafe code.
 
 
-### Revalidation of `4d6cc948` at `31e563f`
+### Revalidation of `4d6cc948` at `b332424`
 
 The assigned Registry-query input still passes before any new changes. Direct
 comparison with the current C scanner confirms that the merged zero-valued
@@ -70,7 +70,9 @@ including the parser regression with both fresh and reused scanner state.
   host-owned YAML lexer unused-assignment warning remains.
 - `cargo test -p ts_port_cmake`: **24 tests pass**, including the reduced
   Registry-query scanner regression.
-- `cargo test -p ts_port --test cmake_quoted_variable_recovery`: passes.
+- `cargo test -p ts_port --test cmake_quoted_variable_recovery`: **2 tests pass**,
+  covering fresh/reused scanners and incremental repair/restoration of malformed
+  quoted variable references.
 - `cargo clippy -p ts_port_cmake -p ts_port --all-targets -- -D warnings`: passes.
 
 This revalidation only updates this note. No behavior changes, C deviations,
