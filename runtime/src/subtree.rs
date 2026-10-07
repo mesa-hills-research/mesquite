@@ -441,6 +441,15 @@ pub(crate) fn ts_subtree_summarize_children(tree: &mut Subtree, language: &Langu
 // and summary writes can be combined before the header is placed in an Arc.
 #[inline(always)]
 fn summarize_children(data: &mut SubtreeHeapData, language: &Language) {
+    if data.children.len() == 1 {
+        summarize_children_impl::<true>(data, language);
+    } else {
+        summarize_children_impl::<false>(data, language);
+    }
+}
+
+#[inline(always)]
+fn summarize_children_impl<const SINGLE: bool>(data: &mut SubtreeHeapData, language: &Language) {
     let SubtreePayload::Branch(branch) = &mut data.payload else {
         panic!("child summaries require a branch payload");
     };
@@ -466,7 +475,9 @@ fn summarize_children(data: &mut SubtreeHeapData, language: &Language) {
     let mut lookahead_end_byte = 0;
     let is_error = data.symbol == BUILTIN_SYM_ERROR || data.symbol == BUILTIN_SYM_ERROR_REPEAT;
 
-    for (i, child) in data.children.iter().enumerate() {
+    let count = if SINGLE { 1 } else { data.children.len() };
+    for i in 0..count {
+        let child = &data.children[i];
         // Decode the representation once. In particular, inline leaves have
         // no branch/scanner summaries, so they need none of the heap-only work.
         let (
@@ -615,7 +626,12 @@ fn summarize_children(data: &mut SubtreeHeapData, language: &Language) {
             .wrapping_add(ERROR_COST_PER_SKIPPED_LINE.wrapping_mul(size.extent.row));
     }
 
-    if let (Some(first_child), Some(last_child)) = (data.children.first(), data.children.last()) {
+    let ends = if SINGLE {
+        Some((&data.children[0], &data.children[0]))
+    } else {
+        data.children.first().zip(data.children.last())
+    };
+    if let Some((first_child, last_child)) = ends {
         summary.first_leaf = FirstLeaf {
             symbol: ts_subtree_leaf_symbol(first_child),
             parse_state: ts_subtree_leaf_parse_state(first_child),
@@ -626,7 +642,7 @@ fn summarize_children(data: &mut SubtreeHeapData, language: &Language) {
         if ts_subtree_fragile_right(last_child) {
             fragile_right = true;
         }
-        if data.children.len() >= 2
+        if !SINGLE && data.children.len() >= 2
             && !data.visible
             && !data.named
             && ts_subtree_symbol(first_child) == data.symbol
