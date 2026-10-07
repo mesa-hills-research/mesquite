@@ -178,6 +178,9 @@ fn scan_not_is_tail(lexer: &mut Cursor<'_>) -> Option<bool> {
     None
 }
 
+// These short fallthrough checks mirror C's goto labels. Keep them in the
+// caller: most external scans reject a token without reaching a scanning loop.
+#[inline(always)]
 fn scan_in_and_rest(lexer: &mut Cursor<'_>, valid_symbols: &[bool]) -> bool {
     if valid_symbols[IN] && lexer.lookahead() == i32::from(b'i') {
         lexer.advance(false);
@@ -192,6 +195,7 @@ fn scan_in_and_rest(lexer: &mut Cursor<'_>, valid_symbols: &[bool]) -> bool {
 }
 
 /// C's `q_dot_from_semi` label, including fallthrough into `comment`.
+#[inline(always)]
 fn scan_q_dot_and_comment(lexer: &mut Cursor<'_>, valid_symbols: &[bool]) -> bool {
     if valid_symbols[Q_DOT] {
         while is_space(lexer.lookahead()) {
@@ -214,6 +218,7 @@ fn scan_q_dot_and_comment(lexer: &mut Cursor<'_>, valid_symbols: &[bool]) -> boo
 }
 
 /// C's `comment` label. BLOCK_COMMENT validity is intentionally not tested.
+#[inline(always)]
 fn scan_comment(lexer: &mut Cursor<'_>, valid_symbols: &[bool]) -> bool {
     if valid_symbols[DOLLAR] {
         return false;
@@ -222,7 +227,17 @@ fn scan_comment(lexer: &mut Cursor<'_>, valid_symbols: &[bool]) -> bool {
     if lexer.lookahead() != i32::from(b'/') {
         return false;
     }
+    // This is terminal: every caller immediately returns the result, so the
+    // body can own its lookahead cache instead of writing back into this one.
+    scan_comment_body(lexer.lexer)
+}
+
+// Outline only the actual comment scan, not the common rejection checks. The
+// local cursor starts after consuming '/', with no duplicate lookahead read.
+#[inline(never)]
+fn scan_comment_body(lexer: &mut dyn Lexer) -> bool {
     lexer.advance(false);
+    let mut lexer = Cursor::new(lexer);
     if lexer.lookahead() != i32::from(b'*') {
         return false;
     }
@@ -970,6 +985,38 @@ mod tests {
         let (result, lexer) = scan("\n/*x*/", &[SEMI, DOLLAR]);
         assert!(!result);
         assert_eq!((lexer.position, lexer.end), (1, Some(0)));
+    }
+
+    #[test]
+    fn comment_fallthrough_keeps_one_lookahead_read_per_position() {
+        use Event::{Advance, Mark, Symbol};
+        for prefix in ["/**/", "/* é /* λ */ 🦀 */"] {
+            let input = format!("{prefix}tail");
+            for tokens in [vec![], vec![BLOCK_COMMENT], vec![NOT_IS, IN, Q_DOT]] {
+                let (success, lexer) = scan(&input, &tokens);
+                assert!(success);
+                assert_eq!(lexer.position, prefix.len());
+                assert_eq!(lexer.lookahead_calls.get(), prefix.chars().count() + 1);
+                assert_eq!(lexer.eof_calls.get(), 0);
+                let mut expected: Vec<_> = prefix
+                    .char_indices()
+                    .map(|(position, _)| Advance(position, false))
+                    .collect();
+                expected.extend([Symbol(BLOCK_COMMENT as u16), Mark(prefix.len())]);
+                assert_eq!(lexer.events, expected);
+            }
+        }
+        // The outlined body is not entered if either rejection check fires.
+        for (input, tokens) in [
+            ("name", vec![NOT_IS, IN, Q_DOT]),
+            ("/* comment */", vec![DOLLAR, BLOCK_COMMENT]),
+        ] {
+            let (success, lexer) = scan(input, &tokens);
+            assert!(!success);
+            assert_eq!(lexer.position, 0);
+            assert!(lexer.events.is_empty());
+            assert_eq!(lexer.lookahead_calls.get(), 1);
+        }
     }
 
     #[test]
