@@ -101,3 +101,12 @@ gate and add focused tests for direct-header stack summaries (including empty
 reductions, missing/error-repeat headers, and wrapped arithmetic). If it does
 not, discard it. Production sources on this stopped branch remain identical
 to main `cc15596`; only this report and the deferred patch are retained.
+
+During shutdown, main advanced to `1ded31d` (direct stack-slot construction and
+word-sized subtree tags). That main was merged into this branch as `aeec197`.
+The final production sources now match `1ded31d`, not the earlier measurement
+baseline. `git apply --check runtime/tests/perf_parser_owned_header.patch`
+succeeds against the merged sources; however, the saved experiment's unit-test
+and clippy results above predate this merge. Revalidate and benchmark on current
+main before considering it for integration. The earlier timing results must
+not be interpreted as measurements against the newly merged main.
