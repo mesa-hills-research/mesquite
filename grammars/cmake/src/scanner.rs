@@ -399,21 +399,31 @@ mod tests {
 
     #[test]
     fn fresh_and_reset_scanners_emit_zero_width_content_at_eof() {
-        let mut scanner = create();
-        for reset in [false, true] {
-            if reset {
-                // The previous scan changed token to CONTENT; resetting must
-                // allow the same zero-width recovery token to be emitted again.
-                scanner.deserialize(&[]);
+        // Recovery after `a` starts at EOF; after `if(\n` it first skips the
+        // trailing newline. Both must emit empty content without mark_end.
+        for trailing in ["", "\n", "\r\n", " \t\n"] {
+            let mut scanner = create();
+            for reset in [false, true] {
+                if reset {
+                    // The previous scan changed token to CONTENT; resetting
+                    // must allow the zero-width recovery token again.
+                    scanner.deserialize(&[]);
+                }
+                let mut lexer = TestLexer::new(trailing);
+                assert!(scanner.scan(&mut lexer, &[true; 7]));
+                assert_eq!(lexer.position, trailing.len());
+                assert_eq!(lexer.end, None);
+                let expected: Vec<_> = (0..trailing.len())
+                    .map(|position| Event::Advance(position, true))
+                    .chain([Event::Symbol(BRACKET_ARGUMENT_CONTENT as u16)])
+                    .collect();
+                assert_eq!(lexer.events, expected);
+
+                // Once emitted, content cannot repeat without a state reset.
+                lexer.events.clear();
+                assert!(!scanner.scan(&mut lexer, &[true; 7]));
+                assert!(lexer.events.is_empty());
             }
-            let mut lexer = TestLexer::new("");
-            assert!(scanner.scan(&mut lexer, &[true; 7]));
-            assert_eq!(lexer.position, 0);
-            assert_eq!(lexer.end, None);
-            assert_eq!(
-                lexer.events,
-                [Event::Symbol(BRACKET_ARGUMENT_CONTENT as u16)]
-            );
         }
     }
 
