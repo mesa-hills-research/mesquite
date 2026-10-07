@@ -61,25 +61,34 @@ fn scan_multiline_string_end<
 #[cold]
 #[inline(never)]
 fn scan_non_newline(lexer: &mut dyn Lexer, valid_symbols: &[bool; 5], mut lookahead: i32) -> bool {
-    match lookahead {
-        0x22 => {
-            return valid_symbols[MULTILINE_BASIC_STRING_END as usize]
-                && scan_multiline_string_end::<
-                    0x22,
-                    MULTILINE_BASIC_STRING_CONTENT,
-                    MULTILINE_BASIC_STRING_END,
-                >(lexer);
+    // Only these non-LF starts can lead to a line-ending token. The range
+    // check keeps decoder errors and non-ASCII low-byte aliases out of the
+    // shift, and the mask avoids an indirect dispatch for this small set.
+    const LINE_STARTS: u64 = (1 << 0) | (1 << 9) | (1 << 13) | (1 << 32);
+    if lookahead as u32 <= 32 && (LINE_STARTS >> lookahead) & 1 != 0 {
+        if !valid_symbols[LINE_ENDING_OR_EOF as usize] {
+            return false;
         }
-        0x27 => {
-            return valid_symbols[MULTILINE_LITERAL_STRING_END as usize]
-                && scan_multiline_string_end::<
-                    0x27,
-                    MULTILINE_LITERAL_STRING_CONTENT,
-                    MULTILINE_LITERAL_STRING_END,
-                >(lexer);
-        }
-        0 | 0x09 | 0x0d | 0x20 if valid_symbols[LINE_ENDING_OR_EOF as usize] => {}
-        _ => return false,
+    } else {
+        return match lookahead {
+            0x22 => {
+                valid_symbols[MULTILINE_BASIC_STRING_END as usize]
+                    && scan_multiline_string_end::<
+                        0x22,
+                        MULTILINE_BASIC_STRING_CONTENT,
+                        MULTILINE_BASIC_STRING_END,
+                    >(lexer)
+            }
+            0x27 => {
+                valid_symbols[MULTILINE_LITERAL_STRING_END as usize]
+                    && scan_multiline_string_end::<
+                        0x27,
+                        MULTILINE_LITERAL_STRING_CONTENT,
+                        MULTILINE_LITERAL_STRING_END,
+                    >(lexer)
+            }
+            _ => false,
+        };
     }
 
     while matches!(lookahead, 0x20 | 0x09) {
@@ -423,6 +432,66 @@ mod tests {
                             assert_eq!(lexer.symbol, Symbol::MAX);
                         }
                         assert_eq!(lexer.events, expected, "{input:?}, mask {mask}");
+                        assert_eq!(lexer.lookahead_calls.get(), advances + 1);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn post_whitespace_dispatch_preserves_code_points_and_cr_rules() {
+        for length in [1, 2, 7, 32, 64] {
+            for terminator in (0..=127).chain([
+                -1,
+                0x100,
+                0x109,
+                0x10a,
+                0x10d,
+                0x120,
+                0x122,
+                0x127,
+                i32::MIN,
+                i32::MAX,
+            ]) {
+                // Spaces and tabs extend the prefix rather than end it. They
+                // are already tested exhaustively in the preceding test;
+                // this checks every other exit from that loop.
+                if matches!(terminator, 0x09 | 0x20) {
+                    continue;
+                }
+                for following in [0, 0x0a, 0x0d, 0x22, 0x27, 0x78] {
+                    for mask in 0..32 {
+                        let valid: [bool; 5] = std::array::from_fn(|i| mask & (1 << i) != 0);
+                        let mut lexer = TestLexer::new("");
+                        lexer.input.extend((0..length).map(|i| [0x20, 0x09][i % 2]));
+                        lexer.input.extend([terminator, following, 0x78]);
+                        let enabled = valid[LINE_ENDING_OR_EOF as usize];
+                        let accepted = enabled
+                            && (matches!(terminator, 0 | 0x0a)
+                                || terminator == 0x0d && following == 0x0a);
+                        let advances = if enabled {
+                            length + usize::from(terminator == 0x0d)
+                        } else {
+                            0
+                        };
+                        assert_eq!(Scanner.scan(&mut lexer, &valid), accepted);
+                        let mut expected: Vec<_> = (0..advances)
+                            .map(|position| Event::Advance {
+                                position,
+                                skip: true,
+                            })
+                            .collect();
+                        if accepted {
+                            expected.push(Event::Symbol(LINE_ENDING_OR_EOF));
+                        } else {
+                            assert_eq!(lexer.symbol, Symbol::MAX);
+                        }
+                        assert_eq!(
+                            lexer.events, expected,
+                            "length {length}, terminator {terminator}, following {following}, mask {mask}"
+                        );
+                        assert_eq!(lexer.position, advances);
                         assert_eq!(lexer.lookahead_calls.get(), advances + 1);
                     }
                 }
