@@ -253,8 +253,8 @@ changes are introduced.
 
 ## Unterminated-call bucket `7f8795fb`
 
-Reverified at `6674d74` (previously at `9a8563b`): all three reported inputs already pass on the starting
-checkout with the merged scanner
+Reverified at `7586f2b` (previously at `6674d74` and `9a8563b`): all three
+reported inputs already pass on the starting checkout with the merged scanner
 initialization/reset correction above. The current C scanner uses
 `ts_calloc` and clears both fields on empty or invalid-length snapshots, matching
 the Rust implementation. This allows recovery content without an opener:
@@ -271,7 +271,7 @@ input chunks. The earlier verification note incorrectly described all three coun
 as zero; the existing tests already assert the correct counts. No additional
 behavior change or duplicate test is needed.
 
-Validation rerun for this bucket at `6674d74`:
+Validation rerun for this bucket at `7586f2b`:
 
 - `run_oracle(inputs = "bucket:7f8795fb")`: 3/3 pass.
 - `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs
