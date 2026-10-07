@@ -16,7 +16,44 @@ const SET: usize = 9;
 const DOLLAR: usize = 10;
 
 const MAX_WORD_SIZE: usize = 16;
-const MAX_WORDS: usize = 16;
+
+/// The C scanner reads `TSLexer.lookahead` directly. Cache that field locally so
+/// repeated tests at one position do not dispatch through `dyn Lexer` each time.
+/// Only `advance` changes it; marks and result-symbol updates leave it intact.
+struct Cursor<'a> {
+    lexer: &'a mut dyn Lexer,
+    lookahead: i32,
+}
+
+impl<'a> Cursor<'a> {
+    fn new(lexer: &'a mut dyn Lexer) -> Self {
+        let lookahead = lexer.lookahead();
+        Self { lexer, lookahead }
+    }
+
+    fn lookahead(&self) -> i32 {
+        self.lookahead
+    }
+
+    fn advance(&mut self, skip: bool) {
+        self.lexer.advance(skip);
+        self.lookahead = self.lexer.lookahead();
+    }
+
+    fn mark_end(&mut self) {
+        self.lexer.mark_end();
+    }
+
+    fn set_result_symbol(&mut self, symbol: u16) {
+        self.lexer.set_result_symbol(symbol);
+    }
+
+    fn eof(&self) -> bool {
+        // Nonzero lookahead cannot be EOF. A zero can also be an embedded NUL,
+        // so only that case needs the runtime's end-of-input test.
+        self.lookahead == 0 && self.lexer.eof()
+    }
+}
 
 // The reference process uses the default C locale, not Unicode character classes.
 fn is_alpha(c: i32) -> bool {
@@ -35,7 +72,7 @@ fn is_space(c: i32) -> bool {
     matches!(c, 0x09..=0x0d | 0x20)
 }
 
-fn scan_word(lexer: &mut dyn Lexer, word: &[u8]) -> bool {
+fn scan_word(lexer: &mut Cursor<'_>, word: &[u8]) -> bool {
     for &c in word {
         if lexer.lookahead() != i32::from(c) {
             return false;
@@ -45,43 +82,53 @@ fn scan_word(lexer: &mut dyn Lexer, word: &[u8]) -> bool {
     true
 }
 
-fn scan_words(
-    lexer: &mut dyn Lexer,
-    words: &[&str; MAX_WORDS],
-    scanned_word: &mut [u8; MAX_WORD_SIZE],
-) -> Option<usize> {
-    if scanned_word[0] == 0 {
-        for (i, c) in scanned_word[..MAX_WORD_SIZE - 1].iter_mut().enumerate() {
-            if !is_alpha(lexer.lookahead()) {
-                if i == 0 {
-                    return None;
-                }
-                break;
-            }
-            *c = lexer.lookahead() as u8;
-            lexer.advance(true);
-        }
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SemiWord {
+    Modifier,
+    Else,
+    In,
+    Get,
+    Set,
+    Constructor,
+    Suppress,
+    Other,
+}
 
-    // The buffer is NUL-padded, just like the C strncmp operands. In particular,
-    // identifiers longer than fifteen letters are only scanned up to that limit.
-    let length = scanned_word
-        .iter()
-        .position(|&c| c == 0)
-        .unwrap_or(MAX_WORD_SIZE);
-    words
-        .iter()
-        .position(|word| word.as_bytes() == &scanned_word[..length])
+fn scan_semi_keyword(lexer: &mut Cursor<'_>) -> SemiWord {
+    let mut word = [0; MAX_WORD_SIZE - 1];
+    let mut length = 0;
+    // Like C's scan_words, inspect at most fifteen ASCII letters, including
+    // for an unknown identifier. The inspected extent matters on backtracking.
+    while length < word.len() && is_alpha(lexer.lookahead()) {
+        word[length] = lexer.lookahead() as u8;
+        length += 1;
+        lexer.advance(true);
+    }
+    // Match once by length and bytes instead of searching both NUL-padded
+    // sixteen-entry tables (and rediscovering the word length for each table).
+    match &word[..length] {
+        b"public" | b"private" | b"protected" | b"internal" | b"abstract" | b"final" | b"open"
+        | b"override" | b"lateinit" | b"vararg" | b"noinline" | b"crossinline" | b"external"
+        | b"suspend" | b"inline" => SemiWord::Modifier,
+        b"else" => SemiWord::Else,
+        b"in" => SemiWord::In,
+        b"get" => SemiWord::Get,
+        b"set" => SemiWord::Set,
+        b"constructor" => SemiWord::Constructor,
+        b"instanceof" | b"by" | b"as" | b"where" => SemiWord::Suppress,
+        _ => SemiWord::Other,
+    }
 }
 
 /// `None` means that the C multiline-string loop reached EOF and fell through
 /// to the other token scanners, rather than returning a string-content token.
-fn scan_multiline_string(lexer: &mut dyn Lexer) -> Option<bool> {
+fn scan_multiline_string(lexer: &mut Cursor<'_>) -> Option<bool> {
     let mut did_advance = false;
     lexer.set_result_symbol(MULTILINE_STRING_CONTENT as u16);
     while !lexer.eof() {
-        match char::from_u32(lexer.lookahead() as u32) {
-            Some('$') => {
+        match lexer.lookahead() {
+            0x24 => {
+                // '$'
                 lexer.mark_end();
                 lexer.advance(false);
                 if is_alpha(lexer.lookahead()) || lexer.lookahead() == i32::from(b'{') {
@@ -89,7 +136,8 @@ fn scan_multiline_string(lexer: &mut dyn Lexer) -> Option<bool> {
                 }
                 did_advance = true;
             }
-            Some('"') => {
+            0x22 => {
+                // '"'
                 lexer.mark_end();
                 // Three or four quotes end the content. They are examined but
                 // excluded from it by the mark before the first quote.
@@ -117,7 +165,7 @@ fn scan_multiline_string(lexer: &mut dyn Lexer) -> Option<bool> {
 
 /// Enter at C's `continue_not_is_from_semi` label, after consuming `!`. This
 /// deliberately does not check NOT_IS validity: the semicolon path bypasses it.
-fn scan_not_is_tail(lexer: &mut dyn Lexer) -> Option<bool> {
+fn scan_not_is_tail(lexer: &mut Cursor<'_>) -> Option<bool> {
     if lexer.lookahead() == i32::from(b'i') {
         lexer.advance(false);
         if lexer.lookahead() == i32::from(b's') {
@@ -130,7 +178,10 @@ fn scan_not_is_tail(lexer: &mut dyn Lexer) -> Option<bool> {
     None
 }
 
-fn scan_in_and_rest(lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
+// These short fallthrough checks mirror C's goto labels. Keep them in the
+// caller: most external scans reject a token without reaching a scanning loop.
+#[inline(always)]
+fn scan_in_and_rest(lexer: &mut Cursor<'_>, valid_symbols: &[bool]) -> bool {
     if valid_symbols[IN] && lexer.lookahead() == i32::from(b'i') {
         lexer.advance(false);
         if lexer.lookahead() == i32::from(b'n') {
@@ -144,7 +195,8 @@ fn scan_in_and_rest(lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
 }
 
 /// C's `q_dot_from_semi` label, including fallthrough into `comment`.
-fn scan_q_dot_and_comment(lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
+#[inline(always)]
+fn scan_q_dot_and_comment(lexer: &mut Cursor<'_>, valid_symbols: &[bool]) -> bool {
     if valid_symbols[Q_DOT] {
         while is_space(lexer.lookahead()) {
             lexer.advance(true);
@@ -166,7 +218,8 @@ fn scan_q_dot_and_comment(lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool
 }
 
 /// C's `comment` label. BLOCK_COMMENT validity is intentionally not tested.
-fn scan_comment(lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
+#[inline(always)]
+fn scan_comment(lexer: &mut Cursor<'_>, valid_symbols: &[bool]) -> bool {
     if valid_symbols[DOLLAR] {
         return false;
     }
@@ -174,7 +227,17 @@ fn scan_comment(lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
     if lexer.lookahead() != i32::from(b'/') {
         return false;
     }
+    // This is terminal: every caller immediately returns the result, so the
+    // body can own its lookahead cache instead of writing back into this one.
+    scan_comment_body(lexer.lexer)
+}
+
+// Outline only the actual comment scan, not the common rejection checks. The
+// local cursor starts after consuming '/', with no duplicate lookahead read.
+#[inline(never)]
+fn scan_comment_body(lexer: &mut dyn Lexer) -> bool {
     lexer.advance(false);
+    let mut lexer = Cursor::new(lexer);
     if lexer.lookahead() != i32::from(b'*') {
         return false;
     }
@@ -183,13 +246,15 @@ fn scan_comment(lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
     let mut after_star = false;
     let mut nesting_depth = 1u32;
     loop {
-        match char::from_u32(lexer.lookahead() as u32) {
-            Some('\0') => return false,
-            Some('*') => {
+        match lexer.lookahead() {
+            0x00 => return false,
+            0x2a => {
+                // '*'
                 lexer.advance(false);
                 after_star = true;
             }
-            Some('/') => {
+            0x2f => {
+                // '/'
                 if after_star {
                     lexer.advance(false);
                     after_star = false;
@@ -216,63 +281,17 @@ fn scan_comment(lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
     }
 }
 
-fn scan_semi_word(lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
-    let mut scanned_word = [0; MAX_WORD_SIZE];
-    while scan_words(
-        lexer,
-        &[
-            "public",
-            "private",
-            "protected",
-            "internal",
-            "abstract",
-            "final",
-            "open",
-            "override",
-            "lateinit",
-            "vararg",
-            "noinline",
-            "crossinline",
-            "external",
-            "suspend",
-            "inline",
-            "",
-        ],
-        &mut scanned_word,
-    )
-    .is_some()
-    {
-        scanned_word.fill(0);
+fn scan_semi_word(lexer: &mut Cursor<'_>, valid_symbols: &[bool]) -> bool {
+    let mut word = scan_semi_keyword(lexer);
+    while word == SemiWord::Modifier {
         while is_space(lexer.lookahead()) {
             lexer.advance(true);
         }
+        word = scan_semi_keyword(lexer);
     }
 
-    let index = scan_words(
-        lexer,
-        &[
-            "else",
-            "in",
-            "instanceof",
-            "get",
-            "set",
-            "constructor",
-            "by",
-            "as",
-            "where",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-        ],
-        &mut scanned_word,
-    );
-
-    match index {
-        Some(5) => {
+    match word {
+        SemiWord::Constructor => {
             // A secondary constructor, or a variable named `constructor`.
             while is_space(lexer.lookahead()) {
                 lexer.advance(true);
@@ -284,7 +303,7 @@ fn scan_semi_word(lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
                 return true;
             }
         }
-        Some(0) => {
+        SemiWord::Else => {
             // `else` suppresses a semi, except before a `when` entry's arrow.
             while is_space(lexer.lookahead()) {
                 lexer.advance(true);
@@ -296,10 +315,10 @@ fn scan_semi_word(lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
                 }
             }
         }
-        Some(3) if !valid_symbols[GET] || lexer.lookahead() == i32::from(b'[') => {
+        SemiWord::Get if !valid_symbols[GET] || lexer.lookahead() == i32::from(b'[') => {
             return true;
         }
-        Some(4)
+        SemiWord::Set
             if !valid_symbols[SET]
                 || lexer.lookahead() == i32::from(b'[')
                 || lexer.lookahead() == i32::from(b'(')
@@ -321,35 +340,40 @@ fn scan_semi_word(lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
             }
             return true;
         }
-        Some(1) if valid_symbols[IN] => return true,
+        SemiWord::In if valid_symbols[IN] => return true,
         _ => {}
     }
-    index.is_none()
+    word == SemiWord::Other
 }
 
 /// The switch after a newline. A loop replaces the annotation branch's goto
 /// back to `_switch`, without repeating the semicolon's initial mark_end.
-fn scan_after_newline(lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
+fn scan_after_newline(lexer: &mut Cursor<'_>, valid_symbols: &[bool]) -> bool {
     loop {
-        match char::from_u32(lexer.lookahead() as u32) {
-            Some(',' | '.' | ':' | '*' | '%' | '>' | '<' | '=' | '{' | '[' | '|' | '&' | '/') => {
+        match lexer.lookahead() {
+            // , . : * % > < = { [ | & /
+            0x2c | 0x2e | 0x3a | 0x2a | 0x25 | 0x3e | 0x3c | 0x3d | 0x7b | 0x5b | 0x7c | 0x26
+            | 0x2f => {
                 return false;
             }
-            Some('+') => {
+            0x2b => {
+                // '+'
                 lexer.advance(true);
                 if lexer.lookahead() == i32::from(b'+') {
                     return true;
                 }
                 return is_digit(lexer.lookahead());
             }
-            Some('-') => {
+            0x2d => {
+                // '-'
                 lexer.advance(true);
                 if lexer.lookahead() == i32::from(b'-') {
                     return true;
                 }
                 return is_digit(lexer.lookahead());
             }
-            Some('!') => {
+            0x21 => {
+                // '!'
                 lexer.advance(true);
                 if lexer.lookahead() == i32::from(b'i') && valid_symbols[NOT_IS] {
                     lexer.advance(true);
@@ -362,23 +386,26 @@ fn scan_after_newline(lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
                 }
                 return lexer.lookahead() != i32::from(b'=');
             }
-            Some('?') => {
+            0x3f => {
+                // '?'
                 if valid_symbols[Q_DOT] {
                     return scan_q_dot_and_comment(lexer, valid_symbols);
                 }
                 return true;
             }
-            Some(
-                'e' | 'i' | 'g' | 's' | 'p' | 'a' | 'f' | 'o' | 'l' | 'v' | 'n' | 'c' | 'b' | 'w',
-            ) => {
+            // e i g s p a f o l v n c b w
+            0x65 | 0x69 | 0x67 | 0x73 | 0x70 | 0x61 | 0x66 | 0x6f | 0x6c | 0x76 | 0x6e | 0x63
+            | 0x62 | 0x77 => {
                 return scan_semi_word(lexer, valid_symbols);
             }
-            Some(';') => {
+            0x3b => {
+                // ';'
                 lexer.advance(false);
                 lexer.mark_end();
                 return true;
             }
-            Some('@') => {
+            0x40 => {
+                // '@'
                 if valid_symbols[CONSTRUCTOR] {
                     while !is_space(lexer.lookahead()) {
                         lexer.advance(true);
@@ -418,7 +445,7 @@ fn scan_after_newline(lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
     }
 }
 
-fn scan_semi(lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
+fn scan_semi(lexer: &mut Cursor<'_>, valid_symbols: &[bool]) -> bool {
     lexer.set_result_symbol(if valid_symbols[SEMI] {
         SEMI as u16
     } else {
@@ -462,17 +489,19 @@ fn scan_semi(lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
     }
 
     if !saw_newline {
-        return match char::from_u32(lexer.lookahead() as u32) {
-            Some('!') => {
+        return match lexer.lookahead() {
+            0x21 => {
+                // '!'
                 lexer.advance(true);
                 if let Some(result) = scan_not_is_tail(lexer) {
                     return result;
                 }
                 scan_in_and_rest(lexer, valid_symbols)
             }
-            Some('?') if valid_symbols[Q_DOT] => scan_q_dot_and_comment(lexer, valid_symbols),
-            Some('i') => scan_word(lexer, b"import"),
-            Some(';') => {
+            0x3f if valid_symbols[Q_DOT] => scan_q_dot_and_comment(lexer, valid_symbols),
+            0x69 => scan_word(lexer, b"import"), // 'i'
+            0x3b => {
+                // ';'
                 lexer.advance(false);
                 lexer.mark_end();
                 true
@@ -488,6 +517,7 @@ pub(crate) struct Scanner;
 
 impl ExternalScanner for Scanner {
     fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
+        let lexer = &mut Cursor::new(lexer);
         if valid_symbols[MULTILINE_STRING_CONTENT]
             && let Some(result) = scan_multiline_string(lexer)
         {
@@ -523,6 +553,7 @@ pub(crate) fn create() -> Box<dyn ExternalScanner> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     #[derive(Debug, PartialEq, Eq)]
     enum Event {
@@ -537,6 +568,8 @@ mod tests {
         end: Option<usize>,
         symbol: u16,
         events: Vec<Event>,
+        lookahead_calls: Cell<usize>,
+        eof_calls: Cell<usize>,
     }
 
     impl<'a> TestLexer<'a> {
@@ -547,12 +580,15 @@ mod tests {
                 end: None,
                 symbol: u16::MAX,
                 events: Vec::new(),
+                lookahead_calls: Cell::new(0),
+                eof_calls: Cell::new(0),
             }
         }
     }
 
     impl Lexer for TestLexer<'_> {
         fn lookahead(&self) -> i32 {
+            self.lookahead_calls.set(self.lookahead_calls.get() + 1);
             self.input[self.position..]
                 .chars()
                 .next()
@@ -589,6 +625,7 @@ mod tests {
         }
 
         fn eof(&self) -> bool {
+            self.eof_calls.set(self.eof_calls.get() + 1);
             self.position == self.input.len()
         }
     }
@@ -601,6 +638,61 @@ mod tests {
         let mut lexer = TestLexer::new(input);
         let result = Scanner.scan(&mut lexer, &valid);
         (result, lexer)
+    }
+
+    #[test]
+    fn cursor_caches_lookahead_but_distinguishes_nul_from_eof() {
+        let mut lexer = TestLexer::new("a\0é");
+        {
+            let mut cursor = Cursor::new(&mut lexer);
+            assert_eq!(cursor.lookahead(), i32::from(b'a'));
+            assert!(!cursor.eof());
+            cursor.mark_end();
+            cursor.set_result_symbol(SEMI as u16);
+            assert_eq!(cursor.lookahead(), i32::from(b'a'));
+            cursor.advance(true);
+            assert_eq!(cursor.lookahead(), 0);
+            assert!(!cursor.eof());
+            cursor.advance(false);
+            assert_eq!(cursor.lookahead(), 'é' as i32);
+            assert!(!cursor.eof());
+            cursor.advance(false);
+            assert_eq!(cursor.lookahead(), 0);
+            assert!(cursor.eof());
+        }
+        // One initial read and one per advance, rather than one per test.
+        assert_eq!(lexer.lookahead_calls.get(), 4);
+        // Only the embedded NUL and the actual end need virtual EOF checks.
+        assert_eq!(lexer.eof_calls.get(), 2);
+    }
+
+    #[test]
+    fn nul_and_non_ascii_are_not_ascii_delimiters() {
+        let (result, lexer) = scan("\0", &[SEMI]);
+        assert!(!result);
+        assert_eq!((lexer.position, lexer.end), (0, Some(0)));
+        let (result, lexer) = scan("\n\0", &[SEMI]);
+        assert!(result);
+        assert_eq!((lexer.position, lexer.end), (1, Some(0)));
+
+        // NUL is ordinary raw-string content, unlike in a block comment. The
+        // following Unicode characters have the same low byte as ASCII quotes
+        // and '$', but must also remain ordinary content.
+        let content = "a\0\u{122}\u{124}";
+        let input = format!("{content}$foo");
+        let (result, lexer) = scan(&input, &[MULTILINE_STRING_CONTENT]);
+        assert!(result);
+        assert_eq!(
+            (lexer.position, lexer.end),
+            (content.len() + 1, Some(content.len()))
+        );
+
+        for c in ['\u{121}', '\u{13b}', '\u{12f}', '\u{165}'] {
+            let input = format!("\n{c}else");
+            let (result, lexer) = scan(&input, &[SEMI]);
+            assert!(result, "{input:?}");
+            assert_eq!((lexer.position, lexer.end), (1, Some(0)), "{input:?}");
+        }
     }
 
     #[test]
@@ -896,21 +988,94 @@ mod tests {
     }
 
     #[test]
-    fn scan_words_caches_fifteen_ascii_letters() {
-        let words = [
-            "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
-        ];
-        let mut lexer = TestLexer::new("abcdefghijklmnop");
-        let mut word = [0; MAX_WORD_SIZE];
-        assert_eq!(scan_words(&mut lexer, &words, &mut word), None);
-        assert_eq!(&word, b"abcdefghijklmno\0");
-        assert_eq!(lexer.position, 15);
-        let calls = lexer.events.len();
-        assert_eq!(scan_words(&mut lexer, &words, &mut word), None);
-        assert_eq!(lexer.events.len(), calls);
+    fn comment_fallthrough_keeps_one_lookahead_read_per_position() {
+        use Event::{Advance, Mark, Symbol};
+        for prefix in ["/**/", "/* é /* λ */ 🦀 */"] {
+            let input = format!("{prefix}tail");
+            for tokens in [vec![], vec![BLOCK_COMMENT], vec![NOT_IS, IN, Q_DOT]] {
+                let (success, lexer) = scan(&input, &tokens);
+                assert!(success);
+                assert_eq!(lexer.position, prefix.len());
+                assert_eq!(lexer.lookahead_calls.get(), prefix.chars().count() + 1);
+                assert_eq!(lexer.eof_calls.get(), 0);
+                let mut expected: Vec<_> = prefix
+                    .char_indices()
+                    .map(|(position, _)| Advance(position, false))
+                    .collect();
+                expected.extend([Symbol(BLOCK_COMMENT as u16), Mark(prefix.len())]);
+                assert_eq!(lexer.events, expected);
+            }
+        }
+        // The outlined body is not entered if either rejection check fires.
+        for (input, tokens) in [
+            ("name", vec![NOT_IS, IN, Q_DOT]),
+            ("/* comment */", vec![DOLLAR, BLOCK_COMMENT]),
+        ] {
+            let (success, lexer) = scan(input, &tokens);
+            assert!(!success);
+            assert_eq!(lexer.position, 0);
+            assert!(lexer.events.is_empty());
+            assert_eq!(lexer.lookahead_calls.get(), 1);
+        }
+    }
 
-        let mut lexer = TestLexer::new("éabc");
-        assert_eq!(scan_words(&mut lexer, &words, &mut [0; 16]), None);
-        assert_eq!(lexer.position, 0);
+    #[test]
+    fn semicolon_keyword_scan_is_limited_to_fifteen_ascii_letters() {
+        for (input, position) in [
+            ("abcdefghijklmnop", 15),
+            ("éabc", 0),
+            ("", 0),
+            (" abc", 0),
+            ("elsewhere", 9),
+            ("getaway", 7),
+            ("PUBLIC", 6),
+        ] {
+            let mut lexer = TestLexer::new(input);
+            assert_eq!(
+                scan_semi_keyword(&mut Cursor::new(&mut lexer)),
+                SemiWord::Other,
+                "{input:?}"
+            );
+            assert_eq!(lexer.position, position, "{input:?}");
+        }
+        let (success, lexer) = scan("\nabcdefghijklmnop", &[SEMI]);
+        assert!(success);
+        assert_eq!((lexer.position, lexer.end), (16, Some(0)));
+    }
+
+    #[test]
+    fn modifiers_resume_word_scanning_even_after_non_switch_letters() {
+        for modifier in [
+            "public",
+            "private",
+            "protected",
+            "internal",
+            "abstract",
+            "final",
+            "open",
+            "override",
+            "lateinit",
+            "vararg",
+            "noinline",
+            "crossinline",
+            "external",
+            "suspend",
+            "inline",
+        ] {
+            for (tail, expected, inspected) in [
+                ("get()", false, 3),
+                ("where T", false, 5),
+                ("unknown", true, 7),
+                (";", true, 0),
+                ("é", true, 0),
+                ("", true, 0),
+            ] {
+                let input = format!("\n{modifier} {tail}");
+                let (success, lexer) = scan(&input, &[SEMI, GET]);
+                assert_eq!(success, expected, "{input:?}");
+                assert_eq!(lexer.position, modifier.len() + 2 + inspected, "{input:?}");
+                assert_eq!(lexer.end, Some(0), "{input:?}");
+            }
+        }
     }
 }

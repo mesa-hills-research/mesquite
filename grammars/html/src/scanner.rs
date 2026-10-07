@@ -30,6 +30,13 @@ macro_rules! tag_types {
                 TYPES[usize::from(byte)]
             }
 
+            fn name(self) -> &'static [u8] {
+                match self {
+                    $($(Self::$variant => $name,)?)*
+                    _ => &[],
+                }
+            }
+
             fn for_name(name: &[u8]) -> Self {
                 // A byte-slice match lets the compiler dispatch by length and
                 // bytes instead of searching all 126 entries for every tag.
@@ -236,12 +243,64 @@ impl<'a> Tag<'a> {
 /// Builtin tags occupy just one byte each. Custom names share a byte arena;
 /// their ends form a separate stack, since only CUSTOM entries need a name.
 /// All three buffers retain their capacity across scanner-state restores.
-#[derive(Default, Debug, PartialEq, Eq)]
+#[derive(Default, Debug)]
 struct TagStack {
     kinds: Vec<u8>,
     names: Vec<u8>,
     name_ends: Vec<usize>,
+    snapshot: Snapshot,
 }
+
+// A scanner is often restored to its current state (including after failed
+// external scans). Keep an exact snapshot, invalidated on every stack mutation,
+// so those restores need not decode custom names and rebuild the three buffers.
+// `canonical` additionally means serializing the live stack yields these bytes.
+// Restored snapshots need not be canonical: strncpy can zero-pad custom names,
+// and END_ placeholders can fit where a truncated custom tag did not.
+struct Snapshot {
+    bytes: [u8; SERIALIZATION_BUFFER_SIZE],
+    len: usize,
+    canonical: bool,
+}
+
+impl Default for Snapshot {
+    fn default() -> Self {
+        Self {
+            bytes: [0; SERIALIZATION_BUFFER_SIZE],
+            len: 0,
+            canonical: false,
+        }
+    }
+}
+
+impl std::fmt::Debug for Snapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Snapshot")
+            .field(&&self.bytes[..self.len])
+            .finish()
+    }
+}
+
+impl Snapshot {
+    fn save(&mut self, buffer: &[u8], canonical: bool) {
+        self.bytes[..buffer.len()].copy_from_slice(buffer);
+        self.len = buffer.len();
+        self.canonical = canonical;
+    }
+
+    fn matches(&self, buffer: &[u8]) -> bool {
+        self.len != 0 && self.bytes[..self.len] == *buffer
+    }
+}
+
+// Snapshot caching does not change the semantic identity of a tag stack.
+impl PartialEq for TagStack {
+    fn eq(&self, other: &Self) -> bool {
+        self.kinds == other.kinds && self.names == other.names && self.name_ends == other.name_ends
+    }
+}
+
+impl Eq for TagStack {}
 
 impl TagStack {
     fn len(&self) -> usize {
@@ -253,6 +312,7 @@ impl TagStack {
     }
 
     fn clear(&mut self) {
+        self.snapshot.len = 0;
         self.kinds.clear();
         self.names.clear();
         self.name_ends.clear();
@@ -272,7 +332,20 @@ impl TagStack {
         })
     }
 
+    fn last_matches_name(&self, name: &[u8]) -> bool {
+        self.last().is_some_and(|tag| {
+            if tag.kind == TagType::Custom {
+                tag.custom_tag_name == name && TagType::for_name(name) == TagType::Custom
+            } else {
+                // Sentinels have no spelling, and cannot match the empty
+                // custom name produced when an implicit scan reaches EOF.
+                !name.is_empty() && tag.kind.name() == name
+            }
+        })
+    }
+
     fn push(&mut self, tag: Tag<'_>) {
+        self.snapshot.len = 0;
         self.kinds.push(tag.kind as u8);
         if tag.kind == TagType::Custom {
             self.names.extend_from_slice(tag.custom_tag_name);
@@ -281,6 +354,7 @@ impl TagStack {
     }
 
     fn pop(&mut self) {
+        self.snapshot.len = 0;
         if self.kinds.pop() == Some(TagType::Custom as u8) {
             self.name_ends.pop();
             self.names
@@ -326,9 +400,20 @@ fn is_space(c: i32) -> bool {
     matches!(c, 0x09..=0x0d | 0x20)
 }
 
-fn is_alnum(c: i32) -> bool {
-    matches!(c, 0x30..=0x39 | 0x41..=0x5a | 0x61..=0x7a)
-}
+// Classification and ASCII uppercasing for tag names in the C locale.
+const TAG_NAME_CHARS: [u8; 128] = {
+    let mut chars = [0; 128];
+    let mut c = 0;
+    while c < chars.len() {
+        chars[c] = match c {
+            0x61..=0x7a => c as u8 - (b'a' - b'A'),
+            0x30..=0x39 | 0x41..=0x5a | 0x2d | 0x3a => c as u8,
+            _ => 0,
+        };
+        c += 1;
+    }
+    chars
+};
 
 fn to_upper(c: i32) -> i32 {
     if (i32::from(b'a')..=i32::from(b'z')).contains(&c) {
@@ -338,15 +423,16 @@ fn to_upper(c: i32) -> i32 {
     }
 }
 
-fn scan_tag_name(lexer: &mut dyn Lexer, tag_name: &mut Vec<u8>) {
+fn scan_tag_name(lexer: &mut dyn Lexer, tag_name: &mut Vec<u8>, mut c: i32) {
     tag_name.clear();
     loop {
-        let c = lexer.lookahead();
-        if !is_alnum(c) && c != i32::from(b'-') && c != i32::from(b':') {
+        let byte = TAG_NAME_CHARS.get(c as usize).copied().unwrap_or(0);
+        if byte == 0 {
             break;
         }
-        tag_name.push(to_upper(c) as u8);
+        tag_name.push(byte);
         lexer.advance(false);
+        c = lexer.lookahead();
     }
 }
 
@@ -398,22 +484,28 @@ impl Scanner {
         };
 
         let mut delimiter_index = 0;
-        loop {
-            let c = lexer.lookahead();
-            if c == 0 {
-                break;
-            }
+        let mut c = lexer.lookahead();
+        while c != 0 {
             if to_upper(c) == i32::from(end_delimiter[delimiter_index]) {
                 delimiter_index += 1;
                 if delimiter_index == end_delimiter.len() {
                     break;
                 }
                 lexer.advance(false);
+                c = lexer.lookahead();
             } else {
-                // A mismatching character is consumed, not reconsidered as the
-                // first character of another delimiter (even when it is '<').
+                // Consume the mismatch, even when it is '<', rather than
+                // reconsidering it as a new delimiter. Once reset, only '<'
+                // can start another match. All intermediate mark_end calls
+                // would be overwritten, so mark just the end of this run.
                 delimiter_index = 0;
-                lexer.advance(false);
+                loop {
+                    lexer.advance(false);
+                    c = lexer.lookahead();
+                    if c == 0 || c == i32::from(b'<') {
+                        break;
+                    }
+                }
                 lexer.mark_end();
             }
         }
@@ -422,28 +514,29 @@ impl Scanner {
         true
     }
 
-    fn scan_implicit_end_tag(&mut self, lexer: &mut dyn Lexer) -> bool {
-        let is_closing_tag = lexer.lookahead() == i32::from(b'/');
+    fn scan_implicit_end_tag(&mut self, lexer: &mut dyn Lexer, mut c: i32) -> bool {
+        let is_closing_tag = c == i32::from(b'/');
         if is_closing_tag {
             lexer.advance(false);
+            c = lexer.lookahead();
         } else if self.tags.last().is_some_and(|tag| tag.is_void()) {
             self.tags.pop();
             lexer.set_result_symbol(IMPLICIT_END_TAG as u16);
             return true;
         }
 
-        scan_tag_name(lexer, &mut self.tag_name);
+        scan_tag_name(lexer, &mut self.tag_name, c);
         if self.tag_name.is_empty() && !lexer.eof() {
             return false;
         }
-        let next_tag = Tag::for_name(&self.tag_name);
-
         if is_closing_tag {
-            // A matching topmost tag is handled by the explicit end-tag scanner.
-            if self.tags.last() == Some(next_tag) {
+            // Most closing tags match their parent. Compare its spelling
+            // directly instead of searching the full builtin name map.
+            if self.tags.last_matches_name(&self.tag_name) {
                 return false;
             }
 
+            let next_tag = Tag::for_name(&self.tag_name);
             // Recovery deliberately compares only types here, not custom names.
             // Only one stack entry is removed, even if the match is much deeper.
             if self
@@ -458,7 +551,7 @@ impl Scanner {
                 return true;
             }
         } else if self.tags.last().is_some_and(|parent| {
-            !parent.can_contain(&next_tag)
+            !parent.can_contain(&Tag::for_name(&self.tag_name))
                 || (matches!(parent.kind, TagType::Html | TagType::Head | TagType::Body)
                     && lexer.eof())
         }) {
@@ -469,8 +562,8 @@ impl Scanner {
         false
     }
 
-    fn scan_start_tag_name(&mut self, lexer: &mut dyn Lexer) -> bool {
-        scan_tag_name(lexer, &mut self.tag_name);
+    fn scan_start_tag_name(&mut self, lexer: &mut dyn Lexer, c: i32) -> bool {
+        scan_tag_name(lexer, &mut self.tag_name, c);
         if self.tag_name.is_empty() {
             return false;
         }
@@ -486,14 +579,13 @@ impl Scanner {
         true
     }
 
-    fn scan_end_tag_name(&mut self, lexer: &mut dyn Lexer) -> bool {
-        scan_tag_name(lexer, &mut self.tag_name);
+    fn scan_end_tag_name(&mut self, lexer: &mut dyn Lexer, c: i32) -> bool {
+        scan_tag_name(lexer, &mut self.tag_name, c);
         if self.tag_name.is_empty() {
             return false;
         }
 
-        let tag = Tag::for_name(&self.tag_name);
-        if self.tags.last() == Some(tag) {
+        if self.tags.last_matches_name(&self.tag_name) {
             self.tags.pop();
             lexer.set_result_symbol(END_TAG_NAME as u16);
         } else {
@@ -534,17 +626,18 @@ impl ExternalScanner for Scanner {
             0x3c => {
                 lexer.mark_end();
                 lexer.advance(false);
-                if lexer.lookahead() == i32::from(b'!') {
+                c = lexer.lookahead();
+                if c == i32::from(b'!') {
                     lexer.advance(false);
                     return scan_comment(lexer);
                 }
                 if valid_symbols[IMPLICIT_END_TAG] {
-                    return self.scan_implicit_end_tag(lexer);
+                    return self.scan_implicit_end_tag(lexer, c);
                 }
             }
             0 => {
                 if valid_symbols[IMPLICIT_END_TAG] {
-                    return self.scan_implicit_end_tag(lexer);
+                    return self.scan_implicit_end_tag(lexer, c);
                 }
             }
             0x2f => {
@@ -557,9 +650,9 @@ impl ExternalScanner for Scanner {
                     && !valid_symbols[RAW_TEXT]
                 {
                     return if valid_symbols[START_TAG_NAME] {
-                        self.scan_start_tag_name(lexer)
+                        self.scan_start_tag_name(lexer, c)
                     } else {
-                        self.scan_end_tag_name(lexer)
+                        self.scan_end_tag_name(lexer, c)
                     };
                 }
             }
@@ -568,6 +661,11 @@ impl ExternalScanner for Scanner {
     }
 
     fn serialize(&mut self, buffer: &mut [u8]) -> usize {
+        let snapshot = &self.tags.snapshot;
+        if snapshot.len != 0 && snapshot.canonical {
+            buffer[..snapshot.len].copy_from_slice(&snapshot.bytes[..snapshot.len]);
+            return snapshot.len;
+        }
         let tag_count = self.tags.len().min(usize::from(u16::MAX)) as u16;
         let mut serialized_tag_count = 0u16;
         // C uses memcpy for both uint16_t counts, so the format is native-endian.
@@ -580,9 +678,13 @@ impl ExternalScanner for Scanner {
             let count = usize::from(tag_count).min(SERIALIZATION_BUFFER_SIZE - 5);
             buffer[4..4 + count].copy_from_slice(&self.tags.kinds[..count]);
             buffer[..2].copy_from_slice(&(count as u16).to_ne_bytes());
+            if count == self.tags.len() {
+                self.tags.snapshot.save(&buffer[..4 + count], true);
+            }
             return 4 + count;
         }
 
+        let mut lossless = true;
         for tag in self.tags.iter().take(usize::from(tag_count)) {
             if tag.kind == TagType::Custom {
                 let name_length = tag.custom_tag_name.len().min(usize::from(u8::MAX));
@@ -597,6 +699,7 @@ impl ExternalScanner for Scanner {
                 // deserialize that contain an embedded NUL.
                 let name = &tag.custom_tag_name[..name_length];
                 let copy_length = name.iter().position(|&c| c == 0).unwrap_or(name_length);
+                lossless &= copy_length == tag.custom_tag_name.len();
                 buffer[size..size + copy_length].copy_from_slice(&name[..copy_length]);
                 buffer[size + copy_length..size + name_length].fill(0);
                 size += name_length;
@@ -610,10 +713,23 @@ impl ExternalScanner for Scanner {
             serialized_tag_count += 1;
         }
         buffer[..2].copy_from_slice(&serialized_tag_count.to_ne_bytes());
+        if lossless && usize::from(serialized_tag_count) == self.tags.len() {
+            self.tags.snapshot.save(&buffer[..size], true);
+        }
         size
     }
 
     fn deserialize(&mut self, buffer: &[u8]) {
+        if !self.tags.snapshot.matches(buffer) {
+            self.restore(buffer);
+        }
+    }
+}
+
+impl Scanner {
+    // Keep the rebuilding path's register/stack setup out of cache-hit restores.
+    #[inline(never)]
+    fn restore(&mut self, buffer: &[u8]) {
         self.tags.clear();
         if buffer.is_empty() {
             return;
@@ -629,6 +745,7 @@ impl ExternalScanner for Scanner {
             if buffer.len() == 4 + serialized_tag_count {
                 self.tags.kinds.extend_from_slice(&buffer[4..]);
                 self.tags.kinds.resize(tag_count, TagType::End as u8);
+                self.tags.snapshot.save(buffer, false);
                 return;
             }
             let mut remaining = serialized_tag_count;
@@ -661,6 +778,7 @@ impl ExternalScanner for Scanner {
             // END_ tags (tag_new), not zero-valued AREA tags.
             self.tags.kinds.resize(tag_count, TagType::End as u8);
         }
+        self.tags.snapshot.save(buffer, false);
     }
 }
 
@@ -794,6 +912,48 @@ mod tests {
         assert_eq!(Tag::default().kind as u8, 127);
         for name in [b"".as_slice(), b"END_", b"div", b"DIV\0", b"X-A"] {
             assert_eq!(Tag::for_name(name).kind, TagType::Custom);
+        }
+    }
+
+    #[test]
+    fn parent_name_comparison_matches_tag_classification() {
+        let mut parents: Vec<_> = TAG_TYPES_BY_TAG_NAME
+            .iter()
+            .map(|&(name, _)| Tag::for_name(name))
+            .collect();
+        parents.extend([
+            Tag::default(),
+            Tag {
+                kind: TagType::EndOfVoidTags,
+                custom_tag_name: &[],
+            },
+            Tag::for_name(b""),
+            Tag::for_name(b"X-A"),
+            Tag::for_name(b"DIV\0"),
+            // Snapshots can restore a custom tag whose bytes spell a builtin.
+            // The C comparison still requires the tag types to match.
+            Tag {
+                kind: TagType::Custom,
+                custom_tag_name: b"DIV",
+            },
+        ]);
+        let mut names: Vec<_> = TAG_TYPES_BY_TAG_NAME
+            .iter()
+            .map(|&(name, _)| name)
+            .collect();
+        names.extend([b"".as_slice(), b"X-A", b"X-B", b"DIV\0", b"div", b"END_"]);
+        for parent in parents {
+            let stack = TagStack::from_iter([parent]);
+            for &name in &names {
+                assert_eq!(
+                    stack.last_matches_name(name),
+                    parent == Tag::for_name(name),
+                    "parent={parent:?}, name={name:?}",
+                );
+            }
+        }
+        for name in names {
+            assert!(!TagStack::default().last_matches_name(name));
         }
     }
 
@@ -955,6 +1115,101 @@ mod tests {
         assert_eq!(serialized(&mut scanner), bytes);
         scanner.deserialize(&[]);
         assert_eq!(scanner.tags, TagStack::default());
+    }
+
+    #[test]
+    fn snapshot_cache_tracks_mutations_and_backtracking() {
+        let mut scanner = with_tags(&["HTML", "DIV", "X-ONE"]);
+        let original = serialized(&mut scanner);
+        assert!(scanner.tags.snapshot.matches(&original));
+        assert!(scanner.tags.snapshot.canonical);
+        for _ in 0..3 {
+            scanner.deserialize(&original);
+            assert!(scanner.tags.snapshot.canonical); // Cache hit, not a rebuild.
+            assert!(!scan(&mut scanner, "</x-one>", &[IMPLICIT_END_TAG]).0);
+            assert_eq!(serialized(&mut scanner), original);
+        }
+
+        assert!(scan(&mut scanner, "span>", &[START_TAG_NAME]).0);
+        assert_eq!(scanner.tags.snapshot.len, 0);
+        let deeper = serialized(&mut scanner);
+        assert!(scanner.tags.snapshot.canonical);
+        assert_ne!(deeper, original);
+        assert!(scan(&mut scanner, "span>", &[END_TAG_NAME]).0);
+        assert_eq!(scanner.tags.snapshot.len, 0);
+        scanner.deserialize(&deeper);
+        assert_eq!(scanner.tags.last(), Some(Tag::for_name(b"SPAN")));
+        assert_eq!(serialized(&mut scanner), deeper);
+        scanner.deserialize(&original);
+        assert_eq!(scanner.tags.last(), Some(Tag::for_name(b"X-ONE")));
+        assert_eq!(serialized(&mut scanner), original);
+
+        // Equal-sized snapshots can differ in either a builtin or a name byte.
+        let mut other = original.clone();
+        other[5] = TagType::P as u8;
+        *other.last_mut().unwrap() = b'X';
+        scanner.deserialize(&other);
+        assert_eq!(scanner.tags, with_tags(&["HTML", "P", "X-ONX"]).tags);
+        assert_eq!(serialized(&mut scanner), other);
+        scanner.deserialize(&original);
+        assert_eq!(scanner.tags, with_tags(&["HTML", "DIV", "X-ONE"]).tags);
+        scanner.deserialize(&[]);
+        assert!(scanner.tags.is_empty());
+        assert_eq!(scanner.tags.snapshot.len, 0);
+        assert_eq!(serialized(&mut scanner), header(0, 0));
+    }
+
+    #[test]
+    fn snapshot_cache_does_not_skip_lossy_restores_or_canonicalization() {
+        let long_name = [b'X'; 300];
+        let mut scanner = Scanner::default();
+        scanner.tags.push(Tag::for_name(&long_name));
+        let truncated_name = serialized(&mut scanner);
+        assert_eq!(scanner.tags.snapshot.len, 0);
+        assert_eq!(scanner.tags.last().unwrap().custom_tag_name.len(), 300);
+        scanner.deserialize(&truncated_name);
+        assert_eq!(scanner.tags.last().unwrap().custom_tag_name.len(), 255);
+        assert_eq!(serialized(&mut scanner), truncated_name);
+        assert!(scanner.tags.snapshot.canonical);
+
+        // The original last tag cannot fit, but its restored END_ sentinel can.
+        scanner.tags = std::iter::repeat_n(Tag::for_name(b"DIV"), 763).collect();
+        scanner.tags.push(Tag::for_name(&long_name));
+        let truncated_stack = serialized(&mut scanner);
+        assert_eq!(scanner.tags.snapshot.len, 0);
+        scanner.deserialize(&truncated_stack);
+        assert!(scanner.tags.snapshot.matches(&truncated_stack));
+        assert!(!scanner.tags.snapshot.canonical);
+        let canonical = serialized(&mut scanner);
+        assert_eq!(canonical[..4], header(764, 764));
+        assert_eq!(canonical.last(), Some(&(TagType::End as u8)));
+        assert_ne!(canonical, truncated_stack);
+        assert_eq!(serialized(&mut scanner), canonical);
+
+        let mut embedded_nul = header(1, 1);
+        embedded_nul.extend_from_slice(&[126, 4, b'X', 0, b'Y', b'Z']);
+        scanner.deserialize(&embedded_nul);
+        assert!(scanner.tags.snapshot.matches(&embedded_nul));
+        for _ in 0..2 {
+            assert_eq!(&serialized(&mut scanner)[4..], &[126, 4, b'X', 0, 0, 0]);
+            assert_eq!(scanner.tags.last().unwrap().custom_tag_name, b"X\0YZ");
+            scanner.deserialize(&embedded_nul);
+        }
+    }
+
+    #[test]
+    fn tag_name_classification_table_matches_c_locale() {
+        for c in -1..=256 {
+            let expected = if matches!(c, 0x30..=0x39 | 0x41..=0x5a | 0x61..=0x7a | 0x2d | 0x3a) {
+                to_upper(c) as u8
+            } else {
+                0
+            };
+            assert_eq!(
+                TAG_NAME_CHARS.get(c as usize).copied().unwrap_or(0),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -1219,6 +1474,57 @@ mod tests {
         let (accepted, lexer) = scan(&mut Scanner::default(), "abc", &[RAW_TEXT]);
         assert!(!accepted);
         assert!(lexer.calls.into_inner().is_empty());
+    }
+
+    #[test]
+    fn raw_text_run_boundaries_match_character_at_a_time_scanning() {
+        // A direct model of C's loop, including the consumed mismatching '<'.
+        for (parent, delimiter) in [("SCRIPT", b"</SCRIPT".as_slice()), ("STYLE", b"</STYLE")] {
+            for prefix_len in 0..delimiter.len() {
+                let prefix = std::str::from_utf8(&delimiter[..prefix_len]).unwrap();
+                for mismatch in ["", "x", "<", ">", "\0", "é"] {
+                    for tail in ["", "abc", "</sCrIpT>", "</sTyLe>", "<<</SCRIPT>"] {
+                        let input = format!("abc{prefix}{mismatch}{tail}");
+                        let mut reference = TestLexer::new(&input);
+                        reference.mark_end();
+                        let mut index = 0;
+                        while reference.lookahead() != 0 {
+                            if to_upper(reference.lookahead()) == i32::from(delimiter[index]) {
+                                index += 1;
+                                if index == delimiter.len() {
+                                    break;
+                                }
+                                reference.advance(false);
+                            } else {
+                                index = 0;
+                                reference.advance(false);
+                                reference.mark_end();
+                            }
+                        }
+                        let (accepted, lexer) =
+                            scan(&mut with_tags(&[parent]), &input, &[RAW_TEXT]);
+                        assert!(accepted);
+                        assert_eq!(
+                            (lexer.position, lexer.end),
+                            (reference.position, reference.end),
+                            "{parent}: {input:?}"
+                        );
+                        let advances = |lexer: &TestLexer| {
+                            lexer
+                                .calls
+                                .borrow()
+                                .iter()
+                                .filter_map(|call| match call {
+                                    Call::Advance(position, skip) => Some((*position, *skip)),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                        };
+                        assert_eq!(advances(&lexer), advances(&reference));
+                    }
+                }
+            }
+        }
     }
 
     #[test]

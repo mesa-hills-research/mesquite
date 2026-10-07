@@ -125,6 +125,21 @@ struct Indent {
     length: i16,
 }
 
+impl Indent {
+    fn from_bytes([k0, k1, l0, l1]: [u8; 4]) -> Self {
+        Self {
+            kind: i16::from_ne_bytes([k0, k1]),
+            length: i16::from_ne_bytes([l0, l1]),
+        }
+    }
+
+    fn to_bytes(self) -> [u8; 4] {
+        let [k0, k1] = self.kind.to_ne_bytes();
+        let [l0, l1] = self.length.to_ne_bytes();
+        [k0, k1, l0, l1]
+    }
+}
+
 /// The two C indentation arrays are kept together; their push/pop order is identical.
 #[derive(Default)]
 pub(crate) struct Scanner {
@@ -133,7 +148,8 @@ pub(crate) struct Scanner {
     blk_imp_row: i16,
     blk_imp_col: i16,
     blk_imp_tab: i16,
-    indents: Vec<Indent>,
+    // Store native-endian pairs in their serialized form for bulk state copies.
+    indents: Vec<[u8; 4]>,
     // Temporary state, not serialized.
     end_row: i16,
     end_col: i16,
@@ -208,7 +224,7 @@ impl Scanner {
     }
 
     fn push_ind(&mut self, kind: i16, length: i16) {
-        self.indents.push(Indent { kind, length });
+        self.indents.push(Indent { kind, length }.to_bytes());
     }
 
     fn may_upd_imp_col(&mut self, row: i16, col: i16, has_tab: bool) {
@@ -485,7 +501,7 @@ impl Scanner {
             return false;
         }
         self.adv(lexer);
-        let cur_ind: i16 = self.indents.last().unwrap().length;
+        let cur_ind: i16 = Indent::from_bytes(*self.indents.last().unwrap()).length;
         let mut ind: i16 = -1;
         if self.lookahead >= i32::from(b'1') && self.lookahead <= i32::from(b'9') {
             ind = (self.lookahead - i32::from(b'1')) as i16;
@@ -574,6 +590,9 @@ impl Scanner {
         self.finish(lexer, result_symbol)
     }
 
+    // Keep this character loop separate from the large token dispatcher so
+    // its live lexer/predicate state does not spill with the dispatcher's locals.
+    #[inline(never)]
     fn scn_pln_cnt(&mut self, lexer: &mut dyn Lexer, is_in_blk: bool) -> ScanResult {
         let is_plain_safe = |c| is_plain_safe(c, is_in_blk);
         let mut is_cur_saf: bool = is_plain_safe(self.cur_chr);
@@ -660,8 +679,17 @@ fn is_nb_single_char(c: i32) -> bool {
 }
 
 fn is_ns_char(c: i32) -> bool {
-    (0x21..=0x7e).contains(&c)
-        || c == 0x85
+    if c < 0x80 {
+        (0x21..=0x7e).contains(&c)
+    } else {
+        is_non_ascii_ns_char(c)
+    }
+}
+
+// Keep the Unicode ranges out of the per-character ASCII path.
+#[inline(never)]
+fn is_non_ascii_ns_char(c: i32) -> bool {
+    c == 0x85
         || (0xa0..=0xd7ff).contains(&c)
         || (0xe000..=0xfefe).contains(&c)
         || (0xff00..=0xfffd).contains(&c)
@@ -698,8 +726,27 @@ fn is_c_flow_indicator(c: i32) -> bool {
         || c == i32::from(b'}')
 }
 
+const ASCII_PLAIN_SAFE: [u8; 128] = {
+    let mut table = [0; 128];
+    let mut c = 0x21;
+    while c <= 0x7e {
+        // Bit 0: block context; bit 1: flow context.
+        table[c] = if matches!(c, 0x2c | 0x5b | 0x5d | 0x7b | 0x7d) {
+            1
+        } else {
+            3
+        };
+        c += 1;
+    }
+    table
+};
+
 fn is_plain_safe(c: i32, is_in_blk: bool) -> bool {
-    is_ns_char(c) && (is_in_blk || !is_c_flow_indicator(c))
+    if let Some(&flags) = ASCII_PLAIN_SAFE.get(c as usize) {
+        flags & if is_in_blk { 1 } else { 2 } != 0
+    } else {
+        is_non_ascii_ns_char(c)
+    }
 }
 
 fn is_ns_uri_char(c: i32) -> bool {
@@ -754,6 +801,11 @@ fn is_ns_anchor_char(c: i32) -> bool {
 
 impl ExternalScanner for Scanner {
     fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
+        // The grammar always supplies all external-token flags. Check the extent
+        // once rather than carrying slice bounds through every token branch.
+        let valid_symbols = valid_symbols
+            .first_chunk::<{ ERR_REC + 1 }>()
+            .expect("YAML external-token flags");
         self.init();
         // The runtime can rewind between scans. Only cache within this scan;
         // the advance helpers refresh the value at every subsequent position.
@@ -764,14 +816,14 @@ impl ExternalScanner for Scanner {
             || valid_symbols[BR_DQT_STR_CTN]
             || valid_symbols[R_SQT_STR_CTN]
             || valid_symbols[BR_SQT_STR_CTN]);
-        let current = *self.indents.last().unwrap();
+        let current = Indent::from_bytes(*self.indents.last().unwrap());
         let cur_ind = current.length;
         let prt_ind = self
             .indents
             .iter()
             .rev()
             .nth(1)
-            .map_or(-1, |indent| indent.length);
+            .map_or(-1, |&indent| Indent::from_bytes(indent).length);
         let cur_ind_typ = current.kind;
 
         let mut has_tab_ind: bool = false;
@@ -1438,18 +1490,14 @@ impl ExternalScanner for Scanner {
             buffer[size..size + 2].copy_from_slice(&value.to_ne_bytes());
             size += 2;
         }
-        for indent in self.indents.iter().skip(1) {
-            // C checks only size < 1024 and can write a final pair at 1022,
-            // overrunning its buffer by two bytes. Keep complete pairs within
-            // the supplied buffer; all defined C serializations are identical.
-            if size + 4 > capacity {
-                break;
-            }
-            buffer[size..size + 2].copy_from_slice(&indent.kind.to_ne_bytes());
-            buffer[size + 2..size + 4].copy_from_slice(&indent.length.to_ne_bytes());
-            size += 4;
-        }
-        size
+        // C checks only size < 1024 and can write a final pair at 1022,
+        // overrunning its buffer by two bytes. Keep complete pairs within
+        // the supplied buffer; all defined C serializations are identical.
+        let indents = &self.indents[self.indents.len().min(1)..];
+        let count = indents.len().min((capacity - size) / 4);
+        let bytes = indents[..count].as_flattened();
+        buffer[size..size + bytes.len()].copy_from_slice(bytes);
+        size + bytes.len()
     }
 
     fn deserialize(&mut self, buffer: &[u8]) {
@@ -1472,9 +1520,8 @@ impl ExternalScanner for Scanner {
             self.blk_imp_row = values.next().unwrap();
             self.blk_imp_col = values.next().unwrap();
             self.blk_imp_tab = values.next().unwrap();
-            while let Some(kind) = values.next() {
-                self.push_ind(kind, values.next().unwrap());
-            }
+            self.indents
+                .extend_from_slice(buffer[10..].as_chunks::<4>().0);
         }
     }
 }
@@ -1575,7 +1622,23 @@ pub(crate) fn create() -> Box<dyn ExternalScanner> {
 
 // This is the core schema's incremental DFA, not a post-token string parser:
 // trailing spaces, tabs, and schema freezing must be handled at the same points.
+#[inline]
 fn advance_schema(state: i8, c: i32, result: &mut ResultSchema) -> i8 {
+    // Most plain scalars freeze as strings at their first character. Keep this
+    // absorbing state in the scalar loop instead of dispatching the whole DFA
+    // for every remaining character. A frozen non-string retains its type only
+    // through C's four schema terminators (not through tabs).
+    if state == SCH_STT_FRZ {
+        if !matches!(c, 0 | 0x0d | 0x0a | 0x20) {
+            *result = ResultSchema::String;
+        }
+        SCH_STT_FRZ
+    } else {
+        advance_schema_dfa(state, c, result)
+    }
+}
+
+fn advance_schema_dfa(state: i8, c: i32, result: &mut ResultSchema) -> i8 {
     match state {
         SCH_STT_FRZ => {}
         0 => {
@@ -2178,6 +2241,142 @@ mod tests {
     }
 
     #[test]
+    fn frozen_schema_fast_path_matches_dfa_for_every_codepoint() {
+        for schema in [
+            ResultSchema::String,
+            ResultSchema::Int,
+            ResultSchema::Null,
+            ResultSchema::Bool,
+            ResultSchema::Float,
+        ] {
+            // Include invalid scalars and negative lookahead as well: the C
+            // resolver compares int32_t values without Unicode conversion.
+            for c in (0..=0x10ffff).chain([-1, 0x110000, i32::MIN, i32::MAX]) {
+                let mut expected = schema;
+                let expected_state = advance_schema_dfa(SCH_STT_FRZ, c, &mut expected);
+                let mut actual = schema;
+                let actual_state = advance_schema(SCH_STT_FRZ, c, &mut actual);
+                assert_eq!(
+                    (actual_state, actual),
+                    (expected_state, expected),
+                    "{schema:?} {c:#x}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn frozen_schema_preserves_types_only_through_spaces() {
+        for (input, symbol, end) in [
+            ("123   # comment", R_SGL_PLN_INT_BLK, 3),
+            ("123   456", R_SGL_PLN_STR_BLK, 9),
+            ("123\t # comment", R_SGL_PLN_STR_BLK, 3),
+            ("null   # comment", R_SGL_PLN_NUL_BLK, 4),
+            ("null   tail", R_SGL_PLN_STR_BLK, 11),
+            ("true   # comment", R_SGL_PLN_BOL_BLK, 4),
+            ("true \t# comment", R_SGL_PLN_STR_BLK, 4),
+            (".inf   # comment", R_SGL_PLN_FLT_BLK, 4),
+            (".inf   tail", R_SGL_PLN_STR_BLK, 11),
+            ("ordinary text", R_SGL_PLN_STR_BLK, 13),
+        ] {
+            let mut scanner = scanner();
+            let mut lexer = TestLexer::new(input);
+            assert!(
+                scanner.scan(&mut lexer, &valid(&[R_SGL_PLN_STR_BLK])),
+                "{input:?}"
+            );
+            assert_eq!(lexer.symbol, symbol as u16, "{input:?}");
+            assert_eq!(lexer.end, end, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn non_space_character_fast_path_matches_c_ranges() {
+        // Preserve C's int32_t predicates, including surrogate codepoints and
+        // the deliberate gaps at BOM, DEL and most C0/C1 controls.
+        for c in (0..=0x110000).chain([i32::MIN, -1, i32::MAX]) {
+            let expected = (0x21..=0x7e).contains(&c)
+                || c == 0x85
+                || (0xa0..=0xd7ff).contains(&c)
+                || (0xe000..=0xfefe).contains(&c)
+                || (0xff00..=0xfffd).contains(&c)
+                || (0x10000..=0x10ffff).contains(&c);
+            assert_eq!(is_ns_char(c), expected, "{c:#x}");
+            assert_eq!(is_plain_safe(c, true), expected, "{c:#x}");
+            assert_eq!(
+                is_plain_safe(c, false),
+                expected && !matches!(c, 0x2c | 0x5b | 0x5d | 0x7b | 0x7d),
+                "{c:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn bulk_serialization_respects_every_buffer_capacity() {
+        let mut scanner = scanner();
+        let mut expected = Vec::new();
+        for value in [0i16, 0, -1, -1, 0] {
+            expected.extend_from_slice(&value.to_ne_bytes());
+        }
+        for i in 0..260i16 {
+            let kind = [IND_MAP, IND_SEQ, IND_STR][i as usize % 3];
+            let length = i.wrapping_mul(977);
+            scanner.push_ind(kind, length);
+            expected.extend_from_slice(&kind.to_ne_bytes());
+            expected.extend_from_slice(&length.to_ne_bytes());
+        }
+        for capacity in 0..=SERIALIZATION_BUFFER_SIZE + 8 {
+            let mut buffer = vec![0xa5; capacity];
+            let length = scanner.serialize(&mut buffer);
+            let expected_length = if capacity < 10 {
+                0
+            } else {
+                10 + (capacity.min(SERIALIZATION_BUFFER_SIZE) - 10) / 4 * 4
+            };
+            assert_eq!(length, expected_length, "capacity {capacity}");
+            assert_eq!(&buffer[..length], &expected[..length]);
+            assert!(buffer[length..].iter().all(|&byte| byte == 0xa5));
+        }
+    }
+
+    #[test]
+    fn bulk_deserialization_reuses_capacity_and_truncates_old_state() {
+        let mut source = scanner();
+        source.row = i16::MIN;
+        source.col = i16::MAX;
+        source.blk_imp_row = -123;
+        source.blk_imp_col = 456;
+        source.blk_imp_tab = 1;
+        for i in 0..253i16 {
+            source.push_ind([IND_MAP, IND_SEQ, IND_STR][i as usize % 3], i - 127);
+        }
+        let mut buffer = [0; SERIALIZATION_BUFFER_SIZE];
+        let length = source.serialize(&mut buffer);
+        assert_eq!(length, 1022);
+        let mut restored = scanner();
+        restored.deserialize(&buffer[..length]);
+        let capacity = restored.indents.capacity();
+        let allocation = restored.indents.as_ptr();
+        // Move between short/deep snapshots, and reset to the omitted root.
+        for length in [10, 22, 1022, 14, 0, 18, 0, 1022] {
+            restored.deserialize(&buffer[..length]);
+            assert_eq!(restored.indents.capacity(), capacity);
+            assert_eq!(restored.indents.as_ptr(), allocation);
+            let mut roundtrip = [0; SERIALIZATION_BUFFER_SIZE];
+            let written = restored.serialize(&mut roundtrip);
+            if length == 0 {
+                assert_eq!(written, 10);
+                assert_eq!(restored.indents.len(), 1);
+                assert!(!restored.pop_ind());
+            } else {
+                assert_eq!(written, length);
+                assert_eq!(&roundtrip[..written], &buffer[..length]);
+                assert_eq!(restored.indents.len(), 1 + (length - 10) / 4);
+            }
+        }
+    }
+
+    #[test]
     fn serialization_is_native_i16_pairs_without_the_root() {
         let mut scanner = scanner();
         scanner.row = -32_760;
@@ -2207,7 +2406,8 @@ mod tests {
             [Indent {
                 kind: IND_ROT,
                 length: -1
-            }]
+            }
+            .to_bytes()]
         );
         assert_eq!(
             (
@@ -2251,10 +2451,13 @@ mod tests {
         );
         assert_eq!(
             scanner.indents.last(),
-            Some(&Indent {
-                kind: IND_SEQ,
-                length: 0
-            })
+            Some(
+                &Indent {
+                    kind: IND_SEQ,
+                    length: 0
+                }
+                .to_bytes()
+            )
         );
     }
 
@@ -2291,10 +2494,13 @@ mod tests {
         assert_eq!((scanner.cur_row, scanner.cur_col), (1, 4));
         assert_eq!(
             scanner.indents.last(),
-            Some(&Indent {
-                kind: IND_STR,
-                length: 3
-            })
+            Some(
+                &Indent {
+                    kind: IND_STR,
+                    length: 3
+                }
+                .to_bytes()
+            )
         );
     }
 
