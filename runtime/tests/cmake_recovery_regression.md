@@ -55,12 +55,13 @@ This follow-up changes only this verification note; it introduces no deviation
 from C and no new unsafe code.
 
 
-### Revalidation of `4d6cc948` at `25a84d3`
+### Revalidation of `4d6cc948` at `31e563f`
 
 The assigned Registry-query input still passes before any new changes. Direct
 comparison with the current C scanner confirms that the merged zero-valued
 creation/reset behavior above is the required correction; no additional
-runtime change is warranted.
+runtime change is warranted. The checks below were rerun at this revision,
+including the parser regression with both fresh and reused scanner state.
 
 - Bucket: **1/1 passes**, with query checks.
 - All CMake inputs: **270/270 gate** (including incremental/query checks) and
@@ -77,7 +78,7 @@ new warnings, unsafe code, or generated-file changes were introduced.
 
 ## ERROR range bucket `e0b0bff8`
 
-Reverified at `5671d20`: all five reported inputs already pass with the merged
+Reverified at `d80a304`: all five reported inputs already pass with the merged
 scanner initialization/reset correction above. In particular, recovery from
 byte 5 of `E_sleep-no-args-stderr.cmake` emits bracket content through byte 72,
 including the final newline. The enclosing ERROR therefore reaches EOF, rather
@@ -113,7 +114,7 @@ and point ranges through the final newline, and zero progress callbacks. Each
 case also runs after bracket arguments and bracket comments on the same parser
 to exercise scanner reset through the public API, not just scanner unit tests.
 
-Revalidation at `5671d20`: bucket **5/5**, CMake gate **270/270**, and fresh
+Revalidation at `d80a304`: bucket **5/5**, CMake gate **270/270**, and fresh
 **9878/9878** pass. `cargo check --workspace --all-targets`,
 `cargo test -p ts_port`, and `cargo test -p ts_port_cmake` pass (24
 scanner/grammar tests). The two `cmake_error_ranges` parser tests also pass
