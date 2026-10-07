@@ -61,25 +61,34 @@ fn scan_multiline_string_end<
 #[cold]
 #[inline(never)]
 fn scan_non_newline(lexer: &mut dyn Lexer, valid_symbols: &[bool; 5], mut lookahead: i32) -> bool {
-    match lookahead {
-        0x22 => {
-            return valid_symbols[MULTILINE_BASIC_STRING_END as usize]
-                && scan_multiline_string_end::<
-                    0x22,
-                    MULTILINE_BASIC_STRING_CONTENT,
-                    MULTILINE_BASIC_STRING_END,
-                >(lexer);
+    // Only these non-LF starts can lead to a line-ending token. The range
+    // check keeps decoder errors and non-ASCII low-byte aliases out of the
+    // shift, and the mask avoids an indirect dispatch for this small set.
+    const LINE_STARTS: u64 = (1 << 0) | (1 << 9) | (1 << 13) | (1 << 32);
+    if lookahead as u32 <= 32 && (LINE_STARTS >> lookahead) & 1 != 0 {
+        if !valid_symbols[LINE_ENDING_OR_EOF as usize] {
+            return false;
         }
-        0x27 => {
-            return valid_symbols[MULTILINE_LITERAL_STRING_END as usize]
-                && scan_multiline_string_end::<
-                    0x27,
-                    MULTILINE_LITERAL_STRING_CONTENT,
-                    MULTILINE_LITERAL_STRING_END,
-                >(lexer);
-        }
-        0 | 0x09 | 0x0d | 0x20 if valid_symbols[LINE_ENDING_OR_EOF as usize] => {}
-        _ => return false,
+    } else {
+        return match lookahead {
+            0x22 => {
+                valid_symbols[MULTILINE_BASIC_STRING_END as usize]
+                    && scan_multiline_string_end::<
+                        0x22,
+                        MULTILINE_BASIC_STRING_CONTENT,
+                        MULTILINE_BASIC_STRING_END,
+                    >(lexer)
+            }
+            0x27 => {
+                valid_symbols[MULTILINE_LITERAL_STRING_END as usize]
+                    && scan_multiline_string_end::<
+                        0x27,
+                        MULTILINE_LITERAL_STRING_CONTENT,
+                        MULTILINE_LITERAL_STRING_END,
+                    >(lexer)
+            }
+            _ => false,
+        };
     }
 
     while matches!(lookahead, 0x20 | 0x09) {
