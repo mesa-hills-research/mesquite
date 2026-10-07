@@ -181,8 +181,10 @@ lexer warning noted above. This change only strengthens regression coverage;
 there are no runtime changes, C deviations, new unsafe code, or generated-file
 changes.
 
-### ERROR-range revalidation at `512817f`
+### ERROR-range revalidation at `5f3aee6`
 
+Rechecked the previously resolved bucket at this starting revision; all checks
+below were rerun, rather than relying on the earlier verification at `512817f`.
 Bucket `e0b0bff8` already passes on this starting checkout. Comparing the current
 C scanner with Rust confirms the merged zero-valued creation/reset fix remains
 correct; no new implementation change or duplicate regression is needed.
@@ -206,7 +208,7 @@ new unsafe code, warnings, or generated-file modifications are introduced.
 
 ## Empty recovery-content bucket `f5e2762e`
 
-Reverified at `511f5ba`: all 16 reported inputs already pass. The merged scanner
+Reverified at `4949d42`: all 16 reported inputs already pass. The merged scanner
 initialization/reset correction above allows `bracket_argument_content` at EOF
 without an opener, including after `a` and after skipping the newline in `if(\n`.
 This zero-width token is a real scanner token, not an inserted missing node.
@@ -233,7 +235,7 @@ The current C source was compared directly with the Rust scanner: creation uses
 The matching implementation and all regression cases were already present at
 this starting revision, so no duplicate test or behavior change was warranted.
 
-Checks rerun for this bucket at `511f5ba`:
+Checks rerun for this bucket at `4949d42`:
 
 - `run_oracle(inputs = "bucket:f5e2762e")`: 16/16 pass.
 - `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs
@@ -252,8 +254,8 @@ changes are introduced.
 
 ## Unterminated-call bucket `7f8795fb`
 
-Reverified at `40208fa` and again at `a4425c2`: all three reported inputs
-already pass on both starting checkouts with the merged scanner
+Reverified at `b5edaa9` (also previously at `40208fa` and `a4425c2`): all
+three reported inputs already pass on the starting checkout with the merged scanner
 initialization/reset correction above. The current C scanner uses
 `ts_calloc` and clears both fields on empty or invalid-length snapshots, matching
 the Rust implementation. This allows recovery content without an opener:
@@ -270,7 +272,7 @@ input chunks. The earlier verification note incorrectly described all three coun
 as zero; the existing tests already assert the correct counts. No additional
 behavior change or duplicate test is needed.
 
-Validation rerun for this bucket at `a4425c2` (same results as `40208fa`):
+Validation rerun for this bucket at `b5edaa9`:
 
 - `run_oracle(inputs = "bucket:7f8795fb")`: 3/3 pass.
 - `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs
@@ -279,12 +281,13 @@ Validation rerun for this bucket at `a4425c2` (same results as `40208fa`):
   in host-owned `grammars/yaml/src/lex.rs:20` noted above.
 - `cargo test -p ts_port_cmake`: 24 tests pass.
 - `cargo test -p ts_port`: all unit and integration tests pass, including the
-  three `cmake_unterminated_call_recovery` tests (also run separately).
+  three `cmake_unterminated_call_recovery` tests, which now also assert each
+  direct ERROR child's kind, symbol id, range, flags, and child count.
 - `cargo clippy -p ts_port -p ts_port_cmake --all-targets -- -D warnings`: passes.
 - `cargo clippy --workspace --all-targets -- -D warnings`: blocked by the
   pre-existing unused-assignment warning in host-owned `grammars/yaml/src/lex.rs:20`.
   That generated file is outside this bucket and was left unchanged.
 
-The bucket and its regression coverage were already resolved at both revisions,
+The bucket and its regression coverage were already resolved at this revision,
 so this follow-up only records verification; no C deviations, unsafe code, or
 host-owned generated-file changes were introduced.
