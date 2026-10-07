@@ -24,7 +24,8 @@ fn at_eof(lexer: &dyn Lexer, lookahead: i32) -> bool {
 }
 
 // Most characters in a property value or pseudo selector do not affect the
-// colon lookahead. A byte table lets that path bypass the delimiter dispatch.
+// colon lookahead. Outside comments, '*' is also ordinary: comment contents
+// are handled separately, so this table needs only the outside delimiters.
 const PSEUDO_SPECIAL: [bool; 128] = {
     let mut result = [false; 128];
     result[0] = true;
@@ -32,12 +33,44 @@ const PSEUDO_SPECIAL: [bool; 128] = {
     result[b'}' as usize] = true;
     result[b'{' as usize] = true;
     result[b'/' as usize] = true;
-    result[b'*' as usize] = true;
     result
 };
 
+// Only called after the opening "/*", with lookahead still on '*'. None
+// means the comment closed with lookahead on '/'; Some carries the scanner's
+// result on a terminator or EOF. C deliberately stops at ';' and '}' even
+// within a comment, and skips inspecting the second character after '*'.
+// Inline this loop so the lexer callbacks can share the caller's registers,
+// without carrying an in_comment flag through ordinary selector/value text.
+#[inline(always)]
+fn scan_comment(lexer: &mut dyn Lexer) -> Option<bool> {
+    let mut lookahead = 0x2a;
+    loop {
+        if matches!(lookahead, 0x3b | 0x7d) {
+            return Some(false);
+        }
+        if at_eof(lexer, lookahead) {
+            return Some(lexer.eof());
+        }
+        lexer.advance(false);
+        lookahead = lexer.lookahead();
+        if lookahead == 0x2a {
+            lexer.advance(false);
+            lookahead = lexer.lookahead();
+            if lookahead == 0x2f {
+                return None;
+            }
+        }
+    }
+}
+
 impl ExternalScanner for Scanner {
     fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
+        // The grammar supplies three flags. Validate that shape once, without
+        // retaining a bounds-panic path in this frequently called function.
+        let Some(valid_symbols) = valid_symbols.first_chunk::<3>() else {
+            return false;
+        };
         if valid_symbols[ERROR_RECOVERY] {
             return false;
         }
@@ -45,7 +78,9 @@ impl ExternalScanner for Scanner {
         // Unlike C's field access, lookahead is a dynamic call. Cache it until
         // advancing, including across mark_end and result_symbol updates.
         let mut lookahead = lexer.lookahead();
-        if is_space(lookahead) && valid_symbols[DESCENDANT_OP] {
+        // Both token branches may test the initial character; classify it once.
+        let mut space = is_space(lookahead);
+        if space && valid_symbols[DESCENDANT_OP] {
             lexer.set_result_symbol(DESCENDANT_OP as u16);
 
             loop {
@@ -79,14 +114,17 @@ impl ExternalScanner for Scanner {
                         lookahead = lexer.lookahead();
                     }
                 }
-                _ => {}
+                // Whitespace was consumed, and ':' was handled above. This
+                // character cannot start a pseudo-class token either.
+                _ => return false,
             }
         }
 
         if valid_symbols[PSEUDO_CLASS_SELECTOR_COLON] {
-            while is_space(lookahead) {
+            while space {
                 lexer.advance(true);
                 lookahead = lexer.lookahead();
+                space = is_space(lookahead);
             }
             if lookahead == 0x3a {
                 lexer.advance(false);
@@ -101,7 +139,6 @@ impl ExternalScanner for Scanner {
                 // property. Preserve C's advance-before-inspection order and
                 // its unconditional semicolon/closing-brace loop terminators,
                 // even while inside a comment.
-                let mut in_comment = false;
                 // The first character after ':' and the second character of
                 // each comment delimiter are only tested for loop termination.
                 'check_end: loop {
@@ -131,17 +168,17 @@ impl ExternalScanner for Scanner {
                                     return lexer.eof();
                                 }
                             }
-                            0x7b if !in_comment => return true,
-                            0x2f if !in_comment => {
+                            0x7b => return true,
+                            0x2f => {
                                 lexer.advance(false);
                                 lookahead = lexer.lookahead();
-                                in_comment = lookahead == 0x2a;
-                                continue 'check_end;
-                            }
-                            0x2a if in_comment => {
-                                lexer.advance(false);
-                                lookahead = lexer.lookahead();
-                                in_comment = lookahead != 0x2f;
+                                if lookahead == 0x2a {
+                                    if let Some(accepted) = scan_comment(lexer) {
+                                        return accepted;
+                                    }
+                                    // scan_comment stopped on the closing '/'.
+                                    lookahead = 0x2f;
+                                }
                                 continue 'check_end;
                             }
                             _ => {}
@@ -255,6 +292,16 @@ mod tests {
         for flags in [[true, true, true], [false, false, false]] {
             let (accepted, lexer) = scan(" :hover {", flags);
             assert!(!accepted);
+            assert!(lexer.events.into_inner().is_empty());
+        }
+    }
+
+    #[test]
+    fn short_flag_slices_are_rejected_without_lexer_calls() {
+        for flags in [&[][..], &[true][..], &[true, true][..]] {
+            let mut lexer = TestLexer::new(vec![0x20, 0x3a, 0x78, 0x7b]);
+            assert!(!Scanner.scan(&mut lexer, flags));
+            assert_eq!(lexer.lookahead_calls.get(), 0);
             assert!(lexer.events.into_inner().is_empty());
         }
     }
@@ -463,7 +510,11 @@ mod tests {
     // and EOF calls suppressed only where the Lexer contract implies !eof().
     // Keep this independent of the rotated loop and its ASCII dispatch table.
     fn reference_pseudo_class(lexer: &mut dyn Lexer) -> bool {
-        let mut lookahead = lexer.lookahead();
+        let lookahead = lexer.lookahead();
+        reference_pseudo_class_from(lexer, lookahead)
+    }
+
+    fn reference_pseudo_class_from(lexer: &mut dyn Lexer, mut lookahead: i32) -> bool {
         while is_space(lookahead) {
             lexer.advance(true);
             lookahead = lexer.lookahead();
@@ -531,6 +582,118 @@ mod tests {
                 assert_eq!(actual.position, expected.position);
                 assert_eq!(actual.end, expected.end);
                 assert_eq!(actual.symbol, expected.symbol);
+            }
+        }
+    }
+
+    #[test]
+    fn comment_loop_preserves_c_control_flow() {
+        // Start inside a comment so the exhaustive short inputs exercise
+        // star runs, skipped delimiter characters and comment exit/re-entry,
+        // rather than spending most cases outside the comment branch.
+        let alphabet = [0, 0x2a, 0x2f, 0x3b, 0x78, 0x7b, 0x7d, 0x100, -1];
+        for length in 0..=5 {
+            for mut index in 0..alphabet.len().pow(length) {
+                let mut prefix = vec![0x3a, 0x78, 0x2f, 0x2a];
+                for _ in 0..length {
+                    prefix.push(alphabet[index % alphabet.len()]);
+                    index /= alphabet.len();
+                }
+                for suffix in [&[][..], &[0x2a, 0x2f, 0x78, 0x7b][..]] {
+                    let mut input = prefix.clone();
+                    input.extend_from_slice(suffix);
+                    let mut actual = TestLexer::new(input.clone());
+                    let mut expected = TestLexer::new(input);
+                    assert_eq!(
+                        Scanner.scan(&mut actual, &[false, true, false]),
+                        reference_pseudo_class(&mut expected),
+                        "{:?}",
+                        actual.input,
+                    );
+                    assert_eq!(actual.events, expected.events, "{:?}", actual.input);
+                    assert_eq!(actual.lookahead_calls, expected.lookahead_calls);
+                    assert_eq!(actual.position, expected.position);
+                    assert_eq!(actual.end, expected.end);
+                    assert_eq!(actual.symbol, expected.symbol);
+                }
+            }
+        }
+    }
+
+    // Preserve the original C branch ordering and descendant-to-pseudo-class
+    // fallthrough here, independently of the optimized flag/space handling.
+    fn reference_scan(lexer: &mut dyn Lexer, valid: &[bool; 3]) -> bool {
+        if valid[ERROR_RECOVERY] {
+            return false;
+        }
+        let mut lookahead = lexer.lookahead();
+        if is_space(lookahead) && valid[DESCENDANT_OP] {
+            lexer.set_result_symbol(DESCENDANT_OP as u16);
+            lexer.advance(true);
+            lookahead = lexer.lookahead();
+            while is_space(lookahead) {
+                lexer.advance(true);
+                lookahead = lexer.lookahead();
+            }
+            lexer.mark_end();
+            if matches!(
+                lookahead,
+                0x23 | 0x2e | 0x5b | 0x2d | 0x2a | 0x30..=0x39 | 0x41..=0x5a | 0x61..=0x7a
+            ) {
+                return true;
+            }
+            if lookahead == 0x3a {
+                lexer.advance(false);
+                lookahead = lexer.lookahead();
+                if is_space(lookahead) {
+                    return false;
+                }
+                loop {
+                    if lookahead == 0x3b || lookahead == 0x7d || at_eof(lexer, lookahead) {
+                        return false;
+                    }
+                    if lookahead == 0x7b {
+                        return true;
+                    }
+                    lexer.advance(false);
+                    lookahead = lexer.lookahead();
+                }
+            }
+        }
+        valid[PSEUDO_CLASS_SELECTOR_COLON] && reference_pseudo_class_from(lexer, lookahead)
+    }
+
+    #[test]
+    fn flag_and_whitespace_dispatch_preserve_c_control_flow() {
+        // Exhaust short inputs for all flag combinations, including disabled
+        // and recovery scans. The alphabet exercises both C whitespace and
+        // non-C Unicode whitespace, selector prefixes, punctuation and NUL.
+        let alphabet = [
+            0, 0x09, 0x0b, 0x0d, 0x20, 0x2a, 0x2f, 0x3a, 0x3b, 0x41, 0x5f, 0x7b, 0x7d, 0xa0,
+            0x2028, -1,
+        ];
+        for length in 0..=4 {
+            for mut index in 0..alphabet.len().pow(length) {
+                let mut input = Vec::new();
+                for _ in 0..length {
+                    input.push(alphabet[index % alphabet.len()]);
+                    index /= alphabet.len();
+                }
+                for flags in 0..8 {
+                    let valid = [flags & 1 != 0, flags & 2 != 0, flags & 4 != 0];
+                    let mut actual = TestLexer::new(input.clone());
+                    let mut expected = TestLexer::new(input.clone());
+                    assert_eq!(
+                        Scanner.scan(&mut actual, &valid),
+                        reference_scan(&mut expected, &valid),
+                        "{input:?} {valid:?}",
+                    );
+                    assert_eq!(actual.events, expected.events, "{input:?} {valid:?}");
+                    assert_eq!(actual.lookahead_calls, expected.lookahead_calls);
+                    assert_eq!(actual.position, expected.position);
+                    assert_eq!(actual.end, expected.end);
+                    assert_eq!(actual.symbol, expected.symbol);
+                }
             }
         }
     }
