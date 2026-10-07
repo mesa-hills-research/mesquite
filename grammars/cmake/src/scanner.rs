@@ -210,6 +210,31 @@ mod tests {
         Symbol(u16),
     }
 
+    #[test]
+    fn recovery_content_preserves_callback_order_before_and_after_reset() {
+        let mut scanner = create();
+        for reset in [false, true] {
+            if reset {
+                // The previous scan left the token at BRACKET_ARGUMENT_CONTENT.
+                scanner.deserialize(&[]);
+            }
+            let mut lexer = TestLexer::new(")\n");
+            assert!(scanner.scan(&mut lexer, &[true; 7]));
+            assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
+            assert_eq!(lexer.end, Some(2));
+            assert_eq!(
+                lexer.events,
+                [
+                    Event::Advance(0, false),
+                    Event::MarkEnd(1),
+                    Event::Advance(1, false),
+                    Event::MarkEnd(2),
+                    Event::Symbol(BRACKET_ARGUMENT_CONTENT as u16),
+                ]
+            );
+        }
+    }
+
     struct TestLexer {
         // Include the runtime's -1 lookahead for invalid UTF-8, not only chars.
         input: Vec<i32>,
@@ -295,6 +320,42 @@ mod tests {
     }
 
     #[test]
+    fn recovery_content_keeps_multiline_error_ranges_through_eof() {
+        // Recovery can start after an identifier or at the beginning of a
+        // non-CMake file. The content token includes the final newline, so the
+        // enclosing ERROR ends at EOF rather than at the last nonblank byte.
+        for (input, start) in [
+            (
+                "Usage: .*/cmake -E \\[command\\] \\[arguments \\.\\.\\.\\]\nAvailable commands:\n",
+                5,
+            ),
+            (
+                ".*Properties for TARGET rot13:.*\n.*rot13.SOURCES = \"rot13.c;rot13.h\".*\n",
+                0,
+            ),
+        ] {
+            let mut scanner = create();
+            for _ in 0..2 {
+                let mut lexer = TestLexer::new(input);
+                lexer.position = start;
+                assert!(scanner.scan(&mut lexer, &[true; 7]));
+                assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
+                assert_eq!(lexer.position, input.len());
+                assert_eq!(lexer.end, Some(input.len()));
+                assert_eq!(
+                    &lexer.events[lexer.events.len() - 3..],
+                    &[
+                        Event::Advance(input.len() - 1, false),
+                        Event::MarkEnd(input.len()),
+                        Event::Symbol(BRACKET_ARGUMENT_CONTENT as u16),
+                    ]
+                );
+                scanner.deserialize(&[]);
+            }
+        }
+    }
+
+    #[test]
     fn empty_snapshot_resets_token_and_delimiter_level() {
         let mut scanner = Scanner::default();
         let mut opener = TestLexer::new("#[==[");
@@ -330,7 +391,10 @@ mod tests {
             assert_eq!(lexer.end, (!input.is_empty()).then_some(input.len()));
             assert_eq!(scanner.serialize(&mut snapshot), STATE_SIZE);
             assert_eq!(&snapshot[..4], &0u32.to_ne_bytes());
-            assert_eq!(&snapshot[4..], &(BRACKET_ARGUMENT_CONTENT as u32).to_ne_bytes());
+            assert_eq!(
+                &snapshot[4..],
+                &(BRACKET_ARGUMENT_CONTENT as u32).to_ne_bytes()
+            );
 
             // Content changed the token; an empty snapshot must reset it so
             // that the next scan can emit content again, even at EOF.
@@ -371,6 +435,25 @@ mod tests {
                 // used by a fresh scanner, not retain the content token.
                 scanner.deserialize(&[]);
             }
+        }
+    }
+
+    #[test]
+    fn recovery_content_does_not_treat_nul_as_eof() {
+        let mut scanner = create();
+        for input in ["\0", "\0tail", "text\0tail"] {
+            // Recovery permits content without an opener in the zero state.
+            // Unlike line comments, bracket content checks eof(), not a zero
+            // lookahead, so embedded NULs must be consumed along with the tail.
+            let mut lexer = TestLexer::new(input);
+            assert!(scanner.scan(&mut lexer, &[true; 7]));
+            assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
+            assert_eq!(lexer.position, input.len());
+            assert_eq!(lexer.end, Some(input.len()));
+
+            // Exercise both initial state and the empty-snapshot reset used
+            // when recovering without a previous external token.
+            scanner.deserialize(&[]);
         }
     }
 
@@ -540,6 +623,21 @@ mod tests {
         scanner.token = BRACKET_ARGUMENT_OPEN as u32;
         assert!(scanner.scan(&mut lexer, &valid(&[BRACKET_ARGUMENT_CONTENT])));
         assert_eq!(lexer.end, Some(5));
+    }
+
+    #[test]
+    fn recovery_content_includes_trailing_newline() {
+        let mut scanner = create();
+        for reset in [false, true] {
+            if reset {
+                scanner.deserialize(&[]);
+            }
+            let mut lexer = TestLexer::new(")\n");
+            assert!(scanner.scan(&mut lexer, &[true; 7]));
+            assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
+            assert_eq!(lexer.end, Some(2));
+            assert_eq!(lexer.position, 2);
+        }
     }
 
     #[test]
