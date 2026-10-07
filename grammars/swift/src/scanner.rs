@@ -353,7 +353,7 @@ const KEYWORD_HEADS: [Option<Token>; 26] = {
     heads
 };
 
-#[inline]
+#[inline(always)]
 fn eat_operators(
     lexer: &mut ScanLexer<'_>,
     valid: &[bool; 34],
@@ -385,14 +385,23 @@ fn eat_operators(
     if prior_char == 0 && lexer.lookahead() == 0x2e && valid[DotOperator as usize] {
         lexer.advance(false);
         let c = lexer.lookahead();
-        if !valid[CustomOperator as usize] || !is_legal_custom_operator(1, 0x2e, c) {
-            if legal_terminator(c, OperatorOrDot) {
+        if (0..128).contains(&c) {
+            // For an ASCII dot suffix, the legal custom continuations are
+            // precisely the illegal fixed-dot terminators. Classify it once.
+            if ASCII_OPERATORS[c as usize] == 0 {
                 if mark_end {
                     lexer.mark_end();
                 }
                 return Some(DotOperator);
             }
-            return None;
+            if !valid[CustomOperator as usize] {
+                return None;
+            }
+        } else if !valid[CustomOperator as usize] || !is_legal_non_ascii_operator(false, c) {
+            if mark_end {
+                lexer.mark_end();
+            }
+            return Some(DotOperator);
         }
         return eat_operator_candidates(lexer, valid, mark_end, immediate, 0x2e);
     }
@@ -668,17 +677,29 @@ fn eat_comment_after_slash(lexer: &mut ScanLexer<'_>, mark_end: bool) -> ParseDi
 #[inline(never)]
 fn eat_whitespace(lexer: &mut ScanLexer<'_>, valid_symbols: &[bool; 34]) -> ParseDirective {
     let mut ws_directive = ContinueNothing;
-    let semi_is_valid =
-        valid_symbols[ImplicitSemi as usize] && valid_symbols[ExplicitSemi as usize];
     let mut lookahead = lexer.lookahead();
     if is_space(lookahead) {
         let mut newline = false;
         loop {
-            newline |= matches!(lookahead, 0x0a | 0x0d);
+            if matches!(lookahead, 0x0a | 0x0d) {
+                newline = true;
+                break;
+            }
             lexer.lexer.advance(true);
             lookahead = lexer.lexer.lookahead();
             if !is_space(lookahead) {
                 break;
+            }
+        }
+        // Once a newline has been seen, later whitespace cannot change the
+        // directive. Indentation can be consumed without testing it again.
+        if newline {
+            loop {
+                lexer.lexer.advance(true);
+                lookahead = lexer.lexer.lookahead();
+                if !is_space(lookahead) {
+                    break;
+                }
             }
         }
         lexer.lookahead = lookahead;
@@ -688,6 +709,8 @@ fn eat_whitespace(lexer: &mut ScanLexer<'_>, valid_symbols: &[bool; 34]) -> Pars
             ws_directive = ContinueToken(ImplicitSemi);
         }
     }
+    let semi_is_valid =
+        valid_symbols[ImplicitSemi as usize] && valid_symbols[ExplicitSemi as usize];
     if lookahead == ';' as i32 && semi_is_valid {
         lexer.advance(false);
         return StopToken(ExplicitSemi);
@@ -849,8 +872,10 @@ impl Scanner {
             return true;
         }
 
-        // Keep this last: even a failed attempt consumes hashes.
+        // Keep this last: even a failed attempt consumes hashes. Without a
+        // hash or an active raw string, the helper cannot consume or match.
         if valid_symbols[RawStrPart as usize]
+            && (lexer.lookahead() == 0x23 || self.ongoing_raw_str_hash_count != 0)
             && let Some(token) = self.eat_raw_str_part(lexer, valid_symbols)
         {
             lexer.set_result_symbol(token as u16);
