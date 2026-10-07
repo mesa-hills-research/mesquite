@@ -59,7 +59,7 @@ This follow-up changes only this verification note; it introduces no deviation
 from C and no new unsafe code.
 
 
-### Revalidation of `4d6cc948` at `deff2cd`
+### Revalidation of `4d6cc948` at `ed294b1`
 
 The assigned Registry-query input still passes before any new changes. Direct
 comparison with the current C scanner confirms that the merged zero-valued
