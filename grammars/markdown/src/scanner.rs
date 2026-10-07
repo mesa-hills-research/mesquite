@@ -315,9 +315,10 @@ pub(crate) fn create() -> Box<dyn ExternalScanner> {
     Box::<Scanner>::default()
 }
 
-/// A scan-local copy of C's `TSLexer.lookahead` field. Only `advance` changes
-/// the input position, so all tests of the current character (including the
-/// column accounting and recursive paragraph lookahead) share one trait call.
+/// A scan-local copy of C's `TSLexer.lookahead` field. All tests of the current
+/// character (including column accounting and recursive paragraph lookahead)
+/// share one trait call. The plain table-header run keeps this cache in a local
+/// instead, refreshing it on exit before returning to the scanner's helpers.
 /// Keep this concrete in the helpers so cached reads do not use dynamic dispatch.
 struct ScanLexer<'a> {
     inner: &'a mut dyn Lexer,
@@ -462,7 +463,17 @@ impl Scanner {
         size
     }
 
+    // Most scanner calls are not at whitespace. Keep their dispatch small:
+    // only set up the column/indentation loop when there is a run to consume.
+    #[inline]
     fn consume_indentation(&mut self, lexer: &mut ScanLexer<'_>) {
+        if is_space(lexer.lookahead()) {
+            self.consume_indentation_run(lexer);
+        }
+    }
+
+    #[inline(never)]
+    fn consume_indentation_run(&mut self, lexer: &mut ScanLexer<'_>) {
         while is_space(lexer.lookahead()) {
             self.snapshot[INDENTATION] =
                 self.snapshot[INDENTATION].wrapping_add(self.advance(lexer));
@@ -1230,22 +1241,47 @@ impl Scanner {
             starting_pipe = true;
             self.advance(lexer);
         }
-        while !is_line_end(lexer.lookahead()) && !lexer.eof() {
-            if lexer.lookahead() == i32::from(b'|') {
-                cell_count += 1;
-                ending_pipe = true;
-                self.advance(lexer);
-            } else {
-                if !is_space(lexer.lookahead()) {
-                    ending_pipe = false;
+        loop {
+            match lexer.lookahead() {
+                0x0a | 0x0d => break,
+                0 if lexer.eof() => break,
+                0x7c => {
+                    cell_count += 1;
+                    ending_pipe = true;
+                    self.advance(lexer);
                 }
-                if lexer.lookahead() == i32::from(b'\\') {
+                0x20 | 0x09 => {
+                    self.advance(lexer);
+                }
+                0x5c => {
+                    ending_pipe = false;
                     self.advance(lexer);
                     if is_punctuation(lexer.lookahead()) {
                         self.advance(lexer);
                     }
-                } else {
-                    self.advance(lexer);
+                }
+                _ => {
+                    // Plain header text (including spaces once a cell has
+                    // content) needs neither escape/pipe tests nor tab expansion.
+                    // Keep its column in a register until the run ends. Modulo
+                    // 256 addition followed by modulo four is equivalent to C's
+                    // per-character modulo four, even for very long lines.
+                    ending_pipe = false;
+                    let mut column = self.snapshot[COLUMN];
+                    loop {
+                        column = column.wrapping_add(1);
+                        // No other helpers inspect lookahead inside this run;
+                        // publish the cached character only at its boundary.
+                        lexer.inner.advance(false);
+                        let c = lexer.inner.lookahead();
+                        // Backslash and pipe differ only by bit 0x20. Unlike
+                        // C's escape predicate, this tests the full code point.
+                        if matches!(c, 0 | 0x09 | 0x0a | 0x0d) || c | 0x20 == 0x7c {
+                            lexer.lookahead = c;
+                            break;
+                        }
+                    }
+                    self.snapshot[COLUMN] = column % 4;
                 }
             }
         }
@@ -1911,8 +1947,90 @@ mod tests {
     }
 
     #[test]
+    fn indentation_runs_preserve_wrapping_state_and_lexer_events() {
+        for spaces in [0, 1, 2, 3, 4, 255, 256, 257, 511] {
+            for tabs in ["", "\t", " \t\t \t"] {
+                let prefix = format!("{}{tabs}", " ".repeat(spaces));
+                for column in 0..4 {
+                    for indentation in [0u8, 3, 251, 255] {
+                        let mut scanner = Scanner::default();
+                        scanner.snapshot[COLUMN] = column;
+                        scanner.snapshot[INDENTATION] = indentation;
+                        let mut expected_column = column;
+                        let mut expected_indentation = indentation;
+                        for c in prefix.chars() {
+                            let width = if c == '\t' { 4 - expected_column } else { 1 };
+                            expected_column = (expected_column + width) % 4;
+                            expected_indentation = expected_indentation.wrapping_add(width);
+                        }
+                        let mut lexer = TestLexer::new(&format!("{prefix}text"));
+                        scanner.consume_indentation(&mut ScanLexer::new(&mut lexer));
+                        assert_eq!(scanner.snapshot[COLUMN], expected_column);
+                        assert_eq!(scanner.snapshot[INDENTATION], expected_indentation);
+                        assert_eq!(lexer.position, prefix.len());
+                        assert_eq!(
+                            lexer.events,
+                            (0..prefix.len()).map(Event::Advance).collect::<Vec<_>>()
+                        );
+                        assert_eq!(lexer.lookahead_calls.get(), prefix.len() + 1);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn table_header_runs_preserve_columns_at_eof_and_embedded_nul() {
+        // No delimiter row: all of these attempts must fail after consuming the
+        // complete header, with the exact column C leaves behind on failure.
+        // Include long runs, trailing spaces/pipes, tabs, escapes, embedded NUL,
+        // and wide characters whose low byte is punctuation in C.
+        let alphabet = ['a', ' ', '\t', '|', '\\', '\0', 'é', '\u{17c}', '!'];
+        let mut seed = 0x3141_5926u32;
+        for length in [0, 1, 2, 3, 4, 31, 255, 256, 257, 1025] {
+            let mut text = "x".repeat(length);
+            for _ in 0..64 {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                text.push(alphabet[seed as usize % alphabet.len()]);
+                for column in 0..4 {
+                    let expected_column = text.chars().fold(column, |column, c| {
+                        if c == '\t' {
+                            0
+                        } else {
+                            (column + 1) % 4
+                        }
+                    });
+                    let mut scanner = Scanner::default();
+                    scanner.snapshot[COLUMN] = column;
+                    let mut lexer = TestLexer::new(&text);
+                    assert!(!scanner.parse_pipe_table(&mut ScanLexer::new(&mut lexer)));
+                    assert_eq!(scanner.snapshot[COLUMN], expected_column);
+                    assert_eq!(lexer.position, text.chars().count());
+                    assert_eq!(lexer.end, Some(0));
+                    assert_eq!(lexer.symbol, u16::MAX);
+                    assert!(!scanner.simulate);
+                    assert_eq!(lexer.events[0], Event::Mark(0));
+                    assert_eq!(
+                        lexer.events[1..],
+                        (0..lexer.position).map(Event::Advance).collect::<Vec<_>>()
+                    );
+                    assert_eq!(lexer.lookahead_calls.get(), lexer.position + 1);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn pipe_table_start_is_zero_width_and_checks_cell_counts() {
-        for input in ["a | b\n- | -\n", "|a|\n|-|\n", "a\\|b | c\n- | -\n"] {
+        for input in [
+            "a | b\n- | -\n",
+            "|a|\n|-|\n",
+            "a\\|b | c\n- | -\n",
+            "a|  b c \t\n-|-\n",
+            "|a|\t \r\n|-|\n",
+            "text \0 more text | cell\n- | -\n",
+            "a\\\u{17c}|b\n- | -\n",
+        ] {
             let mut scanner = Scanner::default();
             let mut lexer = TestLexer::new(input);
             assert!(
@@ -1920,7 +2038,7 @@ mod tests {
                 "{input}"
             );
             assert_eq!(lexer.end, Some(0));
-            assert_eq!(lexer.position, input.len() - 1);
+            assert_eq!(lexer.position, input.chars().count() - 1);
             assert_eq!(usize::from(lexer.symbol), PIPE_TABLE_START);
             assert!(scanner.simulate);
             assert!(scanner.blocks().is_empty());
