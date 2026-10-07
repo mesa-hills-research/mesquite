@@ -2,6 +2,39 @@
 
 use ts_port_tables::{ExternalScanner, Lexer};
 
+/// `lookahead` cannot change until `advance`. Keep it across helper calls so
+/// inspecting the same position does not repeatedly dispatch through `dyn Lexer`.
+struct ScanLexer<'a> {
+    lexer: &'a mut dyn Lexer,
+    lookahead: i32,
+}
+
+impl<'a> ScanLexer<'a> {
+    fn new(lexer: &'a mut dyn Lexer) -> Self {
+        Self {
+            lookahead: lexer.lookahead(),
+            lexer,
+        }
+    }
+
+    fn lookahead(&self) -> i32 {
+        self.lookahead
+    }
+
+    fn advance(&mut self, skip: bool) {
+        self.lexer.advance(skip);
+        self.lookahead = self.lexer.lookahead();
+    }
+
+    fn mark_end(&mut self) {
+        self.lexer.mark_end();
+    }
+
+    fn set_result_symbol(&mut self, symbol: u16) {
+        self.lexer.set_result_symbol(symbol);
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
 enum Token {
@@ -74,6 +107,7 @@ enum IllegalTerminatorGroup {
 }
 use IllegalTerminatorGroup::*;
 
+#[cfg(test)]
 const OP_ILLEGAL_TERMINATORS: [IllegalTerminatorGroup; 20] = [
     OperatorSymbols, // ->
     OperatorOrDot,   // .
@@ -97,6 +131,7 @@ const OP_ILLEGAL_TERMINATORS: [IllegalTerminatorGroup; 20] = [
     Alphanumeric,    // async
 ];
 
+#[cfg(test)]
 const OP_SYMBOLS: [Token; 20] = [
     ArrowOperator,
     DotOperator,
@@ -125,6 +160,31 @@ const RESERVED_OPS: [&[u8]; 31] = [
     b"..", b"->", b"/*", b"*/", b"+=", b"-=", b"*=", b"/=", b"%=", b">>", b"<<", b"++", b"--",
     b"===", b"...", b"..<",
 ];
+
+// ASCII characters that can begin an external token. Non-ASCII heads are
+// handled separately, since custom operators and raw content can use them.
+const SCAN_START: [bool; 128] = {
+    let mut result = [false; 128];
+    let mut i = 0;
+    while i < OPERATORS.len() {
+        result[OPERATORS[i][0] as usize] = true;
+        i += 1;
+    }
+    i = 0;
+    while i < RESERVED_OPS.len() {
+        result[RESERVED_OPS[i][0] as usize] = true;
+        i += 1;
+    }
+    i = 9;
+    while i <= 13 {
+        result[i] = true;
+        i += 1;
+    }
+    result[32] = true;
+    result[59] = true;
+    result[35] = true;
+    result
+};
 
 fn is_cross_semi_token(token: Token) -> bool {
     matches!(
@@ -162,14 +222,27 @@ fn should_treat_as_wspace(character: i32) -> bool {
     is_space(character) || character == ';' as i32
 }
 
+#[inline]
 fn is_legal_custom_operator(char_idx: usize, first_char: i32, cur_char: i32) -> bool {
     let is_first_char = char_idx == 0;
+    if cur_char < 0x80 {
+        return match cur_char {
+            // = - + ! % < > & | ^ ? ~
+            0x3d | 0x2d | 0x2b | 0x21 | 0x25 | 0x3c | 0x3e | 0x26 | 0x7c | 0x5e | 0x3f | 0x7e => {
+                true
+            }
+            0x2e => is_first_char || first_char == '.' as i32,
+            // /* and // cannot start custom operators.
+            0x2a | 0x2f => char_idx != 1 || first_char != '/' as i32,
+            _ => false,
+        };
+    }
+    is_legal_non_ascii_operator(is_first_char, cur_char)
+}
+
+#[inline(never)]
+fn is_legal_non_ascii_operator(is_first_char: bool, cur_char: i32) -> bool {
     match cur_char {
-        // = - + ! % < > & | ^ ? ~
-        0x3d | 0x2d | 0x2b | 0x21 | 0x25 | 0x3c | 0x3e | 0x26 | 0x7c | 0x5e | 0x3f | 0x7e => true,
-        0x2e => is_first_char || first_char == '.' as i32,
-        // /* and // cannot start custom operators.
-        0x2a | 0x2f => char_idx != 1 || first_char != '/' as i32,
         0x00a1..=0x00a7
         | 0x00a9
         | 0x00ab
@@ -201,42 +274,6 @@ fn is_legal_custom_operator(char_idx: usize, first_char: i32, cur_char: i32) -> 
         | 0xe0100..=0xe01ef => !is_first_char,
         _ => false,
     }
-}
-
-/// The C switch groups candidates by their first character in this same order.
-fn collect_fixed_operator_candidates(
-    character: i32,
-    valid_symbols: &[bool],
-    candidates: &mut [usize; 4],
-) -> usize {
-    let indices: &[usize] = match character {
-        0x2d => &[0, 8],           // ->, -
-        0x2e => &[1],              // .
-        0x26 => &[2],              // &&
-        0x7c => &[3],              // ||
-        0x3f => &[4],              // ??
-        0x3d => &[5, 6],           // =, ==
-        0x2b => &[7],              // +
-        0x21 => &[9],              // !
-        0x74 => &[10],             // throws
-        0x72 => &[11],             // rethrows
-        0x64 => &[12],             // default
-        0x77 => &[13],             // where
-        0x65 => &[14],             // else
-        0x63 => &[15],             // catch
-        0x61 => &[16, 17, 18, 19], // as, as?, as!, async
-        _ => &[],
-    };
-    let mut count = 0;
-    for &index in indices {
-        if valid_symbols[OP_SYMBOLS[index] as usize]
-            || (index == 4 && valid_symbols[DoubleOptional as usize])
-        {
-            candidates[count] = index;
-            count += 1;
-        }
-    }
-    count
 }
 
 /// Whether the switch (including its intentional fallthroughs) accepts a terminator.
@@ -272,122 +309,254 @@ fn legal_terminator(character: i32, illegal: IllegalTerminatorGroup) -> bool {
     true
 }
 
-fn eat_operators(
-    lexer: &mut dyn Lexer,
-    valid_symbols: &[bool],
-    mark_end: bool,
-    token_is_immediate: bool,
-    prior_char: i32,
-) -> Option<Token> {
-    let first_char = if prior_char != 0 {
-        prior_char
-    } else {
-        lexer.lookahead()
+// These six keywords have disjoint first characters and never overlap a
+// custom operator. Once the head is known there is no candidate set to filter.
+fn eat_keyword(lexer: &mut ScanLexer<'_>, valid: &[bool; 34], mark_end: bool) -> Option<Token> {
+    let (text, token): (&[u8], Token) = match lexer.lookahead() {
+        0x63 => (b"catch", CatchKeyword),
+        0x64 => (b"default", DefaultKeyword),
+        0x65 => (b"else", ElseKeyword),
+        0x72 => (b"rethrows", RethrowsKeyword),
+        0x74 => (b"throws", ThrowsKeyword),
+        0x77 => (b"where", WhereKeyword),
+        _ => return None,
     };
-    let mut possible_custom_operator = valid_symbols[CustomOperator as usize]
-        && is_legal_custom_operator(0, first_char, first_char);
-    let mut possible_operators = [0; 4];
-    let mut possible_operator_count =
-        collect_fixed_operator_candidates(first_char, valid_symbols, &mut possible_operators);
-    if possible_operator_count == 0 && !possible_custom_operator {
+    if !valid[token as usize] {
         return None;
     }
-
-    let mut reserved_operators = [0u8; RESERVED_OPS.len()];
-    if possible_custom_operator {
-        for (encountered, text) in reserved_operators.iter_mut().zip(RESERVED_OPS) {
-            *encountered = u8::from(text[0] as i32 == first_char);
+    lexer.advance(false);
+    for &c in &text[1..] {
+        if lexer.lookahead() != i32::from(c) {
+            return None;
         }
+        lexer.advance(false);
     }
+    if is_alnum(lexer.lookahead()) {
+        return None;
+    }
+    if mark_end {
+        lexer.mark_end();
+    }
+    Some(token)
+}
 
-    let mut last_examined_char = first_char;
-    let mut str_idx = usize::from(prior_char != 0);
+#[inline]
+fn eat_operators(
+    lexer: &mut ScanLexer<'_>,
+    valid: &[bool; 34],
+    mark_end: bool,
+    immediate: bool,
+    prior_char: i32,
+) -> Option<Token> {
+    // Member-access dots dominate successful operator scans. Avoid setting up
+    // custom/reserved candidates unless the next character can extend the dot.
+    if prior_char == 0 && lexer.lookahead() == 0x2e && valid[DotOperator as usize] {
+        lexer.advance(false);
+        let c = lexer.lookahead();
+        if !valid[CustomOperator as usize] || !is_legal_custom_operator(1, 0x2e, c) {
+            if legal_terminator(c, OperatorOrDot) {
+                if mark_end {
+                    lexer.mark_end();
+                }
+                return Some(DotOperator);
+            }
+            return None;
+        }
+        return eat_operator_candidates(lexer, valid, mark_end, immediate, 0x2e);
+    }
+    eat_operator_candidates(lexer, valid, mark_end, immediate, prior_char)
+}
+
+fn eat_operator_candidates(
+    lexer: &mut ScanLexer<'_>,
+    valid: &[bool; 34],
+    mark_end: bool,
+    immediate: bool,
+    prior_char: i32,
+) -> Option<Token> {
+    let first = if prior_char == 0 {
+        lexer.lookahead()
+    } else {
+        prior_char
+    };
+    if prior_char == 0 && (0x61..=0x7a).contains(&first) {
+        return if first == 0x61 {
+            eat_as_operator(lexer, valid, mark_end)
+        } else {
+            eat_keyword(lexer, valid, mark_end)
+        };
+    }
+    // Every non-keyword fixed operator has at most two characters. At each
+    // position there is at most one completion and one longer candidate; the
+    // C candidate array can therefore be represented by these two options.
+    let (single, double, second) = match first {
+        0x2d => (Some(MinusThenWs), Some(ArrowOperator), 0x3e),
+        0x2e => (Some(DotOperator), None, 0),
+        0x26 => (None, Some(ConjunctionOperator), 0x26),
+        0x7c => (None, Some(DisjunctionOperator), 0x7c),
+        0x3f => (None, Some(NilCoalescingOperator), 0x3f),
+        0x3d => (Some(EqualSign), Some(EqEq), 0x3d),
+        0x2b => (Some(PlusThenWs), None, 0),
+        0x21 => (Some(Bang), None, 0),
+        _ => (None, None, 0),
+    };
+    let mut single = single.filter(|&t| valid[t as usize]);
+    let mut double = double.filter(|&t| {
+        valid[t as usize] || t == NilCoalescingOperator && valid[DoubleOptional as usize]
+    });
+    let mut custom = valid[CustomOperator as usize] && is_legal_custom_operator(0, first, first);
+    if single.is_none() && double.is_none() && !custom {
+        return None;
+    }
     let mut full_match = None;
-    loop {
-        let mut candidate_idx = 0;
-        while candidate_idx < possible_operator_count {
-            let op_idx = possible_operators[candidate_idx];
-            let text = OPERATORS[op_idx];
-            if str_idx == text.len() {
-                if legal_terminator(lexer.lookahead(), OP_ILLEGAL_TERMINATORS[op_idx]) {
-                    full_match = Some(op_idx);
+    let mut last = first;
+    let mut length = 1;
+    // Reserved operators are ASCII and at most three bytes. Keep the scanned
+    // prefix in one word instead of updating all 31 reserved candidates on
+    // every character. Non-ASCII or longer runs cannot be reserved.
+    let mut packed = if (0..128).contains(&first) {
+        first as u32
+    } else {
+        u32::MAX
+    };
+    if prior_char == 0 {
+        if single.is_none() && double.is_none() && mark_end {
+            lexer.mark_end();
+        }
+        lexer.advance(false);
+    }
+    // C examines the terminator whenever a fixed candidate remains. Without
+    // one, a non-operator ends the custom run before the next iteration.
+    if prior_char != 0
+        || single.is_some()
+        || double.is_some()
+        || is_legal_custom_operator(length, first, lexer.lookahead())
+    {
+        loop {
+            let c = lexer.lookahead();
+            if let Some(token) = single.take() {
+                let illegal = match token {
+                    DotOperator => OperatorOrDot,
+                    PlusThenWs | MinusThenWs => NonWhitespace,
+                    _ => OperatorSymbols,
+                };
+                if legal_terminator(c, illegal) {
+                    full_match = Some(token);
                     if mark_end {
                         lexer.mark_end();
                     }
                 }
-                possible_operator_count -= 1;
-                possible_operators[candidate_idx] = possible_operators[possible_operator_count];
-                continue;
             }
-            if text[str_idx] as i32 != lexer.lookahead() {
-                possible_operator_count -= 1;
-                possible_operators[candidate_idx] = possible_operators[possible_operator_count];
-                continue;
+            if c == second {
+                single = double.take();
+            } else {
+                double = None;
             }
-            candidate_idx += 1;
-        }
-
-        if possible_custom_operator {
-            for (encountered, text) in reserved_operators.iter_mut().zip(RESERVED_OPS) {
-                if *encountered == 0 {
-                    continue;
+            custom &= is_legal_custom_operator(length, first, c);
+            if single.is_none() {
+                if !custom {
+                    break;
                 }
-                if str_idx == text.len() || text[str_idx] as i32 != lexer.lookahead() {
-                    *encountered = 0;
-                    continue;
-                }
-                if str_idx + 1 == text.len() {
-                    *encountered = 2;
+                if full_match.is_none() && mark_end {
+                    lexer.mark_end();
                 }
             }
-        }
-
-        possible_custom_operator = possible_custom_operator
-            && is_legal_custom_operator(str_idx, first_char, lexer.lookahead());
-        if possible_operator_count == 0 {
-            if !possible_custom_operator {
+            packed = if length < 3 && (0..128).contains(&c) {
+                packed | ((c as u32) << (length * 8))
+            } else {
+                u32::MAX
+            };
+            last = c;
+            lexer.advance(false);
+            length += 1;
+            if single.is_none() && !is_legal_custom_operator(length, first, lexer.lookahead()) {
                 break;
-            } else if mark_end && full_match.is_none() {
-                lexer.mark_end();
             }
-        }
-
-        last_examined_char = lexer.lookahead();
-        lexer.advance(false);
-        str_idx += 1;
-        if possible_operator_count == 0
-            && !is_legal_custom_operator(str_idx, first_char, lexer.lookahead())
-        {
-            break;
         }
     }
-
-    if let Some(full_match) = full_match {
-        // The only nonzero entry in OP_SYMBOL_SUPPRESSOR is BANG -> FAKE_TRY_BANG.
-        if OP_SYMBOLS[full_match] == Bang && valid_symbols[FakeTryBang as usize] {
+    if let Some(token) = full_match {
+        if token == Bang && valid[FakeTryBang as usize] {
             return None;
         }
-        let mut matched_symbol = OP_SYMBOLS[full_match];
-        if matched_symbol == NilCoalescingOperator && valid_symbols[DoubleOptional as usize] {
-            if !token_is_immediate && !valid_symbols[NilCoalescingOperator as usize] {
+        if token == NilCoalescingOperator && valid[DoubleOptional as usize] {
+            if immediate {
+                return Some(DoubleOptional);
+            }
+            if !valid[NilCoalescingOperator as usize] {
                 return None;
             }
-            matched_symbol = if token_is_immediate {
-                DoubleOptional
-            } else {
-                NilCoalescingOperator
-            };
         }
-        return Some(matched_symbol);
+        return Some(token);
     }
-
-    if possible_custom_operator && !reserved_operators.contains(&2) {
-        if (last_examined_char != '<' as i32 || is_space(lexer.lookahead())) && mark_end {
+    if custom && !RESERVED_PACKED.contains(&packed) {
+        if mark_end && (last != 0x3c || is_space(lexer.lookahead())) {
             lexer.mark_end();
         }
         return Some(CustomOperator);
     }
     None
+}
+
+const RESERVED_PACKED: [u32; RESERVED_OPS.len()] = {
+    let mut result = [0; RESERVED_OPS.len()];
+    let mut i = 0;
+    while i < RESERVED_OPS.len() {
+        let mut j = 0;
+        while j < RESERVED_OPS[i].len() {
+            result[i] |= (RESERVED_OPS[i][j] as u32) << (j * 8);
+            j += 1;
+        }
+        i += 1;
+    }
+    result
+};
+
+// The only overlapping keyword family is as / as? / as! / async. A shorter
+// match remains available if an enabled longer spelling later fails.
+fn eat_as_operator(lexer: &mut ScanLexer<'_>, valid: &[bool; 34], mark_end: bool) -> Option<Token> {
+    if !valid[AsKeyword as usize]
+        && !valid[AsQuest as usize]
+        && !valid[AsBang as usize]
+        && !valid[AsyncKeyword as usize]
+    {
+        return None;
+    }
+    lexer.advance(false);
+    if lexer.lookahead() != 0x73 {
+        return None;
+    }
+    lexer.advance(false);
+    let mut found = None;
+    if valid[AsKeyword as usize] && !is_alnum(lexer.lookahead()) {
+        found = Some(AsKeyword);
+        if mark_end {
+            lexer.mark_end();
+        }
+    }
+    let (token, illegal) = match lexer.lookahead() {
+        0x3f if valid[AsQuest as usize] => (AsQuest, OperatorSymbols),
+        0x21 if valid[AsBang as usize] => (AsBang, OperatorSymbols),
+        0x79 if valid[AsyncKeyword as usize] => {
+            lexer.advance(false);
+            if lexer.lookahead() != 0x6e {
+                return found;
+            }
+            lexer.advance(false);
+            if lexer.lookahead() != 0x63 {
+                return found;
+            }
+            (AsyncKeyword, Alphanumeric)
+        }
+        _ => return found,
+    };
+    lexer.advance(false);
+    if legal_terminator(lexer.lookahead(), illegal) {
+        found = Some(token);
+        if mark_end {
+            lexer.mark_end();
+        }
+    }
+    found
 }
 
 /// Unlike the C out-parameter, a found token is carried only by a found directive.
@@ -402,10 +571,15 @@ enum ParseDirective {
 }
 use ParseDirective::*;
 
-fn eat_comment(lexer: &mut dyn Lexer, mark_end: bool) -> ParseDirective {
+fn eat_comment(lexer: &mut ScanLexer<'_>, mark_end: bool) -> ParseDirective {
     if lexer.lookahead() != '/' as i32 {
         return ContinueNothing;
     }
+    eat_comment_after_slash(lexer, mark_end)
+}
+
+#[inline(never)]
+fn eat_comment_after_slash(lexer: &mut ScanLexer<'_>, mark_end: bool) -> ParseDirective {
     lexer.advance(false);
     if lexer.lookahead() != '*' as i32 {
         return ContinueSlashConsumed;
@@ -449,28 +623,32 @@ fn eat_comment(lexer: &mut dyn Lexer, mark_end: bool) -> ParseDirective {
     }
 }
 
-fn eat_whitespace(lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> ParseDirective {
+#[inline(never)]
+fn eat_whitespace(lexer: &mut ScanLexer<'_>, valid_symbols: &[bool; 34]) -> ParseDirective {
     let mut ws_directive = ContinueNothing;
     let semi_is_valid =
         valid_symbols[ImplicitSemi as usize] && valid_symbols[ExplicitSemi as usize];
-    let mut lookahead;
-    loop {
-        lookahead = lexer.lookahead();
-        if !should_treat_as_wspace(lookahead) {
-            break;
-        }
-        if lookahead == ';' as i32 {
-            if semi_is_valid {
-                ws_directive = StopToken(ExplicitSemi);
-                lexer.advance(false);
+    let mut lookahead = lexer.lookahead();
+    if is_space(lookahead) {
+        let mut newline = false;
+        loop {
+            newline |= matches!(lookahead, 0x0a | 0x0d);
+            lexer.lexer.advance(true);
+            lookahead = lexer.lexer.lookahead();
+            if !is_space(lookahead) {
+                break;
             }
-            break;
         }
-        lexer.advance(true);
+        lexer.lookahead = lookahead;
+        // The previous per-character marks are all overwritten at this point.
         lexer.mark_end();
-        if ws_directive == ContinueNothing && matches!(lookahead, 0x0a | 0x0d) {
+        if newline {
             ws_directive = ContinueToken(ImplicitSemi);
         }
+    }
+    if lookahead == ';' as i32 && semi_is_valid {
+        lexer.advance(false);
+        return StopToken(ExplicitSemi);
     }
 
     if ws_directive == ContinueToken(ImplicitSemi) && lookahead == '/' as i32 {
@@ -533,7 +711,7 @@ fn eat_whitespace(lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> ParseDirecti
 const DIRECTIVES: [&[u8]; 4] = [b"if", b"elseif", b"else", b"endif"];
 const DIRECTIVE_SYMBOLS: [Token; 4] = [DirectiveIf, DirectiveElseif, DirectiveElse, DirectiveEndif];
 
-fn find_possible_compiler_directive(lexer: &mut dyn Lexer) -> Token {
+fn find_possible_compiler_directive(lexer: &mut ScanLexer<'_>) -> Token {
     let mut possible_directives = [true; 4];
     let mut str_idx = 0;
     let mut full_match = None;
@@ -574,7 +752,77 @@ pub(crate) struct Scanner {
 }
 
 impl Scanner {
-    fn eat_raw_str_part(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> Option<Token> {
+    #[inline(never)]
+    fn scan_tokens(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool; 34]) -> bool {
+        let token_is_immediate = !should_treat_as_wspace(lexer.lookahead());
+        let ws_directive = if token_is_immediate {
+            ContinueNothing
+        } else {
+            eat_whitespace(lexer, valid_symbols)
+        };
+        if let StopToken(token) = ws_directive {
+            lexer.set_result_symbol(token as u16);
+            return true;
+        }
+        if matches!(ws_directive, StopNothing | StopEndOfFile) {
+            return false;
+        }
+        let has_ws_result = matches!(ws_directive, ContinueToken(_));
+
+        let comment = if ws_directive == ContinueSlashConsumed {
+            ws_directive
+        } else {
+            eat_comment(lexer, true)
+        };
+        if let StopToken(token) = comment {
+            lexer.mark_end();
+            lexer.set_result_symbol(token as u16);
+            return true;
+        }
+        if comment == StopEndOfFile {
+            return false;
+        }
+
+        let prior_char = if comment == ContinueSlashConsumed {
+            '/' as i32
+        } else {
+            0
+        };
+        if let Some(token) = eat_operators(
+            lexer,
+            valid_symbols,
+            !has_ws_result,
+            token_is_immediate,
+            prior_char,
+        ) && (!has_ws_result || is_cross_semi_token(token))
+        {
+            lexer.set_result_symbol(token as u16);
+            if has_ws_result {
+                lexer.mark_end();
+            }
+            return true;
+        }
+        if let ContinueToken(token) = ws_directive {
+            lexer.set_result_symbol(token as u16);
+            return true;
+        }
+
+        // Keep this last: even a failed attempt consumes hashes.
+        if valid_symbols[RawStrPart as usize]
+            && let Some(token) = self.eat_raw_str_part(lexer, valid_symbols)
+        {
+            lexer.set_result_symbol(token as u16);
+            return true;
+        }
+        false
+    }
+
+    #[inline(never)]
+    fn eat_raw_str_part(
+        &mut self,
+        lexer: &mut ScanLexer<'_>,
+        valid_symbols: &[bool; 34],
+    ) -> Option<Token> {
         let mut hash_count = self.ongoing_raw_str_hash_count;
         if !valid_symbols[RawStrPart as usize] {
             return None;
@@ -631,61 +879,39 @@ impl Scanner {
 
 impl ExternalScanner for Scanner {
     fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
-        let token_is_immediate = !should_treat_as_wspace(lexer.lookahead());
-        let ws_directive = eat_whitespace(lexer, valid_symbols);
-        if let StopToken(token) = ws_directive {
-            lexer.set_result_symbol(token as u16);
-            return true;
-        }
-        if matches!(ws_directive, StopNothing | StopEndOfFile) {
+        let Some(valid_symbols) = valid_symbols.first_chunk::<34>() else {
             return false;
-        }
-        let has_ws_result = matches!(ws_directive, ContinueToken(_));
-
-        let comment = if ws_directive == ContinueSlashConsumed {
-            ws_directive
-        } else {
-            eat_comment(lexer, true)
         };
-        if let StopToken(token) = comment {
-            lexer.mark_end();
-            lexer.set_result_symbol(token as u16);
-            return true;
-        }
-        if comment == StopEndOfFile {
-            return false;
-        }
-
-        let prior_char = if comment == ContinueSlashConsumed {
-            '/' as i32
-        } else {
-            0
-        };
-        if let Some(token) = eat_operators(
-            lexer,
-            valid_symbols,
-            !has_ws_result,
-            token_is_immediate,
-            prior_char,
-        ) && (!has_ws_result || is_cross_semi_token(token))
+        let lexer = &mut ScanLexer::new(lexer);
+        let c = lexer.lookahead();
+        // Without whitespace, a slash or a hash, only operators can match.
+        // Continued raw-string content is allowed to begin with any character.
+        if !should_treat_as_wspace(c)
+            && c != 0x2f
+            && c != 0x23
+            && !(self.ongoing_raw_str_hash_count != 0
+                && valid_symbols[RawStrPart as usize]
+                && valid_symbols[RawStrContinuingIndicator as usize])
         {
-            lexer.set_result_symbol(token as u16);
-            if has_ws_result {
-                lexer.mark_end();
+            if (0..128).contains(&c) && !SCAN_START[c as usize] {
+                return false;
             }
-            return true;
+            if let Some(token) = eat_operators(lexer, valid_symbols, true, true, 0) {
+                lexer.set_result_symbol(token as u16);
+                return true;
+            }
+            // A failed operator can leave the lexer on a hash. The C scanner
+            // attempts a raw-string opening at that advanced position.
+            if lexer.lookahead() != 0x23 || !valid_symbols[RawStrPart as usize] {
+                return false;
+            }
+            if let Some(token) = self.eat_raw_str_part(lexer, valid_symbols) {
+                lexer.set_result_symbol(token as u16);
+                return true;
+            }
+            return false;
         }
-        if let ContinueToken(token) = ws_directive {
-            lexer.set_result_symbol(token as u16);
-            return true;
-        }
-
-        // Keep this last: even a failed attempt consumes hashes.
-        if let Some(token) = self.eat_raw_str_part(lexer, valid_symbols) {
-            lexer.set_result_symbol(token as u16);
-            return true;
-        }
-        false
+        self.scan_tokens(lexer, valid_symbols)
     }
 
     fn serialize(&mut self, buffer: &mut [u8]) -> usize {
@@ -713,6 +939,7 @@ pub(crate) fn create() -> Box<dyn ExternalScanner> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     #[derive(Debug, PartialEq, Eq)]
     enum Call {
@@ -727,6 +954,7 @@ mod tests {
         end: usize,
         result: u16,
         calls: Vec<(usize, Call)>,
+        lookahead_reads: Cell<usize>,
     }
 
     impl TestLexer {
@@ -737,12 +965,14 @@ mod tests {
                 end: 0,
                 result: u16::MAX,
                 calls: Vec::new(),
+                lookahead_reads: Cell::new(0),
             }
         }
     }
 
     impl Lexer for TestLexer {
         fn lookahead(&self) -> i32 {
+            self.lookahead_reads.set(self.lookahead_reads.get() + 1);
             self.input.get(self.position).copied().unwrap_or(0)
         }
         fn result_symbol(&self) -> u16 {
@@ -779,6 +1009,506 @@ mod tests {
             result[token as usize] = true;
         }
         result
+    }
+
+    fn reference_is_legal_custom_operator(char_idx: usize, first_char: i32, cur_char: i32) -> bool {
+        let is_first_char = char_idx == 0;
+        match cur_char {
+            // = - + ! % < > & | ^ ? ~
+            0x3d | 0x2d | 0x2b | 0x21 | 0x25 | 0x3c | 0x3e | 0x26 | 0x7c | 0x5e | 0x3f | 0x7e => {
+                true
+            }
+            0x2e => is_first_char || first_char == '.' as i32,
+            // /* and // cannot start custom operators.
+            0x2a | 0x2f => char_idx != 1 || first_char != '/' as i32,
+            0x00a1..=0x00a7
+            | 0x00a9
+            | 0x00ab
+            | 0x00ac
+            | 0x00ae
+            | 0x00b0..=0x00b1
+            | 0x00b6
+            | 0x00bb
+            | 0x00bf
+            | 0x00d7
+            | 0x00f7
+            | 0x2016..=0x2017
+            | 0x2020..=0x2027
+            | 0x2030..=0x203e
+            | 0x2041..=0x2053
+            | 0x2055..=0x205e
+            | 0x2190..=0x23ff
+            | 0x2500..=0x2775
+            | 0x2794..=0x2bff
+            | 0x2e00..=0x2e7f
+            | 0x3001..=0x3003
+            | 0x3008..=0x3020
+            | 0x3030 => true,
+            0x0300..=0x036f
+            | 0x1dc0..=0x1dff
+            | 0x20d0..=0x20ff
+            | 0xfe00..=0xfe0f
+            | 0xfe20..=0xfe2f
+            | 0xe0100..=0xe01ef => !is_first_char,
+            _ => false,
+        }
+    }
+
+    fn reference_collect_fixed_operator_candidates(
+        character: i32,
+        valid_symbols: &[bool],
+        candidates: &mut [usize; 4],
+    ) -> usize {
+        let indices: &[usize] = match character {
+            0x2d => &[0, 8],           // ->, -
+            0x2e => &[1],              // .
+            0x26 => &[2],              // &&
+            0x7c => &[3],              // ||
+            0x3f => &[4],              // ??
+            0x3d => &[5, 6],           // =, ==
+            0x2b => &[7],              // +
+            0x21 => &[9],              // !
+            0x74 => &[10],             // throws
+            0x72 => &[11],             // rethrows
+            0x64 => &[12],             // default
+            0x77 => &[13],             // where
+            0x65 => &[14],             // else
+            0x63 => &[15],             // catch
+            0x61 => &[16, 17, 18, 19], // as, as?, as!, async
+            _ => &[],
+        };
+        let mut count = 0;
+        for &index in indices {
+            if valid_symbols[OP_SYMBOLS[index] as usize]
+                || (index == 4 && valid_symbols[DoubleOptional as usize])
+            {
+                candidates[count] = index;
+                count += 1;
+            }
+        }
+        count
+    }
+
+    fn reference_eat_whitespace(
+        lexer: &mut ScanLexer<'_>,
+        valid_symbols: &[bool; 34],
+    ) -> ParseDirective {
+        let mut ws_directive = ContinueNothing;
+        let semi_is_valid =
+            valid_symbols[ImplicitSemi as usize] && valid_symbols[ExplicitSemi as usize];
+        let mut lookahead;
+        loop {
+            lookahead = lexer.lookahead();
+            if !should_treat_as_wspace(lookahead) {
+                break;
+            }
+            if lookahead == ';' as i32 {
+                if semi_is_valid {
+                    ws_directive = StopToken(ExplicitSemi);
+                    lexer.advance(false);
+                }
+                break;
+            }
+            lexer.advance(true);
+            lexer.mark_end();
+            if ws_directive == ContinueNothing && matches!(lookahead, 0x0a | 0x0d) {
+                ws_directive = ContinueToken(ImplicitSemi);
+            }
+        }
+
+        if ws_directive == ContinueToken(ImplicitSemi) && lookahead == '/' as i32 {
+            let mut has_seen_single_comment = false;
+            while lexer.lookahead() == '/' as i32 {
+                // Explore past comments without moving the newline's mark_end.
+                let comment = eat_comment(lexer, false);
+                if let StopToken(token) = comment {
+                    if !has_seen_single_comment {
+                        lexer.mark_end();
+                        return StopToken(token);
+                    }
+                } else if comment == StopEndOfFile {
+                    return StopEndOfFile;
+                } else if comment == ContinueSlashConsumed {
+                    return ContinueSlashConsumed;
+                } else if lexer.lookahead() == '/' as i32 {
+                    // Preserve C's ordering: a consumed slash has already returned above.
+                    has_seen_single_comment = true;
+                    while lexer.lookahead() != '\n' as i32 && lexer.lookahead() != 0 {
+                        lexer.advance(true);
+                    }
+                } else if is_space(lexer.lookahead()) {
+                    return StopNothing;
+                }
+                while is_space(lexer.lookahead()) {
+                    lexer.advance(true);
+                }
+            }
+            if eat_operators(lexer, valid_symbols, false, false, 0).is_some() {
+                return StopNothing;
+            } else {
+                ws_directive = StopToken(ImplicitSemi);
+            }
+        }
+
+        if ws_directive == ContinueToken(ImplicitSemi)
+            && matches!(
+                lookahead,
+                0x3f | 0x3a | 0x7b | 0x26 | 0x7c | 0x5e | 0x3c | 0x3e
+            )
+        {
+            return ContinueNothing;
+        }
+
+        if semi_is_valid && ws_directive != ContinueNothing {
+            // Prefer directives that can be the first member of a type body.
+            let directive_is_valid = valid_symbols[DirectiveIf as usize]
+                || valid_symbols[DirectiveElseif as usize]
+                || valid_symbols[DirectiveElse as usize]
+                || valid_symbols[DirectiveEndif as usize];
+            if lookahead == '#' as i32 && directive_is_valid {
+                return ContinueNothing;
+            }
+            return ws_directive;
+        }
+        ContinueNothing
+    }
+
+    // Keep C's candidate-array algorithm as an independent test model. Besides
+    // the returned token, the tests compare every advance and mark_end call.
+    fn reference_eat_operators(
+        lexer: &mut dyn Lexer,
+        valid_symbols: &[bool; 34],
+        mark_end: bool,
+        token_is_immediate: bool,
+        prior_char: i32,
+    ) -> Option<Token> {
+        let first_char = if prior_char != 0 {
+            prior_char
+        } else {
+            lexer.lookahead()
+        };
+        let mut possible_custom_operator = valid_symbols[CustomOperator as usize]
+            && reference_is_legal_custom_operator(0, first_char, first_char);
+        let mut possible_operators = [0; 4];
+        let mut possible_operator_count = reference_collect_fixed_operator_candidates(
+            first_char,
+            valid_symbols,
+            &mut possible_operators,
+        );
+        if possible_operator_count == 0 && !possible_custom_operator {
+            return None;
+        }
+
+        let mut reserved_operators = [0u8; RESERVED_OPS.len()];
+        if possible_custom_operator {
+            for (encountered, text) in reserved_operators.iter_mut().zip(RESERVED_OPS) {
+                *encountered = u8::from(text[0] as i32 == first_char);
+            }
+        }
+
+        let mut last_examined_char = first_char;
+        let mut str_idx = usize::from(prior_char != 0);
+        let mut full_match = None;
+        loop {
+            let mut candidate_idx = 0;
+            while candidate_idx < possible_operator_count {
+                let op_idx = possible_operators[candidate_idx];
+                let text = OPERATORS[op_idx];
+                if str_idx == text.len() {
+                    if legal_terminator(lexer.lookahead(), OP_ILLEGAL_TERMINATORS[op_idx]) {
+                        full_match = Some(op_idx);
+                        if mark_end {
+                            lexer.mark_end();
+                        }
+                    }
+                    possible_operator_count -= 1;
+                    possible_operators[candidate_idx] = possible_operators[possible_operator_count];
+                    continue;
+                }
+                if text[str_idx] as i32 != lexer.lookahead() {
+                    possible_operator_count -= 1;
+                    possible_operators[candidate_idx] = possible_operators[possible_operator_count];
+                    continue;
+                }
+                candidate_idx += 1;
+            }
+
+            if possible_custom_operator {
+                for (encountered, text) in reserved_operators.iter_mut().zip(RESERVED_OPS) {
+                    if *encountered == 0 {
+                        continue;
+                    }
+                    if str_idx == text.len() || text[str_idx] as i32 != lexer.lookahead() {
+                        *encountered = 0;
+                        continue;
+                    }
+                    if str_idx + 1 == text.len() {
+                        *encountered = 2;
+                    }
+                }
+            }
+
+            possible_custom_operator = possible_custom_operator
+                && reference_is_legal_custom_operator(str_idx, first_char, lexer.lookahead());
+            if possible_operator_count == 0 {
+                if !possible_custom_operator {
+                    break;
+                } else if mark_end && full_match.is_none() {
+                    lexer.mark_end();
+                }
+            }
+
+            last_examined_char = lexer.lookahead();
+            lexer.advance(false);
+            str_idx += 1;
+            if possible_operator_count == 0
+                && !reference_is_legal_custom_operator(str_idx, first_char, lexer.lookahead())
+            {
+                break;
+            }
+        }
+
+        if let Some(full_match) = full_match {
+            // The only nonzero entry in OP_SYMBOL_SUPPRESSOR is BANG -> FAKE_TRY_BANG.
+            if OP_SYMBOLS[full_match] == Bang && valid_symbols[FakeTryBang as usize] {
+                return None;
+            }
+            let mut matched_symbol = OP_SYMBOLS[full_match];
+            if matched_symbol == NilCoalescingOperator && valid_symbols[DoubleOptional as usize] {
+                if !token_is_immediate && !valid_symbols[NilCoalescingOperator as usize] {
+                    return None;
+                }
+                matched_symbol = if token_is_immediate {
+                    DoubleOptional
+                } else {
+                    NilCoalescingOperator
+                };
+            }
+            return Some(matched_symbol);
+        }
+
+        if possible_custom_operator && !reserved_operators.contains(&2) {
+            if (last_examined_char != '<' as i32 || is_space(lexer.lookahead())) && mark_end {
+                lexer.mark_end();
+            }
+            return Some(CustomOperator);
+        }
+        None
+    }
+
+    #[test]
+    fn operators_match_c_candidate_loop() {
+        // Exercise overlapping prefixes, reservation, terminators, the consumed
+        // slash path, and lexer side effects on both successful and failed scans.
+        let tails = [
+            "",
+            " ",
+            "x",
+            "1",
+            "_",
+            ".",
+            "+",
+            "<",
+            "<<x",
+            "===",
+            "?",
+            "!",
+            "/",
+            "*",
+            "\n",
+            "\0",
+            "é",
+            "⊕",
+            "\u{301}",
+            "\u{e0100}",
+        ];
+        let mut random = 0x1234_5678u32;
+        let custom = ["⊕", "\u{301}", "⊕\u{301}", "\u{e0100}", "++++", "....<"];
+        for prefix in OPERATORS
+            .into_iter()
+            .flat_map(|text| (1..=text.len()).map(move |end| &text[..end]))
+            .chain(RESERVED_OPS)
+            .chain(custom.map(str::as_bytes))
+        {
+            for tail in tails {
+                let input = format!("{}{tail}", std::str::from_utf8(prefix).unwrap());
+                for sample in 0..32 {
+                    let mut symbols = [false; 34];
+                    for symbol in &mut symbols {
+                        random ^= random << 13;
+                        random ^= random >> 17;
+                        random ^= random << 5;
+                        *symbol = sample == 0 || (sample != 1 && random & 1 != 0);
+                    }
+                    for mark_end in [false, true] {
+                        for immediate in [false, true] {
+                            for prior_char in [0, '/' as i32] {
+                                let mut expected = TestLexer::new(&input);
+                                let mut actual = TestLexer::new(&input);
+                                let token = reference_eat_operators(
+                                    &mut expected,
+                                    &symbols,
+                                    mark_end,
+                                    immediate,
+                                    prior_char,
+                                );
+                                assert_eq!(
+                                    eat_operators(
+                                        &mut ScanLexer::new(&mut actual),
+                                        &symbols,
+                                        mark_end,
+                                        immediate,
+                                        prior_char,
+                                    ),
+                                    token,
+                                    "{input:?}"
+                                );
+                                assert_eq!(actual.position, expected.position, "{input:?}");
+                                assert_eq!(actual.end, expected.end, "{input:?}");
+                                assert_eq!(actual.calls, expected.calls, "{input:?}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn immediate_dispatch_matches_full_scanner_flow() {
+        let mut random = 0x8765_4321u32;
+        for first in (0..128).chain([0xa0, 0xa1, 0x122, 0x301, 0x2295]) {
+            for tail in [
+                "",
+                "name",
+                "#if",
+                "#\"text\"#",
+                "\\#(x)",
+                "\"#tail",
+                "..+<x",
+                "sync#",
+            ] {
+                let input = format!("{}{tail}", char::from_u32(first).unwrap());
+                for sample in 0..32 {
+                    let mut symbols = [false; 34];
+                    for symbol in &mut symbols {
+                        random ^= random << 13;
+                        random ^= random >> 17;
+                        random ^= random << 5;
+                        *symbol = sample == 0 || (sample != 1 && random & 1 != 0);
+                    }
+                    for hash_count in [0, 1, 2] {
+                        let mut expected = TestLexer::new(&input);
+                        let mut actual = TestLexer::new(&input);
+                        let mut expected_scanner = Scanner {
+                            ongoing_raw_str_hash_count: hash_count,
+                        };
+                        let mut actual_scanner = Scanner {
+                            ongoing_raw_str_hash_count: hash_count,
+                        };
+                        let expected_result = expected_scanner
+                            .scan_tokens(&mut ScanLexer::new(&mut expected), &symbols);
+                        assert_eq!(
+                            actual_scanner.scan(&mut actual, &symbols),
+                            expected_result,
+                            "{input:?}"
+                        );
+                        assert_eq!(actual.position, expected.position, "{input:?}");
+                        assert_eq!(actual.end, expected.end, "{input:?}");
+                        assert_eq!(actual.calls, expected.calls, "{input:?}");
+                        assert_eq!(
+                            actual_scanner.ongoing_raw_str_hash_count,
+                            expected_scanner.ongoing_raw_str_hash_count,
+                            "{input:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn whitespace_mark_coalescing_preserves_boundaries() {
+        let prefixes = ["", " ", "\n", "\r", "   ", " \t\r\n\u{b}\u{c} "];
+        let tails = [
+            "",
+            "x",
+            ";x",
+            "= x",
+            "!x",
+            "#if X",
+            "?",
+            "//x",
+            "/++x",
+            "/*x*/",
+            "/*x*/ = x",
+            "/*x*/ /*y*/x",
+            "/*unterminated",
+        ];
+        for prefix in prefixes {
+            for tail in tails {
+                let input = format!("{prefix}{tail}");
+                for bits in 0..64 {
+                    let symbols = [
+                        ImplicitSemi,
+                        ExplicitSemi,
+                        EqualSign,
+                        Bang,
+                        CustomOperator,
+                        DirectiveIf,
+                    ];
+                    let mut valid_symbols = [false; 34];
+                    for (i, symbol) in symbols.into_iter().enumerate() {
+                        valid_symbols[symbol as usize] = bits & (1 << i) != 0;
+                    }
+                    let mut expected = TestLexer::new(&input);
+                    let mut actual = TestLexer::new(&input);
+                    let expected_directive = reference_eat_whitespace(
+                        &mut ScanLexer::new(&mut expected),
+                        &valid_symbols,
+                    );
+                    let actual_directive =
+                        eat_whitespace(&mut ScanLexer::new(&mut actual), &valid_symbols);
+                    assert_eq!(actual_directive, expected_directive, "{input:?}");
+                    assert_eq!(actual.position, expected.position, "{input:?}");
+                    assert_eq!(actual.end, expected.end, "{input:?}");
+                    // Only overwritten intermediate marks may disappear.
+                    let advances = |lexer: TestLexer| {
+                        lexer
+                            .calls
+                            .into_iter()
+                            .filter(|(_, call)| matches!(call, Call::Advance(_)))
+                            .collect::<Vec<_>>()
+                    };
+                    assert_eq!(advances(actual), advances(expected), "{input:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lookahead_is_cached_across_scanner_helpers() {
+        for input in [
+            "name",
+            " \n  x",
+            "-> x",
+            "++x",
+            "/++x",
+            "/* a /* b */ c */",
+            "#\"a\\#(x)",
+            "#if DEBUG",
+            "\n//comment",
+            "⊕\u{301}x",
+        ] {
+            let mut lexer = TestLexer::new(input);
+            Scanner::default().scan(&mut lexer, &[true; 34]);
+            let advances = lexer
+                .calls
+                .iter()
+                .filter(|(_, call)| matches!(call, Call::Advance(_)))
+                .count();
+            assert_eq!(lexer.lookahead_reads.get(), advances + 1, "{input:?}");
+        }
     }
 
     #[test]
@@ -835,7 +1565,13 @@ mod tests {
         ] {
             let mut lexer = TestLexer::new(input);
             assert_eq!(
-                eat_operators(&mut lexer, &valid(&symbols), true, true, 0),
+                eat_operators(
+                    &mut ScanLexer::new(&mut lexer),
+                    &valid(&symbols),
+                    true,
+                    true,
+                    0
+                ),
                 expected,
                 "{input}",
             );
@@ -873,7 +1609,13 @@ mod tests {
             let input = format!("{}x", std::str::from_utf8(text).unwrap());
             let mut lexer = TestLexer::new(&input);
             assert_eq!(
-                eat_operators(&mut lexer, &valid(&[CustomOperator]), true, true, 0),
+                eat_operators(
+                    &mut ScanLexer::new(&mut lexer),
+                    &valid(&[CustomOperator]),
+                    true,
+                    true,
+                    0
+                ),
                 None,
                 "{input}",
             );
