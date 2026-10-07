@@ -55,3 +55,49 @@ Before adding this report, both `HEAD^{tree}` and `main^{tree}` were
   geometric mean 0.762.
 - The differential gate was not rerun: final production sources are exactly
   the baseline's, and the only committed change is this report.
+
+## Follow-up after host rejection; operator stopped the run
+
+The host correctly rejected the report-only submission: its 0.762 result was
+within main's noise. Additional unary-child-storage experiments were attempted:
+
+- A 24-byte `Inline(Option<[Subtree; 1]>) | Many(Vec<Subtree>)` child container,
+  with direct transfer of the unary stack child to the constructor rather than
+  allocating a temporary Vec: overall 0.760, still below the required gain.
+- Retaining existing one-element Vecs instead of converting them to inline
+  storage: overall 0.766. Both variants were withdrawn.
+
+A parse-heavy profile (`perf record`, 20 repetitions of the host benchmark list)
+showed that committed reductions still construct an Arc-backed parent and then
+read its extent, error cost, visible-descendant count, and dynamic precedence
+back through the generic Subtree accessors to rebuild the stack header. The
+annotated code performs these reads immediately after allocation/copying, as
+well as representation checks whose outcome the constructor already knows.
+
+The next experiment is saved as `perf_parser_owned_header.patch`. It introduces
+an owned-header constructor for committed reductions, computes the stack's
+cumulative fields directly from that completed header, and only then wraps the
+parent in Arc. General subtree construction and general GLR reductions keep
+their existing interfaces. No unsafe code is added.
+
+The patch **is not active in the production sources** and is **not merge-ready**:
+
+- With the patch applied, all 208 runtime unit tests passed and runtime clippy
+  was clean.
+- It has not been benchmarked or run through the differential oracle.
+- The operator stopped the workflow before those checks; no speedup is claimed.
+
+To resume from this branch, apply the patch from the repository root:
+
+```sh
+git apply runtime/tests/perf_parser_owned_header.patch
+cargo test -p ts_port --lib
+cargo clippy -p ts_port --lib
+```
+
+Then measure repeated pinned benchmarks before investing in gate validation.
+If the candidate beats noise, run the complete differential/incremental/query
+gate and add focused tests for direct-header stack summaries (including empty
+reductions, missing/error-repeat headers, and wrapped arithmetic). If it does
+not, discard it. Production sources on this stopped branch remain identical
+to main `cc15596`; only this report and the deferred patch are retained.
