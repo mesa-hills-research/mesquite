@@ -410,8 +410,10 @@ pub(crate) fn ts_subtree_compress(
 }
 
 pub(crate) fn ts_subtree_summarize_children(tree: &mut Subtree, language: &Language) {
-    let data = tree.heap_mut().expect("cannot summarize an inline leaf");
-    summarize_children(data, language);
+    summarize_children(
+        tree.heap_mut().expect("cannot summarize an inline leaf"),
+        language,
+    );
 }
 
 fn summarize_children(data: &mut SubtreeHeapData, language: &Language) {
@@ -562,7 +564,7 @@ pub(crate) fn ts_subtree_new_node(
 ) -> Subtree {
     let metadata = ts_language_symbol_metadata(language, symbol);
     let fragile = symbol == BUILTIN_SYM_ERROR || symbol == BUILTIN_SYM_ERROR_REPEAT;
-    let mut data = SubtreeHeapData {
+    let mut result = SubtreeHeapData {
         symbol,
         visible: metadata.visible,
         named: metadata.named,
@@ -575,10 +577,10 @@ pub(crate) fn ts_subtree_new_node(
         }),
         ..SubtreeHeapData::default()
     };
-    // Finish the new header while it is exclusively owned, before introducing
-    // reference counting. No COW/Arc uniqueness check is needed on construction.
-    summarize_children(&mut data, language);
-    Subtree::Heap(Arc::new(data))
+    // Initialize before sharing: summarizing a fresh header needs no atomic
+    // uniqueness check or copy-on-write machinery.
+    summarize_children(&mut result, language);
+    Subtree::Heap(Arc::new(result))
 }
 
 pub(crate) fn ts_subtree_new_error_node(
