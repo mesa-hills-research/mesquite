@@ -10,6 +10,7 @@ use ts_port::{Language, ParseOptions, ParseState, Parser, Point};
 
 fn assert_root_error(
     source: &[u8],
+    prefix: &[(&str, u16, Range<usize>, usize)],
     end: Point,
     recovery_bytes: Range<usize>,
     expected_progress_calls: usize,
@@ -50,15 +51,40 @@ fn assert_root_error(
         assert!(root.is_error());
         assert!(root.has_error());
         assert!(root.is_named());
+        assert!(!root.is_extra());
         assert!(!root.is_missing());
         assert_eq!(root.byte_range(), 0..source.len());
         assert_eq!(root.start_position(), Point::new(0, 0));
         assert_eq!(root.end_position(), end);
 
-        let content = root.child(root.child_count() - 1).unwrap();
+        // Recovery must keep the completed command (if present), identifier,
+        // opening parenthesis, and argument list as direct ERROR children.
+        // Inserting a missing close delimiter instead wraps them in a command.
+        assert_eq!(root.child_count(), prefix.len() + 1);
+        assert_eq!(root.named_child_count(), prefix.len());
+        for (index, (kind, id, bytes, child_count)) in prefix.iter().enumerate() {
+            let child = root.child(index).unwrap();
+            assert_eq!(child.kind(), *kind);
+            assert_eq!(child.kind_id(), *id);
+            assert_eq!(child.byte_range(), *bytes);
+            assert_eq!(child.start_position(), point_at(source, bytes.start));
+            assert_eq!(child.end_position(), point_at(source, bytes.end));
+            assert_eq!(child.child_count(), *child_count);
+            assert_eq!(child.is_named(), *kind != "(");
+            assert!(!child.is_extra());
+            assert!(!child.is_error());
+            assert!(!child.has_error());
+            assert!(!child.is_missing());
+        }
+
+        let content = root.child(prefix.len()).unwrap();
         assert_eq!(content.kind(), "bracket_argument_content");
         assert_eq!(content.kind_id(), 37);
         assert_eq!(content.byte_range(), recovery_bytes);
+        assert_eq!(
+            content.start_position(),
+            point_at(source, recovery_bytes.start)
+        );
         assert_eq!(content.end_position(), end);
         assert_eq!(content.child_count(), 0);
         assert!(content.is_named());
@@ -70,6 +96,16 @@ fn assert_root_error(
     }
 }
 
+fn point_at(source: &[u8], byte: usize) -> Point {
+    source[..byte].iter().fold(Point::new(0, 0), |point, &ch| {
+        if ch == b'\n' {
+            Point::new(point.row + 1, 0)
+        } else {
+            Point::new(point.row, point.column + 1)
+        }
+    })
+}
+
 #[test]
 fn unterminated_call_retains_top_level_error() {
     let source = b"message(\n\n\nmessage(\"Additional message\")\n";
@@ -77,6 +113,11 @@ fn unterminated_call_retains_top_level_error() {
     for chunk_size in [source.len(), 1] {
         assert_root_error(
             source,
+            &[
+                ("identifier", 35, 0..7, 0),
+                ("(", 14, 7..8, 0),
+                ("argument_list", 63, 8..41, 4),
+            ],
             Point::new(4, 0),
             source.len()..source.len(),
             1,
@@ -91,6 +132,12 @@ fn unterminated_call_after_valid_command_retains_top_level_error() {
     for chunk_size in [source.len(), 1] {
         assert_root_error(
             source,
+            &[
+                ("normal_command", 84, 0..13, 4),
+                ("identifier", 35, 14..21, 0),
+                ("(", 14, 21..22, 0),
+                ("argument_list", 63, 22..55, 4),
+            ],
             Point::new(6, 0),
             source.len()..source.len(),
             1,
@@ -104,6 +151,17 @@ fn nul_in_argument_is_recovery_content_not_eof() {
     let source = b"LIST(APPEND foo TEST\x000000000000000000000000000 )\nCMAKE_HOST_SYSTEM_INFORMATION(RESULT bar QUERY HOSTNAME)\n";
     // An isolated NUL in its own chunk must not be mistaken for end of input.
     for chunk_size in [source.len(), 1] {
-        assert_root_error(source, Point::new(2, 0), 20..source.len(), 0, chunk_size);
+        assert_root_error(
+            source,
+            &[
+                ("identifier", 35, 0..4, 0),
+                ("(", 14, 4..5, 0),
+                ("argument_list", 63, 5..20, 3),
+            ],
+            Point::new(2, 0),
+            20..source.len(),
+            0,
+            chunk_size,
+        );
     }
 }
