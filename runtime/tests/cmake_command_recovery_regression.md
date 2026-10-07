@@ -2,10 +2,10 @@
 
 ## Status
 
-The assigned bucket is already fixed on the merged baseline `1a3242b`. Fresh
+The assigned bucket is already fixed on the merged baseline `88d4f2b`. Fresh
 verification passes all seven reported inputs; no additional runtime/scanner
-change or duplicate regression test is needed. This record consolidates the
-previous revalidations and records checks rerun on this baseline.
+change is needed. This revision adds incremental repair-and-undo coverage for
+malformed variable references and records checks rerun on this baseline.
 
 ## Root cause and existing correction
 
@@ -31,13 +31,19 @@ delimiter levels, callback order, and native-endian snapshot round trips.
 
 `cmake_command_recovery.rs` covers all five cases listed in the assignment:
 `UnterminatedBrace1`, `NameWithTabs`, `NameWithSpaces`, `CommandError0`, and
-`ParenInVarName0`. Its two integration tests assert top-level ERROR grouping,
+`ParenInVarName0`. Its fresh/reused-parser integration tests assert top-level ERROR grouping,
 flags, child counts, exact byte/point ranges, leading whitespace exclusion from
 recovery content, preservation of an earlier valid command, and zero
 progress-callback calls. Each input runs with fresh/reused scanners and
 whole-source/one-byte input chunks.
 
-## Verification at `1a3242b`
+The additional incremental test repairs and restores `UnterminatedBrace1`,
+`NameWithTabs`, and `NameWithSpaces` twice, reusing edited old trees. The repairs
+change source lengths and must produce valid `normal_command` nodes. Undo must
+restore the original top-level ERROR shape and bracket-content byte/point ranges,
+not retain the repaired command or a stale external-scanner snapshot.
+
+## Verification based on `88d4f2b`
 
 - `run_oracle(inputs = "bucket:6c68c51b")`: **7/7 pass**, with query checks.
 - `run_oracle(languages = "cmake", inputs = "all")`:
@@ -46,9 +52,9 @@ whole-source/one-byte input chunks.
 - `cargo check --workspace --all-targets`: passes. The existing unused-assignment
   warning in host-owned `grammars/yaml/src/lex.rs:20` is unrelated and unchanged.
 - `cargo test -p ts_port -p ts_port_cmake`: **212 runtime unit tests**, all
-  integration/doc tests (including both command-recovery regressions), and
+  integration/doc tests (including all three command-recovery regressions), and
   **24 CMake tests** pass.
 - `cargo clippy -p ts_port -p ts_port_cmake --all-targets -- -D warnings`: passes.
 
-Nothing remains to fix in the assigned bucket. This verification introduces no
+Nothing remains to fix in the assigned bucket. This test-only revision introduces no
 runtime changes, deviations from C, unsafe code, or generated-file changes.
