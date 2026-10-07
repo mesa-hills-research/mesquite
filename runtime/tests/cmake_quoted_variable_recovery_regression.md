@@ -71,7 +71,7 @@ bucket failures remain.
 
 ## Registry-query bucket `4d6cc948`
 
-Reverified at `2065a0c` (current assigned baseline, superseding `70a8035`): the assigned
+Reverified at `76dae5d` (current assigned baseline, superseding `2065a0c`): the assigned
 `Tests/RunCMake/find_package/Registry-query.cmake` already passes on the starting
 checkout. Its malformed `${CMAKE_ CURRENT_SOURCE_DIR}/${FILE_DIR}` reference
 exercised the same incorrect scanner initialization/reset described above:
@@ -86,7 +86,7 @@ regressions check fresh/reused scanners, whole-input and one-byte chunks, two
 incremental repair/restore cycles, tree ranges/flags, and progress counts. No
 duplicate test was added.
 
-Checks rerun for this assignment at `2065a0c` (all results below are from this
+Checks rerun for this assignment at `76dae5d` (all results below are from this
 checkout, not inherited from the earlier verification):
 
 - `run_oracle(inputs = "bucket:4d6cc948")`: **1/1 pass**, queries enabled.
@@ -124,10 +124,10 @@ No bucket work remains. The broader oracle was not rerun in this stop-time
 verification; the all-input results above belong to their stated earlier
 revisions. No deviations from C, unsafe code, or generated-file edits were made.
 
-## Current verification at `0cd6f10`
+## Current verification at `2d84e63`
 
 Rechecked the reassigned bucket on the current merged baseline against the C
-scanner source, superseding the verification at `a515fe8`. The initialization/reset
+scanner source, superseding the verification at `0cd6f10`. The initialization/reset
 correction and regression tests are already present, so no further behavior
 change or duplicate test is needed. The current C implementation still uses
 `ts_calloc` and resets both `level` and `token` on invalid-length snapshots;
