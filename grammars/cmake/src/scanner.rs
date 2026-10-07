@@ -287,6 +287,25 @@ mod tests {
     }
 
     #[test]
+    fn recovery_content_does_not_treat_nul_as_eof() {
+        let mut scanner = create();
+        for input in ["\0", "\0tail", "text\0tail"] {
+            // Recovery permits content without an opener in the zero state.
+            // Unlike line comments, bracket content checks eof(), not a zero
+            // lookahead, so embedded NULs must be consumed along with the tail.
+            let mut lexer = TestLexer::new(input);
+            assert!(scanner.scan(&mut lexer, &[true; 7]));
+            assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
+            assert_eq!(lexer.position, input.len());
+            assert_eq!(lexer.end, Some(input.len()));
+
+            // Exercise both initial state and the empty-snapshot reset used
+            // when recovering without a previous external token.
+            scanner.deserialize(&[]);
+        }
+    }
+
+    #[test]
     fn empty_snapshot_clears_bracket_comment_state_during_recovery() {
         let mut scanner = create();
         let mut comment = TestLexer::new("#[=[");
