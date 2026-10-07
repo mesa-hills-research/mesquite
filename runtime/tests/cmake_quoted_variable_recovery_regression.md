@@ -61,3 +61,20 @@ scanner and after prior bracket argument/comment parses, exercising scanner rese
 `cargo clippy -p ts_port --test cmake_quoted_variable_recovery -- -D warnings`
 pass; only the same pre-existing host-owned YAML warning remains in the workspace
 check. No additional runtime correction was necessary.
+
+## Revalidation at `9d32b3d`
+
+The bucket remains resolved after the latest merge; no further behavior change
+is needed. Rechecked the Rust scanner against the current C `ts_calloc` and
+whole-state deserialization reset, and reran:
+
+- Bucket oracle: **4/4 pass**.
+- Full CMake oracle: **270/270 gate** (incremental and query checks) and
+  **9878/9878 fresh** (query checks) pass.
+- `cargo check --workspace --all-targets`: passes, with only the existing
+  host-owned YAML lexer unused-assignment warning noted above.
+- `cargo test -p ts_port_cmake`: **24 tests pass**.
+- `cargo test -p ts_port --test cmake_quoted_variable_recovery`: passes.
+- `cargo clippy -p ts_port_cmake -p ts_port --all-targets -- -D warnings`: passes.
+
+This revalidation changes documentation only; it introduces no C deviations.

@@ -56,7 +56,7 @@ from C and no new unsafe code.
 
 ## ERROR range bucket `e0b0bff8`
 
-Reverified at `6eb07f2`: all five reported inputs already pass with the merged
+Reverified at `c373f7e`: all five reported inputs already pass with the merged
 scanner initialization/reset correction above. In particular, recovery from
 byte 5 of `E_sleep-no-args-stderr.cmake` emits bracket content through byte 72,
 including the final newline. The enclosing ERROR therefore reaches EOF, rather
@@ -76,8 +76,10 @@ Checks rerun for this bucket:
   (including incremental and query checks), and 9878/9878 fresh inputs pass.
 - `cargo check --workspace --all-targets`: passes with only the pre-existing
   host-owned generated YAML lexer warning noted above.
-- `cargo test -p ts_port_cmake`: 21 tests pass.
-- `cargo clippy -p ts_port_cmake --all-targets -- -D warnings`: passes.
+- `cargo test -p ts_port_cmake`: 24 tests pass.
+- `cargo test -p ts_port --test cmake_error_ranges`: both parser regressions pass.
+- `cargo test -p ts_port`: all unit, integration, and doc tests pass.
+- `cargo clippy -p ts_port_cmake -p ts_port --all-targets -- -D warnings`: passes.
 
 This verification adds no C deviations, unsafe code, or generated-file changes.
 
@@ -90,15 +92,18 @@ and point ranges through the final newline, and zero progress callbacks. Each
 case also runs after bracket arguments and bracket comments on the same parser
 to exercise scanner reset through the public API, not just scanner unit tests.
 
-Revalidation: bucket **5/5**, CMake gate **270/270**, and fresh **9878/9878** pass;
-`cargo check --workspace --all-targets`, `cargo test -p ts_port`, and
-`cargo test -p ts_port_cmake` pass (23 scanner/grammar tests). Strict clippy for
-both packages and all their targets passes. Workspace check still reports only
-the existing host-owned generated YAML lexer warning described above.
+Revalidation at `c373f7e`: bucket **5/5**, CMake gate **270/270**, and fresh
+**9878/9878** pass. `cargo check --workspace --all-targets`,
+`cargo test -p ts_port`, and `cargo test -p ts_port_cmake` pass (24
+scanner/grammar tests). The two `cmake_error_ranges` parser tests also pass
+when run separately. Strict clippy for both packages and all their targets
+passes. Workspace check still reports only the existing host-owned generated
+YAML lexer warning described above. The bucket was already resolved on this
+checkout; this revalidation changes no scanner or runtime behavior.
 
 ## Empty recovery-content bucket `f5e2762e`
 
-Reverified at `8a5f00e`: all 16 reported inputs already pass. The merged scanner
+Reverified at `d835a69`: all 16 reported inputs already pass. The merged scanner
 initialization/reset correction above allows `bracket_argument_content` at EOF
 without an opener, including after `a` and after skipping the newline in `if(\n`.
 This zero-width token is a real scanner token, not an inserted missing node.
@@ -108,6 +113,9 @@ The existing `cmake_empty_recovery_content` integration tests assert the complet
 small recovery trees, content ranges and flags, and zero progress-callback calls,
 both with fresh scanners and after parsing bracket arguments/comments. Scanner
 unit tests additionally check the EOF callback order and snapshot reset behavior.
+The parser-level whitespace cases now also cover CRLF, lone CR, spaces/tabs,
+and multiple newlines, asserting exact EOF byte and point ranges after skipping
+that whitespace with both fresh and reused scanners.
 
 Checks rerun for this bucket:
 
@@ -120,5 +128,5 @@ Checks rerun for this bucket:
 - `cargo test -p ts_port --test cmake_empty_recovery_content`: 2 tests pass.
 - `cargo clippy -p ts_port_cmake -p ts_port --all-targets -- -D warnings`: passes.
 
-This follow-up only records verification; it adds no C deviations, unsafe code,
-or generated-file changes.
+This follow-up expands regression coverage without changing scanner/runtime
+behavior; it adds no C deviations, unsafe code, or generated-file changes.

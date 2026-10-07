@@ -13,6 +13,7 @@ fn assert_root_error(
     end: Point,
     recovery_bytes: Range<usize>,
     expected_progress_calls: usize,
+    chunk_size: usize,
 ) {
     let language = Language::from(ts_port_cmake::language());
     let mut parser = Parser::new();
@@ -33,7 +34,10 @@ fn assert_root_error(
         };
         let tree = parser
             .parse_with_options(
-                &mut |offset, _| source.get(offset..).unwrap_or_default(),
+                &mut |offset, _| {
+                    let remaining = source.get(offset..).unwrap_or_default();
+                    &remaining[..remaining.len().min(chunk_size)]
+                },
                 None,
                 Some(ParseOptions::new().progress_callback(&mut progress)),
             )
@@ -69,17 +73,37 @@ fn assert_root_error(
 #[test]
 fn unterminated_call_retains_top_level_error() {
     let source = b"message(\n\n\nmessage(\"Additional message\")\n";
-    assert_root_error(source, Point::new(4, 0), source.len()..source.len(), 1);
+    // A one-byte callback exercises EOF recovery across input chunk boundaries.
+    for chunk_size in [source.len(), 1] {
+        assert_root_error(
+            source,
+            Point::new(4, 0),
+            source.len()..source.len(),
+            1,
+            chunk_size,
+        );
+    }
 }
 
 #[test]
 fn unterminated_call_after_valid_command_retains_top_level_error() {
     let source = b"set(var \"\\\n\")\nmessage(\n\n\nmessage(\"Additional message\")\n";
-    assert_root_error(source, Point::new(6, 0), source.len()..source.len(), 1);
+    for chunk_size in [source.len(), 1] {
+        assert_root_error(
+            source,
+            Point::new(6, 0),
+            source.len()..source.len(),
+            1,
+            chunk_size,
+        );
+    }
 }
 
 #[test]
 fn nul_in_argument_is_recovery_content_not_eof() {
     let source = b"LIST(APPEND foo TEST\x000000000000000000000000000 )\nCMAKE_HOST_SYSTEM_INFORMATION(RESULT bar QUERY HOSTNAME)\n";
-    assert_root_error(source, Point::new(2, 0), 20..source.len(), 0);
+    // An isolated NUL in its own chunk must not be mistaken for end of input.
+    for chunk_size in [source.len(), 1] {
+        assert_root_error(source, Point::new(2, 0), 20..source.len(), 0, chunk_size);
+    }
 }
