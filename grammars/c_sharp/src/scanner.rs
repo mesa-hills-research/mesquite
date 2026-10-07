@@ -430,27 +430,31 @@ impl ExternalScanner for Scanner {
     }
 
     fn deserialize(&mut self, buffer: &[u8]) {
-        self.quote_count = 0;
         self.interpolation_stack.clear();
-        let mut size = 0;
+        let Some((&[quote_count, count], entries)) = buffer.split_first_chunk::<2>() else {
+            assert!(buffer.is_empty(), "C# snapshot header");
+            self.quote_count = 0;
+            return;
+        };
+        self.quote_count = quote_count;
+        assert_eq!(entries.len(), usize::from(count) * 4);
 
-        if !buffer.is_empty() {
-            self.quote_count = buffer[0];
-            let interpolation_count = usize::from(buffer[1]);
-            size = 2;
-            self.interpolation_stack.reserve(interpolation_count);
-            for _ in 0..interpolation_count {
-                self.interpolation_stack.push(Interpolation {
-                    dollar_count: buffer[size],
-                    open_brace_count: buffer[size + 1],
-                    quote_count: buffer[size + 2],
-                    string_type: buffer[size + 3],
-                });
-                size += 4;
-            }
-        }
-
-        assert_eq!(size, buffer.len());
+        // Each entry is exactly four unsigned bytes. Extending from the
+        // exact-sized iterator reserves once and reuses the stack's capacity,
+        // rather than checking for growth on every restored interpolation.
+        self.interpolation_stack
+            .extend(
+                entries
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|entry| Interpolation {
+                        dollar_count: entry[0],
+                        open_brace_count: entry[1],
+                        quote_count: entry[2],
+                        string_type: entry[3],
+                    }),
+            );
     }
 }
 
@@ -713,6 +717,40 @@ mod tests {
         assert_eq!(snapshot(scanner.as_mut()), [7, 1, 3, 2, 1, REGULAR]);
         scanner.deserialize(&[]);
         assert_eq!(snapshot(scanner.as_mut()), [0, 0]);
+    }
+
+    #[test]
+    fn restore_reuses_capacity_and_preserves_every_unsigned_field() {
+        let mut scanner = Scanner::default();
+        let mut capacity = 0;
+        for count in [255u8, 1, 0, 2, 128, 3, 254, 0, 255] {
+            let mut bytes = vec![count.wrapping_add(1), count];
+            for index in 0..count {
+                bytes.extend_from_slice(&[
+                    index,
+                    index.wrapping_add(127),
+                    index.wrapping_add(128),
+                    index.wrapping_add(255),
+                ]);
+            }
+            scanner.deserialize(&bytes);
+            assert_eq!(snapshot(&mut scanner), bytes);
+            assert_eq!(scanner.interpolation_stack.len(), usize::from(count));
+            if capacity == 0 {
+                capacity = scanner.interpolation_stack.capacity();
+            }
+            assert_eq!(scanner.interpolation_stack.capacity(), capacity);
+            for (index, entry) in scanner.interpolation_stack.iter().enumerate() {
+                let index = index as u8;
+                assert_eq!(entry.dollar_count, index);
+                assert_eq!(entry.open_brace_count, index.wrapping_add(127));
+                assert_eq!(entry.quote_count, index.wrapping_add(128));
+                assert_eq!(entry.string_type, index.wrapping_add(255));
+            }
+        }
+        scanner.deserialize(&[]);
+        assert_eq!(snapshot(&mut scanner), [0, 0]);
+        assert_eq!(scanner.interpolation_stack.capacity(), capacity);
     }
 
     #[test]
