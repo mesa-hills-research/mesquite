@@ -159,8 +159,9 @@ changes are introduced.
 
 ## Unterminated-call bucket `7f8795fb`
 
-Reverified at `1d2f655`: all three reported inputs already pass with the merged
-scanner initialization/reset correction above. The current C scanner uses
+Reverified at `e6417fb`: all three reported inputs already pass on the starting
+checkout with the merged scanner initialization/reset correction above. The
+current C scanner uses
 `ts_calloc` and clears both fields on empty or invalid-length snapshots, matching
 the Rust implementation. This allows recovery content without an opener:
 zero-width content at EOF in `UnterminatedCall1.cmake` and
