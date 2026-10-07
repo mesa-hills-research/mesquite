@@ -6,7 +6,7 @@ C, but a `normal_command` in the port. The smallest was
 newline). The bucket already passes at this worktree's starting revision,
 `8fbaaf9`; no additional runtime or scanner behavior change is needed.
 
-## Revalidation at `447cd1e`
+## Revalidation at `e42ccca`
 
 The assigned bucket still passes on the starting checkout: **7/7 bucket**,
 **270/270 gate** (including incremental/query checks), and **9878/9878 fresh**
@@ -17,6 +17,9 @@ behavior change or duplicate regression test is necessary.
 Workspace all-targets checking passes with only the existing host-owned YAML
 lexer warning. All **24 CMake tests** and both command-recovery integration tests
 pass, including fresh/reused scanners and whole-source/one-byte input chunks.
+These existing parser regressions cover all five cases listed in the assignment,
+asserting ERROR grouping, exact recovery ranges, and zero progress-callback calls;
+no duplicate regression was added.
 Strict all-targets clippy for `ts_port` and `ts_port_cmake` also passes. This
 revalidation changes only this record: no C deviations, unsafe code, new
 warnings, or generated-file changes were introduced.
