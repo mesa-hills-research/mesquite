@@ -146,6 +146,25 @@ confirms the zero-initialized creation/reset semantics; the bucket and its
 regression tests were already resolved on this checkout. This revalidation
 changes only the verification record, not scanner or runtime behavior.
 
+### Incremental EOF-range coverage (`45f70f2`)
+
+The assigned five inputs already pass at this starting revision. The current C
+scanner still zero-initializes creation and resets both fields on invalid-length
+snapshots, matching the merged correction; no further behavior change is needed.
+Extended `cmake_error_ranges.rs` to delete and restore the final newline twice
+using edited old trees. Both smallest bucket inputs retain the exact ERROR and
+content children, updated byte/point ranges, and zero progress callbacks. These
+checks run after fresh creation and bracket-argument/comment parses, with whole,
+seven-byte, and single-byte input chunks.
+
+Validation: bucket **5/5**, CMake gate **270/270** (incremental/query checks), and
+fresh CMake **9878/9878** (query checks) pass. All runtime and CMake scanner tests
+pass, as do strict all-targets clippy for both packages and workspace all-targets
+checking. The latter still reports the pre-existing host-owned generated YAML
+lexer warning noted above. This change only strengthens regression coverage;
+there are no runtime changes, C deviations, new unsafe code, or generated-file
+changes.
+
 ## Empty recovery-content bucket `f5e2762e`
 
 Reverified at `4977a30`: all 16 reported inputs already pass. The merged scanner
