@@ -342,15 +342,17 @@ fn eat_keyword(lexer: &mut ScanLexer<'_>, valid: &[bool; 34], mark_end: bool) ->
 }
 
 // The six disjoint keyword heads can reject disabled tokens before entering
-// the matching loop. All other lowercase heads except `a` have no candidates.
-const KEYWORD_HEADS: [Option<Token>; 26] = {
-    let mut heads = [None; 26];
-    heads[(b'c' - b'a') as usize] = Some(CatchKeyword);
-    heads[(b'd' - b'a') as usize] = Some(DefaultKeyword);
-    heads[(b'e' - b'a') as usize] = Some(ElseKeyword);
-    heads[(b'r' - b'a') as usize] = Some(RethrowsKeyword);
-    heads[(b't' - b'a') as usize] = Some(ThrowsKeyword);
-    heads[(b'w' - b'a') as usize] = Some(WhereKeyword);
+// the matching loop. Byte indices avoid materializing an optional token merely
+// to load a flag. Zero means no keyword (BlockComment is never a keyword).
+// All other lowercase heads except `a` have no candidates.
+const KEYWORD_HEADS: [u8; 26] = {
+    let mut heads = [0; 26];
+    heads[(b'c' - b'a') as usize] = CatchKeyword as u8;
+    heads[(b'd' - b'a') as usize] = DefaultKeyword as u8;
+    heads[(b'e' - b'a') as usize] = ElseKeyword as u8;
+    heads[(b'r' - b'a') as usize] = RethrowsKeyword as u8;
+    heads[(b't' - b'a') as usize] = ThrowsKeyword as u8;
+    heads[(b'w' - b'a') as usize] = WhereKeyword as u8;
     heads
 };
 
@@ -372,18 +374,22 @@ fn eat_operators(
     }
     if prior_char == 0 && (0x61..=0x7a).contains(&lexer.lookahead()) {
         if lexer.lookahead() == 0x61 {
-            return if valid[AsKeyword as usize]
-                || valid[AsQuest as usize]
-                || valid[AsBang as usize]
-                || valid[AsyncKeyword as usize]
-            {
+            // These four flags are contiguous in the grammar; the word-sized
+            // test avoids four dependent branches before trying the `as` family.
+            let enabled = u32::from_ne_bytes([
+                u8::from(valid[AsKeyword as usize]),
+                u8::from(valid[AsQuest as usize]),
+                u8::from(valid[AsBang as usize]),
+                u8::from(valid[AsyncKeyword as usize]),
+            ]);
+            return if enabled != 0 {
                 eat_as_operator(lexer, valid, mark_end)
             } else {
                 None
             };
         }
-        let token = KEYWORD_HEADS[(lexer.lookahead() - 0x61) as usize]?;
-        return if valid[token as usize] {
+        let token = KEYWORD_HEADS[(lexer.lookahead() - 0x61) as usize];
+        return if token != 0 && valid[usize::from(token)] {
             eat_keyword(lexer, valid, mark_end)
         } else {
             None
@@ -574,13 +580,6 @@ const RESERVED_PACKED: [u32; RESERVED_OPS.len()] = {
 // match remains available if an enabled longer spelling later fails.
 #[inline(never)]
 fn eat_as_operator(lexer: &mut ScanLexer<'_>, valid: &[bool; 34], mark_end: bool) -> Option<Token> {
-    if !valid[AsKeyword as usize]
-        && !valid[AsQuest as usize]
-        && !valid[AsBang as usize]
-        && !valid[AsyncKeyword as usize]
-    {
-        return None;
-    }
     lexer.advance(false);
     if lexer.lookahead() != 0x73 {
         return None;
@@ -770,11 +769,12 @@ fn eat_whitespace(lexer: &mut ScanLexer<'_>, valid_symbols: &[bool; 34]) -> Pars
 
     if semi_is_valid && ws_directive != ContinueNothing {
         // Prefer directives that can be the first member of a type body.
-        let directive_is_valid = valid_symbols[DirectiveIf as usize]
-            || valid_symbols[DirectiveElseif as usize]
-            || valid_symbols[DirectiveElse as usize]
-            || valid_symbols[DirectiveEndif as usize];
-        if lookahead == '#' as i32 && directive_is_valid {
+        if lookahead == '#' as i32
+            && (valid_symbols[DirectiveIf as usize]
+                || valid_symbols[DirectiveElseif as usize]
+                || valid_symbols[DirectiveElse as usize]
+                || valid_symbols[DirectiveEndif as usize])
+        {
             return ContinueNothing;
         }
         return ws_directive;
