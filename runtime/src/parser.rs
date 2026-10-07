@@ -1031,19 +1031,81 @@ pub(crate) fn ts_parser__reduce(
     end_of_non_terminal_extra: bool,
     replace_version: bool,
 ) -> StackVersion {
+    if replace_version
+        && let Some(mut children) = ts_stack_pop_count_in_place(&mut parser.stack, count)
+    {
+        // The sole, committed reduction has already replaced head zero. It has
+        // no competing slices or versions to select, merge, or renumber.
+        let language = parser.language.unwrap();
+        ts_subtree_array_remove_trailing_extras(&mut children, &mut parser.trailing_extras);
+        let state = ts_stack_state(&parser.stack, version);
+        let next_state = parser
+            .parse_table_cache
+            .next_state(&language, state, symbol);
+        let parent =
+            ts_subtree_new_node_with(symbol, children, production_id as u32, &language, |data| {
+                if end_of_non_terminal_extra && next_state == state {
+                    data.extra = true;
+                }
+                if is_fragile {
+                    data.fragile_left = true;
+                    data.fragile_right = true;
+                    data.parse_state = TS_TREE_STATE_NONE;
+                } else {
+                    data.parse_state = state;
+                }
+                let SubtreePayload::Branch(branch) = &mut data.payload else {
+                    unreachable!("a reduced node has branch data");
+                };
+                branch.dynamic_precedence += dynamic_precedence;
+            });
+        ts_stack_push(
+            &mut parser.stack,
+            &mut parser.tree_pool,
+            version,
+            parent,
+            false,
+            next_state,
+        );
+        if !parser.trailing_extras.is_empty() {
+            for extra in parser.trailing_extras.drain(..) {
+                ts_stack_push(
+                    &mut parser.stack,
+                    &mut parser.tree_pool,
+                    version,
+                    extra,
+                    false,
+                    next_state,
+                );
+            }
+        }
+        return version;
+    }
+    ts_parser__reduce_general(
+        parser,
+        version,
+        symbol,
+        count,
+        dynamic_precedence,
+        production_id,
+        is_fragile,
+        end_of_non_terminal_extra,
+    )
+}
+
+fn ts_parser__reduce_general(
+    parser: &mut Parser,
+    version: StackVersion,
+    symbol: Symbol,
+    count: u32,
+    dynamic_precedence: i32,
+    production_id: u16,
+    is_fragile: bool,
+    end_of_non_terminal_extra: bool,
+) -> StackVersion {
     let language = parser.language.unwrap();
     let initial_version_count = ts_stack_version_count(&parser.stack);
-    // A sole action on the sole version will immediately replace the original
-    // head. Move uniquely owned children instead of cloning them into a new
-    // head and then deleting the old one. Shared/branched paths still use C's
-    // complete breadth-first traversal and version-selection algorithm.
-    let in_place = replace_version
-        .then(|| ts_stack_pop_count_in_place(&mut parser.stack, count))
-        .flatten();
-    let did_replace = in_place.is_some();
-    let mut slices = in_place.unwrap_or_else(|| {
-        ts_stack_pop_count(&mut parser.stack, &mut parser.tree_pool, version, count)
-    });
+    let mut slices = ts_stack_pop_count(&mut parser.stack, &mut parser.tree_pool, version, count);
     let pop_size = slices.len();
     let mut pop = slices.iter_mut().peekable();
     let mut removed_version_count = 0;
@@ -1163,9 +1225,7 @@ pub(crate) fn ts_parser__reduce(
     // allocates a new buffer for the next pop.
     slices.clear();
     parser.stack.slices = slices;
-    if did_replace {
-        version
-    } else if ts_stack_version_count(&parser.stack) > initial_version_count {
+    if ts_stack_version_count(&parser.stack) > initial_version_count {
         initial_version_count
     } else {
         STACK_VERSION_NONE
@@ -2713,6 +2773,72 @@ mod parser3_tests {
             );
             assert!(parser.stack.slices.is_empty());
             ts_parser_reset(&mut parser);
+        }
+    }
+
+    #[test]
+    fn direct_reduction_matches_general_for_empty_and_nonterminal_extra() {
+        let language = reduction_language();
+        let symbol = (language.tables.token_count as Symbol
+            ..language.tables.symbol_count as Symbol)
+            .find(|&symbol| ts_language_next_state(&language, 0, symbol) == 0)
+            .expect("an absent nonterminal in the error-state row");
+        for count in [0, 1] {
+            for fragile in [false, true] {
+                for end_of_extra in [false, true] {
+                    let reduce = |replace_version| {
+                        let mut parser = ts_parser_new();
+                        parser.language = Some(language);
+                        ts_stack_push(
+                            &mut parser.stack,
+                            &mut parser.tree_pool,
+                            0,
+                            Subtree::Inline(InlineLeaf {
+                                symbol: 1,
+                                size_bytes: 3,
+                                flags: VISIBLE | NAMED,
+                                ..InlineLeaf::default()
+                            }),
+                            false,
+                            0,
+                        );
+                        let version = ts_parser__reduce(
+                            &mut parser,
+                            0,
+                            symbol,
+                            count,
+                            -3,
+                            0,
+                            fragile,
+                            end_of_extra,
+                            replace_version,
+                        );
+                        ts_stack_renumber_version(
+                            &mut parser.stack,
+                            &mut parser.tree_pool,
+                            version,
+                            0,
+                        );
+                        let node = parser.stack.heads[0].node;
+                        let tree = &parser.stack.arena.nodes[node.0].as_ref().unwrap().links[0]
+                            .as_ref()
+                            .unwrap()
+                            .subtree;
+                        if count == 0 {
+                            assert_eq!(ts_subtree_extra(tree), end_of_extra);
+                        }
+                        (
+                            format!("{tree:?}"),
+                            ts_stack_state(&parser.stack, 0),
+                            ts_stack_position(&parser.stack, 0),
+                            ts_stack_error_cost(&parser.stack, 0),
+                            ts_stack_node_count_since_error(&mut parser.stack, 0),
+                            ts_stack_dynamic_precedence(&parser.stack, 0),
+                        )
+                    };
+                    assert_eq!(reduce(true), reduce(false));
+                }
+            }
         }
     }
 

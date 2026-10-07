@@ -131,7 +131,7 @@ nodes there is no need to free each unused index after the 50-node cache limit.
 `Stack` does not borrow its owner's subtree pool. Every operation needing it
 accepts `&mut SubtreePool` explicitly. At parser call sites split borrows of
 `parser.stack` and `parser.tree_pool`. Version remains u32 and NONE is u32::MAX.
-Pop APIs return owned Vec<StackSlice>; do not leave aliases to scratch slice storage.
+General pop APIs return owned Vec<StackSlice>; do not leave aliases to scratch slice storage.
 `stack__iter` accepts a closure over typed callback state plus an immutable arena
 view, replacing void* payloads. Pop-error captures `&mut bool`; summary captures
 `SummarizeStackSession`; callbacks inspect predecessor nodes through the arena.
@@ -141,11 +141,15 @@ For a sole reduce action on the sole active version, the parser may fuse the pop
 with the immediately following replacement of the original head.
 `ts_stack_pop_count_in_place` first verifies that every removed node is uniquely
 owned and has one predecessor; failure leaves the stack untouched for the normal
-traversal. On success it moves child handles into the slice and transfers the
+traversal. On success it returns the owned child Vec directly and transfers the
 last predecessor reference back to head 0, avoiding transient retains, a second
 head, and the subsequent release walk. Preserve the head's scanner token, error
 baseline and summary. Never use this path for speculative reductions or multiple
 actions/versions: those still need the original head for alternatives and merges.
+The committed reduction finishes directly from that child Vec, without wrapping
+it in a slice or entering general version-selection/merge bookkeeping. Preserve
+normal header initialization, trailing-extra order, and the caller's progress
+checkpoints on this path; fallback reductions retain the full algorithm.
 
 ## Parser, input, lexer, scanner and progress
 
