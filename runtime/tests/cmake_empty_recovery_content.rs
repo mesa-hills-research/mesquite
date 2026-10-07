@@ -1,7 +1,7 @@
 //! Regression for CMake oracle bucket f5e2762e.
 
 use std::ops::Range;
-use ts_port::{Language, ParseOptions, ParseState, Parser, Point};
+use ts_port::{InputEdit, Language, ParseOptions, ParseState, Parser, Point};
 
 fn assert_empty_recovery_content(
     source: &str,
@@ -166,6 +166,79 @@ fn missing_block_end_retains_header_and_empty_recovery_content() {
                 Point::new(1, 0),
                 chunk_size,
             );
+        }
+    }
+}
+
+#[test]
+fn incremental_repair_and_undo_restore_empty_recovery_content() {
+    let language = Language::from(ts_port_cmake::language());
+    for (source, suffix, end, repaired_end) in [
+        ("a", "()", Point::new(0, 1), Point::new(0, 3)),
+        ("message", "()", Point::new(0, 7), Point::new(0, 9)),
+        ("if(\n", ")\nendif()", Point::new(1, 0), Point::new(2, 7)),
+        (
+            "block()\n",
+            "endblock()",
+            Point::new(1, 0),
+            Point::new(1, 10),
+        ),
+        (
+            "while(a)\n",
+            "endwhile()",
+            Point::new(1, 0),
+            Point::new(1, 10),
+        ),
+    ] {
+        let mut parser = Parser::new();
+        parser.set_language(&language).unwrap();
+        let mut tree = parser.parse(source, None).unwrap();
+        let expected_sexp = tree.root_node().to_sexp();
+        let repaired_source = format!("{source}{suffix}");
+
+        // The insertion is exactly at the zero-width external token. Repair
+        // must discard it; undo must recreate it from the reset scanner state,
+        // rather than retain the last scanner token or insert a missing node.
+        for _ in 0..2 {
+            tree.edit(&InputEdit {
+                start_byte: source.len(),
+                old_end_byte: source.len(),
+                new_end_byte: repaired_source.len(),
+                start_position: end,
+                old_end_position: end,
+                new_end_position: repaired_end,
+            });
+            tree = parser.parse(&repaired_source, Some(&tree)).unwrap();
+            assert!(!tree.root_node().has_error(), "{repaired_source:?}");
+            assert_eq!(tree.root_node().end_position(), repaired_end);
+
+            tree.edit(&InputEdit {
+                start_byte: source.len(),
+                old_end_byte: repaired_source.len(),
+                new_end_byte: source.len(),
+                start_position: end,
+                old_end_position: repaired_end,
+                new_end_position: end,
+            });
+            tree = parser.parse(source, Some(&tree)).unwrap();
+            let root = tree.root_node();
+            assert_eq!(root.to_sexp(), expected_sexp, "{source:?}");
+            assert_eq!(root.byte_range(), 0..source.len());
+            assert_eq!(root.end_position(), end);
+            let error = root.child(0).unwrap();
+            assert!(error.is_error());
+            assert!(error.is_extra());
+            let content = error.child(error.child_count() - 1).unwrap();
+            assert_eq!(content.kind(), "bracket_argument_content");
+            assert_eq!(content.kind_id(), 37);
+            assert_eq!(content.byte_range(), source.len()..source.len());
+            assert_eq!(content.start_position(), end);
+            assert_eq!(content.end_position(), end);
+            assert!(content.is_named());
+            assert!(!content.is_missing());
+            assert!(!content.is_extra());
+            assert!(!content.has_error());
+            assert_eq!(content.child_count(), 0);
         }
     }
 }
