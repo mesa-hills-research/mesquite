@@ -16,64 +16,62 @@ fn is_space(c: i32) -> bool {
     matches!(c, 0x09..=0x0d | 0x20)
 }
 
-fn is_alnum(c: i32) -> bool {
-    (b'0' as i32..=b'9' as i32).contains(&c)
-        || (b'A' as i32..=b'Z' as i32).contains(&c)
-        || (b'a' as i32..=b'z' as i32).contains(&c)
-}
-
 impl ExternalScanner for Scanner {
     fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
         if valid_symbols[ERROR_RECOVERY] {
             return false;
         }
 
-        if is_space(lexer.lookahead()) && valid_symbols[DESCENDANT_OP] {
+        // Unlike C's field access, lookahead is a dynamic call. Cache it until
+        // advancing, including across mark_end and result_symbol updates.
+        let mut lookahead = lexer.lookahead();
+        if is_space(lookahead) && valid_symbols[DESCENDANT_OP] {
             lexer.set_result_symbol(DESCENDANT_OP as u16);
 
-            lexer.advance(true);
-            while is_space(lexer.lookahead()) {
+            loop {
                 lexer.advance(true);
+                lookahead = lexer.lookahead();
+                if !is_space(lookahead) {
+                    break;
+                }
             }
             lexer.mark_end();
 
-            if lexer.lookahead() == '#' as i32
-                || lexer.lookahead() == '.' as i32
-                || lexer.lookahead() == '[' as i32
-                || lexer.lookahead() == '-' as i32
-                || lexer.lookahead() == '*' as i32
-                || is_alnum(lexer.lookahead())
-            {
-                return true;
-            }
-
-            if lexer.lookahead() == ':' as i32 {
-                lexer.advance(false);
-                if is_space(lexer.lookahead()) {
-                    return false;
+            match lookahead {
+                // Selector prefixes (# . [ - *) and C-locale iswalnum.
+                0x23 | 0x2e | 0x5b | 0x2d | 0x2a | 0x30..=0x39 | 0x41..=0x5a | 0x61..=0x7a => {
+                    return true;
                 }
-                loop {
-                    if lexer.lookahead() == ';' as i32
-                        || lexer.lookahead() == '}' as i32
-                        || lexer.eof()
-                    {
+                0x3a => {
+                    lexer.advance(false);
+                    lookahead = lexer.lookahead();
+                    if is_space(lookahead) {
                         return false;
                     }
-                    if lexer.lookahead() == '{' as i32 {
-                        return true;
+                    loop {
+                        if matches!(lookahead, 0x3b | 0x7d) || lexer.eof() {
+                            return false;
+                        }
+                        if lookahead == 0x7b {
+                            return true;
+                        }
+                        lexer.advance(false);
+                        lookahead = lexer.lookahead();
                     }
-                    lexer.advance(false);
                 }
+                _ => {}
             }
         }
 
         if valid_symbols[PSEUDO_CLASS_SELECTOR_COLON] {
-            while is_space(lexer.lookahead()) {
+            while is_space(lookahead) {
                 lexer.advance(true);
+                lookahead = lexer.lookahead();
             }
-            if lexer.lookahead() == ':' as i32 {
+            if lookahead == 0x3a {
                 lexer.advance(false);
-                if lexer.lookahead() == ':' as i32 {
+                lookahead = lexer.lookahead();
+                if lookahead == 0x3a {
                     return false;
                 }
                 lexer.mark_end();
@@ -84,24 +82,26 @@ impl ExternalScanner for Scanner {
                 // its unconditional semicolon/closing-brace loop terminators,
                 // even while inside a comment.
                 let mut in_comment = false;
-                while lexer.lookahead() != ';' as i32
-                    && lexer.lookahead() != '}' as i32
-                    && !lexer.eof()
-                {
+                while !matches!(lookahead, 0x3b | 0x7d) && !lexer.eof() {
                     lexer.advance(false);
-                    if lexer.lookahead() == '{' as i32 && !in_comment {
-                        return true;
-                    }
-                    if lexer.lookahead() == '/' as i32 && !in_comment {
-                        lexer.advance(false);
-                        if lexer.lookahead() == '*' as i32 {
-                            in_comment = true;
+                    lookahead = lexer.lookahead();
+                    match lookahead {
+                        0x7b if !in_comment => return true,
+                        0x2f if !in_comment => {
+                            lexer.advance(false);
+                            lookahead = lexer.lookahead();
+                            if lookahead == 0x2a {
+                                in_comment = true;
+                            }
                         }
-                    } else if lexer.lookahead() == '*' as i32 && in_comment {
-                        lexer.advance(false);
-                        if lexer.lookahead() == '/' as i32 {
-                            in_comment = false;
+                        0x2a if in_comment => {
+                            lexer.advance(false);
+                            lookahead = lexer.lookahead();
+                            if lookahead == 0x2f {
+                                in_comment = false;
+                            }
                         }
+                        _ => {}
                     }
                 }
 
@@ -128,7 +128,7 @@ pub(crate) fn create() -> Box<dyn ExternalScanner> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
     #[derive(Debug, PartialEq, Eq)]
     enum Event {
@@ -144,10 +144,12 @@ mod tests {
         end: Option<usize>,
         symbol: u16,
         events: RefCell<Vec<Event>>,
+        lookahead_calls: Cell<usize>,
     }
 
     impl Lexer for TestLexer {
         fn lookahead(&self) -> i32 {
+            self.lookahead_calls.set(self.lookahead_calls.get() + 1);
             self.input.get(self.position).copied().unwrap_or(0)
         }
 
@@ -195,6 +197,7 @@ mod tests {
             end: None,
             symbol: u16::MAX,
             events: RefCell::new(Vec::new()),
+            lookahead_calls: Cell::new(0),
         };
         let accepted = create().scan(&mut lexer, &valid_symbols);
         (accepted, lexer)
@@ -315,6 +318,47 @@ mod tests {
                 Event::Eof(1),
             ]
         );
+    }
+
+    #[test]
+    fn lookahead_is_read_once_per_visited_position() {
+        for input in [
+            "",
+            " ",
+            ".class",
+            "\0",
+            "é",
+            " \t.class",
+            " :hover {",
+            " :hover",
+            " : value",
+            " \t+value",
+            "::before {",
+            ":x/* { */value {",
+            ":x/* ; */value {",
+            ":x/* } */value {",
+            ":x/* unterminated",
+            ":x/",
+            ":x/* *",
+            ":x/**/{",
+            ":\0x{",
+        ] {
+            for flags in [
+                [false, false, false],
+                [false, true, false],
+                [true, false, false],
+                [true, true, false],
+            ] {
+                let (_, lexer) = scan(input, flags);
+                assert_eq!(
+                    lexer.lookahead_calls.get(),
+                    lexer.position + 1,
+                    "{input:?} {flags:?}"
+                );
+            }
+        }
+        let (_, lexer) = scan(" :hover {", [true, true, true]);
+        assert_eq!(lexer.lookahead_calls.get(), 0);
     }
 
     #[test]
