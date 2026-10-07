@@ -222,22 +222,35 @@ fn should_treat_as_wspace(character: i32) -> bool {
     is_space(character) || character == ';' as i32
 }
 
+// 0: not an operator; 1: ordinary head/continuation; 2: dot; 3: slash/star.
+// Bit zero is also exactly the C OPERATOR_SYMBOLS terminator class. Dot and
+// slash/star need separate continuation rules for custom operators.
+const ASCII_OPERATORS: [u8; 128] = {
+    let mut classes = [0; 128];
+    let normal = b"=-+!%<>&|^?~";
+    let mut i = 0;
+    while i < normal.len() {
+        classes[normal[i] as usize] = 1;
+        i += 1;
+    }
+    classes[b'.' as usize] = 2;
+    classes[b'*' as usize] = 3;
+    classes[b'/' as usize] = 3;
+    classes
+};
+
 #[inline]
 fn is_legal_custom_operator(char_idx: usize, first_char: i32, cur_char: i32) -> bool {
-    let is_first_char = char_idx == 0;
-    if cur_char < 0x80 {
-        return match cur_char {
-            // = - + ! % < > & | ^ ? ~
-            0x3d | 0x2d | 0x2b | 0x21 | 0x25 | 0x3c | 0x3e | 0x26 | 0x7c | 0x5e | 0x3f | 0x7e => {
-                true
-            }
-            0x2e => is_first_char || first_char == '.' as i32,
-            // /* and // cannot start custom operators.
-            0x2a | 0x2f => char_idx != 1 || first_char != '/' as i32,
+    if (0..128).contains(&cur_char) {
+        match ASCII_OPERATORS[cur_char as usize] {
+            1 => true,
+            2 => char_idx == 0 || first_char == 0x2e,
+            3 => char_idx != 1 || first_char != 0x2f,
             _ => false,
-        };
+        }
+    } else {
+        is_legal_non_ascii_operator(char_idx == 0, cur_char)
     }
-    is_legal_non_ascii_operator(is_first_char, cur_char)
 }
 
 #[inline(never)]
@@ -278,22 +291,8 @@ fn is_legal_non_ascii_operator(is_first_char: bool, cur_char: i32) -> bool {
 
 /// Whether the switch (including its intentional fallthroughs) accepts a terminator.
 fn legal_terminator(character: i32, illegal: IllegalTerminatorGroup) -> bool {
-    let operator_symbol = matches!(
-        character,
-        0x2f | 0x3d
-            | 0x2d
-            | 0x2b
-            | 0x21
-            | 0x2a
-            | 0x25
-            | 0x3c
-            | 0x3e
-            | 0x26
-            | 0x7c
-            | 0x5e
-            | 0x3f
-            | 0x7e
-    );
+    let operator_symbol =
+        (0..128).contains(&character) && ASCII_OPERATORS[character as usize] & 1 != 0;
     if operator_symbol && illegal == OperatorSymbols {
         return false;
     }
@@ -311,6 +310,7 @@ fn legal_terminator(character: i32, illegal: IllegalTerminatorGroup) -> bool {
 
 // These six keywords have disjoint first characters and never overlap a
 // custom operator. Once the head is known there is no candidate set to filter.
+#[inline(never)]
 fn eat_keyword(lexer: &mut ScanLexer<'_>, valid: &[bool; 34], mark_end: bool) -> Option<Token> {
     let (text, token): (&[u8], Token) = match lexer.lookahead() {
         0x63 => (b"catch", CatchKeyword),
@@ -340,6 +340,19 @@ fn eat_keyword(lexer: &mut ScanLexer<'_>, valid: &[bool; 34], mark_end: bool) ->
     Some(token)
 }
 
+// The six disjoint keyword heads can reject disabled tokens before entering
+// the matching loop. All other lowercase heads except `a` have no candidates.
+const KEYWORD_HEADS: [Option<Token>; 26] = {
+    let mut heads = [None; 26];
+    heads[(b'c' - b'a') as usize] = Some(CatchKeyword);
+    heads[(b'd' - b'a') as usize] = Some(DefaultKeyword);
+    heads[(b'e' - b'a') as usize] = Some(ElseKeyword);
+    heads[(b'r' - b'a') as usize] = Some(RethrowsKeyword);
+    heads[(b't' - b'a') as usize] = Some(ThrowsKeyword);
+    heads[(b'w' - b'a') as usize] = Some(WhereKeyword);
+    heads
+};
+
 #[inline]
 fn eat_operators(
     lexer: &mut ScanLexer<'_>,
@@ -348,6 +361,25 @@ fn eat_operators(
     immediate: bool,
     prior_char: i32,
 ) -> Option<Token> {
+    if prior_char == 0 && (0x61..=0x7a).contains(&lexer.lookahead()) {
+        if lexer.lookahead() == 0x61 {
+            return if valid[AsKeyword as usize]
+                || valid[AsQuest as usize]
+                || valid[AsBang as usize]
+                || valid[AsyncKeyword as usize]
+            {
+                eat_as_operator(lexer, valid, mark_end)
+            } else {
+                None
+            };
+        }
+        let token = KEYWORD_HEADS[(lexer.lookahead() - 0x61) as usize]?;
+        return if valid[token as usize] {
+            eat_keyword(lexer, valid, mark_end)
+        } else {
+            None
+        };
+    }
     // Member-access dots dominate successful operator scans. Avoid setting up
     // custom/reserved candidates unless the next character can extend the dot.
     if prior_char == 0 && lexer.lookahead() == 0x2e && valid[DotOperator as usize] {
@@ -364,6 +396,22 @@ fn eat_operators(
         }
         return eat_operator_candidates(lexer, valid, mark_end, immediate, 0x2e);
     }
+    if prior_char == 0 && lexer.lookahead() == 0x3d && valid[EqualSign as usize] {
+        lexer.advance(false);
+        let c = lexer.lookahead();
+        if !(c == 0x3d && valid[EqEq as usize]
+            || valid[CustomOperator as usize] && is_legal_custom_operator(1, 0x3d, c))
+        {
+            if legal_terminator(c, OperatorSymbols) {
+                if mark_end {
+                    lexer.mark_end();
+                }
+                return Some(EqualSign);
+            }
+            return None;
+        }
+        return eat_operator_candidates(lexer, valid, mark_end, immediate, 0x3d);
+    }
     eat_operator_candidates(lexer, valid, mark_end, immediate, prior_char)
 }
 
@@ -379,13 +427,6 @@ fn eat_operator_candidates(
     } else {
         prior_char
     };
-    if prior_char == 0 && (0x61..=0x7a).contains(&first) {
-        return if first == 0x61 {
-            eat_as_operator(lexer, valid, mark_end)
-        } else {
-            eat_keyword(lexer, valid, mark_end)
-        };
-    }
     // Every non-keyword fixed operator has at most two characters. At each
     // position there is at most one completion and one longer candidate; the
     // C candidate array can therefore be represented by these two options.
@@ -513,6 +554,7 @@ const RESERVED_PACKED: [u32; RESERVED_OPS.len()] = {
 
 // The only overlapping keyword family is as / as? / as! / async. A shorter
 // match remains available if an enabled longer spelling later fails.
+#[inline(never)]
 fn eat_as_operator(lexer: &mut ScanLexer<'_>, valid: &[bool; 34], mark_end: bool) -> Option<Token> {
     if !valid[AsKeyword as usize]
         && !valid[AsQuest as usize]
@@ -1173,6 +1215,38 @@ mod tests {
         ContinueNothing
     }
 
+    fn reference_legal_terminator(character: i32, illegal: IllegalTerminatorGroup) -> bool {
+        let operator_symbol = matches!(
+            character,
+            0x2f | 0x3d
+                | 0x2d
+                | 0x2b
+                | 0x21
+                | 0x2a
+                | 0x25
+                | 0x3c
+                | 0x3e
+                | 0x26
+                | 0x7c
+                | 0x5e
+                | 0x3f
+                | 0x7e
+        );
+        if operator_symbol && illegal == OperatorSymbols {
+            return false;
+        }
+        if (operator_symbol || character == '.' as i32) && illegal == OperatorOrDot {
+            return false;
+        }
+        if is_alnum(character) && illegal == Alphanumeric {
+            return false;
+        }
+        if !is_space(character) && illegal == NonWhitespace {
+            return false;
+        }
+        true
+    }
+
     // Keep C's candidate-array algorithm as an independent test model. Besides
     // the returned token, the tests compare every advance and mark_end call.
     fn reference_eat_operators(
@@ -1215,7 +1289,8 @@ mod tests {
                 let op_idx = possible_operators[candidate_idx];
                 let text = OPERATORS[op_idx];
                 if str_idx == text.len() {
-                    if legal_terminator(lexer.lookahead(), OP_ILLEGAL_TERMINATORS[op_idx]) {
+                    if reference_legal_terminator(lexer.lookahead(), OP_ILLEGAL_TERMINATORS[op_idx])
+                    {
                         full_match = Some(op_idx);
                         if mark_end {
                             lexer.mark_end();
@@ -1294,6 +1369,27 @@ mod tests {
             return Some(CustomOperator);
         }
         None
+    }
+
+    #[test]
+    fn ascii_operator_classes_match_c_predicates() {
+        for c in -1..=128 {
+            for group in [Alphanumeric, OperatorSymbols, OperatorOrDot, NonWhitespace] {
+                assert_eq!(
+                    legal_terminator(c, group),
+                    reference_legal_terminator(c, group)
+                );
+            }
+            for first in 0..128 {
+                for position in 0..3 {
+                    assert_eq!(
+                        is_legal_custom_operator(position, first, c),
+                        reference_is_legal_custom_operator(position, first, c),
+                        "first={first}, position={position}, c={c}",
+                    );
+                }
+            }
+        }
     }
 
     #[test]
