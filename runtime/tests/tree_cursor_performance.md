@@ -79,16 +79,78 @@ so this needed no unsafe or narrower node IDs. It reduced StackLink from 32 to
 runtime still did not beat updated main (both measured about 0.917 port/C), so
 this experiment was also withdrawn.
 
-## Final state
+## Retained optimization: fuse stack-slot replacement with reductions
 
-The branch retains **only regression tests and this investigation report**.
-Production parser and stack code match main `de86b49`; there are no new runtime
-algorithms, inlining policies, layout changes, unsafe code, or grammar changes.
-Main itself already measures below the requested overall 1.00 port/C target.
-There is no distinct current-branch speedup to submit through the optimization
-gate, and the earlier measurements must not be used to claim one.
+A fresh parse-only profile against `298df50` still showed 5.4% self time in
+`ts_stack_push`, 2.9% in the longer owned-pop path, and roughly 1% each in
+renumbering, trailing-extra removal, and version-status bookkeeping. The
+committed reduction already transferred child ownership, but still removed its
+last stack slot and immediately reconstructed a new node in that same slot.
 
-The retained tests exercise the now-shared ownership-transfer implementation:
-child-handle transfer, predecessor reference counts, extras/nulls, zero-count
-reductions, shared/short/branching fallback, and preservation of head scanner
-state, summary, and error baseline compared with pop-then-renumber.
+The retained implementation now:
+
+- Specializes a committed unary reduction with a unique, single-link top and no
+  trailing extra. It moves the child into the constructor without moving the
+  stack head, recycling its slot, or rebuilding the predecessor link.
+- Preflights longer committed prefixes exactly as before, then preserves the
+  last removed slot for the parent. Other slots are recycled in the same order;
+  the final arena/head/free-list state matches separate pop-then-push. Zero-child
+  reductions still add a new slot.
+- Computes cumulative position, error cost, node count, and dynamic precedence
+  from the predecessor and the new parent, using the same wrapping arithmetic
+  and subtree accessors as normal push. Head scanner state, summary, status,
+  and error baseline are unchanged.
+- Keeps shared, branching, inactive, and incomplete prefixes on the general
+  graph traversal. The unary shortcut delegates extra-bearing tops to the
+  longer-prefix path. Neither shortcut changes progress checkpoints.
+- Exposes no-op renumbering as a small inline wrapper, leaving actual version
+  removal out of line, and inlines version-status computation. Trailing-extra
+  removal also stays inline (now shared with main).
+
+The constructor is called only after eligibility is proven and must return a
+non-null parent. There are no new unsafe blocks, dependencies, grammar changes,
+public API changes, or changes to cursor traversal. The separate owned-pop
+implementation remains test-only as an independent reference for stack-state
+comparisons.
+
+### Final benchmark against merged main `4ab0fd1`
+
+Main advanced during development; its child-summary and inline-leaf changes
+were merged before the final measurements. Three consecutive pinned benchmark
+runs on the final production code reported:
+
+| Language | Main | Run 1 | Run 2 | Run 3 |
+| --- | ---: | ---: | ---: | ---: |
+| C | 0.85 | 0.82 | 0.83 | 0.82 |
+| C++ | 0.91 | 0.87 | 0.87 | 0.87 |
+| Go | 0.85 | 0.82 | 0.82 | 0.82 |
+| Java | 0.82 | 0.77 | 0.78 | 0.78 |
+| JavaScript | 0.88 | 0.83 | 0.84 | 0.83 |
+| Python | 0.84 | 0.80 | 0.80 | 0.80 |
+| Rust | 0.84 | 0.80 | 0.79 | 0.79 |
+| TSX | 0.84 | 0.81 | 0.80 | 0.81 |
+| TypeScript | 0.86 | 0.83 | 0.82 | 0.82 |
+| **Overall port/C** | **0.854** | **0.818** | **0.817** | **0.816** |
+
+The median overall ratio is **0.817**, about **4.3% less parse time than main**
+(`1 - 0.817 / 0.854`), beyond the reported 1.9% noise threshold. All nine
+languages improved. This is a new gain over merged main, unlike the historical
+experiments above.
+
+### Validation
+
+- Full oracle gate: **4,712/4,712 pass**, no failures or skips,
+  `incremental=7 queries=on`, including complete trees and progress counts.
+- `cargo test --workspace`: all tests pass, including 203 runtime unit tests
+  and both runtime integration tests.
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean.
+- New direct tests compare complete stack snapshots against pop-then-push for
+  unary and multi-child replacements, including nulls, extras, zero-count
+  reductions, cumulative headers, predecessor counts, and head metadata. They
+  also check child transfer without retaining and unchanged rejected paths.
+- Existing reduction tests compare committed and general paths, including
+  fragility, dynamic precedence, extras, empty nodes, and error baselines.
+
+The host's exhaustive kernel and fresh-repository checks remain merge-time
+validation; the local gate result does not claim to include those additional
+sets.
