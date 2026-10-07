@@ -346,7 +346,7 @@ impl ExternalScanner for Scanner {
         // invalid handlers: stars, underscores and fences still perform their
         // original advances and marks even when no token can be returned.
         if std::ptr::eq(self.modes.text.as_slice(), valid_symbols) {
-            self.scan_mode::<TEXT_SYMBOLS>(lexer, Symbols(valid_symbols))
+            self.scan_text(lexer)
         } else if std::ptr::eq(self.modes.code.as_slice(), valid_symbols) {
             self.scan_mode::<CODE_SYMBOLS>(lexer, Symbols(valid_symbols))
         } else if std::ptr::eq(self.modes.block_line.as_slice(), valid_symbols) {
@@ -469,10 +469,72 @@ impl<'a> ScanLexer<'a> {
     }
 }
 
+// A conservative low-seven-bit filter. Non-ASCII aliases may take the slow
+// path; only the full code point is dispatched there.
+const TEXT_ACTIVE: [bool; 128] = {
+    let mut active = [false; 128];
+    active[0] = true;
+    active[b' ' as usize] = true;
+    active[b'\t' as usize] = true;
+    active[b'\r' as usize] = true;
+    active[b'\n' as usize] = true;
+    active[b'`' as usize] = true;
+    active[b'~' as usize] = true;
+    active[b'*' as usize] = true;
+    active[b'_' as usize] = true;
+    active
+};
+
+// A conservative run boundary: Unicode aliases are simply dispatched by the
+// outer loop, which still compares full code points.
+const TABLE_HEADER_BOUNDARY: [bool; 128] = {
+    let mut boundary = [false; 128];
+    boundary[0] = true;
+    boundary[b'\t' as usize] = true;
+    boundary[b'\r' as usize] = true;
+    boundary[b'\n' as usize] = true;
+    boundary[b'|' as usize] = true;
+    boundary[b'\\' as usize] = true;
+    boundary
+};
+
 impl Scanner {
-    // Choose the mode before calling the lexer. The text entry need not keep
-    // a dynamic validity slice live across lexer calls; outlining its uncommon
-    // matching, newline and delimiter paths keeps the rejection frame small.
+    // Keep ordinary text rejection in the external entry: it needs no cached
+    // lexer on the stack, validity slice, or delimiter-dispatch frame. C's star,
+    // underscore and fence attempts still advance even when their tokens are
+    // invalid, so those characters must always reach the full scanner.
+    #[inline(always)]
+    fn scan_text(&mut self, lexer: &mut dyn Lexer) -> bool {
+        let mut lookahead = lexer.lookahead();
+        if self.snapshot[STATE] & STATE_MATCHING == 0 && lookahead != 0 {
+            if lookahead == i32::from(b' ') {
+                self.snapshot[COLUMN] = self.snapshot[COLUMN].wrapping_add(1) % 4;
+                self.snapshot[INDENTATION] = self.snapshot[INDENTATION].wrapping_add(1);
+                lexer.advance(false);
+                lookahead = lexer.lookahead();
+                // C checks EOF only before indentation. After a space, both
+                // actual EOF and an embedded NUL take ordinary text rejection.
+                if lookahead == 0 {
+                    return false;
+                }
+            }
+            if !TEXT_ACTIVE[lookahead as usize & 127] {
+                return false;
+            }
+        }
+        self.scan_text_slow(lexer, lookahead)
+    }
+
+    #[inline(never)]
+    fn scan_text_slow(&mut self, lexer: &mut dyn Lexer, lookahead: i32) -> bool {
+        self.scan_inner::<TEXT_SYMBOLS>(
+            &mut ScanLexer { inner: lexer, lookahead },
+            Symbols(&TEXT_FLAGS),
+        )
+    }
+
+    // Choose the other modes before calling the lexer. Their fixed entries
+    // need not keep a dynamic validity slice live across lexer calls.
     #[inline(never)]
     fn scan_mode<const FLAGS: u64>(
         &mut self,
@@ -1385,6 +1447,22 @@ impl Scanner {
         false
     }
 
+    // Isolate the tight run from the table's cell counters and delimiter-row
+    // matching. No helper observes lookahead until this run ends, so publish
+    // the cached character once on exit rather than after every advance.
+    #[inline(never)]
+    fn consume_plain_header(lexer: &mut ScanLexer<'_>, mut column: u8) -> u8 {
+        loop {
+            column = column.wrapping_add(1);
+            lexer.inner.advance(false);
+            let c = lexer.inner.lookahead();
+            if TABLE_HEADER_BOUNDARY[c as usize & 127] {
+                lexer.lookahead = c;
+                return column % 4;
+            }
+        }
+    }
+
     fn parse_pipe_table(&mut self, lexer: &mut ScanLexer<'_>) -> bool {
         // The table-start token is zero width. All subsequent work is lookahead.
         self.mark_end(lexer);
@@ -1421,21 +1499,7 @@ impl Scanner {
                     // 256 addition followed by modulo four is equivalent to C's
                     // per-character modulo four, even for very long lines.
                     ending_pipe = false;
-                    let mut column = self.snapshot[COLUMN];
-                    loop {
-                        column = column.wrapping_add(1);
-                        // No other helpers inspect lookahead inside this run;
-                        // publish the cached character only at its boundary.
-                        lexer.inner.advance(false);
-                        let c = lexer.inner.lookahead();
-                        // Backslash and pipe differ only by bit 0x20. Unlike
-                        // C's escape predicate, this tests the full code point.
-                        if matches!(c, 0 | 0x09 | 0x0a | 0x0d) || c | 0x20 == 0x7c {
-                            lexer.lookahead = c;
-                            break;
-                        }
-                    }
-                    self.snapshot[COLUMN] = column % 4;
+                    self.snapshot[COLUMN] = Self::consume_plain_header(lexer, self.snapshot[COLUMN]);
                 }
             }
         }
@@ -2008,6 +2072,55 @@ mod tests {
     }
 
     #[test]
+    fn text_entry_filter_preserves_indentation_eof_and_unicode_aliases() {
+        fn check(input: &str, indentation: u8, column: u8) {
+            let mut fixture = Scanner::with_blocks([Block::QUOTE]);
+            fixture.snapshot[..HEADER_SIZE].copy_from_slice(&[
+                STATE_WAS_SOFT_LINE_BREAK, 0, indentation, column, 3,
+            ]);
+            let snapshot = serialized(&mut fixture);
+            let mut fast = Scanner::default();
+            fast.deserialize(&snapshot);
+            fast.simulate = true; // the external entry must clear this
+            let mut dynamic = Scanner::default();
+            dynamic.deserialize(&snapshot);
+            let mut actual = TestLexer::new(input);
+            let mut expected = TestLexer::new(input);
+            let result = fast.scan(&mut actual, &TEXT_FLAGS);
+            let reference = dynamic.scan_inner::<DYNAMIC_SYMBOLS>(
+                &mut ScanLexer::new(&mut expected), Symbols(&TEXT_FLAGS),
+            );
+            assert_eq!(result, reference, "{input:?}");
+            assert_eq!(actual.events, expected.events, "{input:?}");
+            assert_eq!(actual.position, expected.position, "{input:?}");
+            assert_eq!(actual.lookahead_calls, expected.lookahead_calls, "{input:?}");
+            assert_eq!(actual.eof_calls, expected.eof_calls, "{input:?}");
+            assert_eq!(serialized(&mut fast), serialized(&mut dynamic), "{input:?}");
+            assert_eq!(fast.simulate, dynamic.simulate, "{input:?}");
+        }
+
+        // The filter uses only seven bits, but dispatch and tab expansion must
+        // still use the complete character. Include every low-bit alias, not
+        // just printable ASCII, and wrap indentation across the initial space.
+        for base in [0, 128, 256, 0x10f000] {
+            for low in 0..128 {
+                let c = char::from_u32(base + low).unwrap();
+                for prefix in ["", " ", "  ", "\t", " \t"] {
+                    let input = format!("{prefix}{c}|b\n-|-\n");
+                    for indentation in [0, 255] {
+                        for column in [0, 3] {
+                            check(&input, indentation, column);
+                        }
+                    }
+                }
+            }
+        }
+        for input in ["", " ", "  ", "\t", " \t", "\0", " \0", "  \0", " \t\0"] {
+            check(input, 255, 3);
+        }
+    }
+
+    #[test]
     fn inline_snapshots_spill_restore_and_pop_without_changing_wire_bytes() {
         assert!(std::mem::size_of::<Scanner>() <= 64);
         let mut scanner = Scanner::default();
@@ -2315,7 +2428,10 @@ mod tests {
         // complete header, with the exact column C leaves behind on failure.
         // Include long runs, trailing spaces/pipes, tabs, escapes, embedded NUL,
         // and wide characters whose low byte is punctuation in C.
-        let alphabet = ['a', ' ', '\t', '|', '\\', '\0', 'é', '\u{17c}', '!'];
+        let alphabet = [
+            'a', ' ', '\t', '|', '\\', '\0', 'é', '!', '\u{100}', '\u{109}',
+            '\u{10a}', '\u{10d}', '\u{15c}', '\u{17c}', '\u{2009}',
+        ];
         let mut seed = 0x3141_5926u32;
         for length in [0, 1, 2, 3, 4, 31, 255, 256, 257, 1025] {
             let mut text = "x".repeat(length);
