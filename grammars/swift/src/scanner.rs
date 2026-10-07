@@ -994,6 +994,14 @@ impl ExternalScanner for Scanner {
             // Unlike most scanners, C leaves the state unchanged on empty input.
             return;
         }
+        // Almost every snapshot is zero (no raw string) or a small hash count.
+        // Decode all four bytes together when signed-char extension cannot
+        // change them; only the lower three bytes can extend into another byte.
+        let value = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
+        if value & 0x0080_8080 == 0 {
+            self.ongoing_raw_str_hash_count = value;
+            return;
+        }
         // C casts signed `char` directly to uint32_t, sign-extending high bytes.
         self.ongoing_raw_str_hash_count = ((buffer[0] as i8 as u32) << 24)
             | ((buffer[1] as i8 as u32) << 16)
@@ -1654,6 +1662,25 @@ mod tests {
         assert_eq!(scanner.ongoing_raw_str_hash_count, 0xff80_0001);
         scanner.deserialize(&[0, 0, 0, 0]);
         assert_eq!(scanner.ongoing_raw_str_hash_count, 0);
+    }
+
+    #[test]
+    fn snapshot_fast_path_preserves_signed_byte_extension() {
+        let mut scanner = Scanner::default();
+        for value in (0u32..=0xffff).chain([
+            0x8000_0000,
+            0xff00_0000,
+            0x1280_007f,
+            0x7f7f_7f7f,
+            0x8080_8080,
+            0xffff_ffff,
+            0x0080_0001,
+        ]) {
+            let bytes = value.to_be_bytes();
+            let expected = bytes.iter().fold(0u32, |n, &b| (n << 8) | (b as i8 as u32));
+            scanner.deserialize(&bytes);
+            assert_eq!(scanner.ongoing_raw_str_hash_count, expected, "{value:08x}");
+        }
     }
 
     #[test]
