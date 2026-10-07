@@ -32,27 +32,28 @@ control flow; the parser's decisions and order of operations remain unchanged.
 
 ## Pinned measurement
 
-The candidate includes main **4ab0fd1**, including its latest subtree and grammar
-cache optimizations. Three consecutive runs after final production-code polish
-reported overall port/C **0.829, 0.830, 0.830**, versus main **0.854**. The median is
-**0.830**, approximately **2.8% less parse time**, above the reported 1.9% overall
+The candidate includes main **5ede17a**, including its fused stack replacement,
+subtree and grammar-cache optimizations. Three consecutive post-merge runs
+reported overall port/C **0.791, 0.791, 0.792**, versus main **0.815**. The median is
+**0.791**, approximately **2.9% less parse time**, above the reported 1.9% overall
 noise. Every language's median improved:
 
 | Language | Main port/C | Candidate median port/C |
 | --- | ---: | ---: |
-| c | 0.85 | 0.83 |
-| cpp | 0.91 | 0.88 |
-| go | 0.85 | 0.83 |
-| java | 0.82 | 0.79 |
-| javascript | 0.88 | 0.85 |
-| python | 0.84 | 0.82 |
-| rust | 0.84 | 0.82 |
-| tsx | 0.84 | 0.82 |
-| typescript | 0.86 | 0.83 |
+| c | 0.82 | 0.81 |
+| cpp | 0.88 | 0.86 |
+| go | 0.82 | 0.79 |
+| java | 0.78 | 0.75 |
+| javascript | 0.82 | 0.79 |
+| python | 0.80 | 0.78 |
+| rust | 0.79 | 0.77 |
+| tsx | 0.80 | 0.78 |
+| typescript | 0.83 | 0.79 |
 
 Per-language values are rounded by the benchmark. Its overall value uses the
-unrounded geometric mean. An earlier post-merge run before comment/formatting
-polish measured 0.825; it is not used in the final three-run median above.
+unrounded geometric mean. Before the latest main merge, three final-code runs
+measured 0.829, 0.830, 0.830 versus main 4ab0fd1's 0.854 (2.8% less parse time).
+The post-merge numbers above show that the gain survives the new stack changes.
 
 Earlier inline-child storage, external-payload layout, lexer adapter, scanner
 cache and additional inline-hint experiments were discarded: their gains did
@@ -73,7 +74,7 @@ this retained production candidate.
   comparing trees and progress sequences and checking resumed diagnostics.
 - Existing condensation tests compare the shortcut and general algorithm for
   error costs and saved baselines, ordinary/error states and null/non-null links.
-- `cargo test -p ts_port`: **196 unit tests and both integration tests pass**.
+- `cargo test -p ts_port`: **205 unit tests and both integration tests pass**.
 - `cargo clippy --workspace --all-targets -- -D warnings`: **clean**.
 
 The full kernel/fresh-repository acceptance suite remains a host merge-time
