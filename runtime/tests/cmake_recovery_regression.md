@@ -59,7 +59,7 @@ This follow-up changes only this verification note; it introduces no deviation
 from C and no new unsafe code.
 
 
-### Revalidation of `4d6cc948` at `deff2cd`
+### Revalidation of `4d6cc948` at `ed294b1`
 
 The assigned Registry-query input still passes before any new changes. Direct
 comparison with the current C scanner confirms that the merged zero-valued
@@ -174,7 +174,7 @@ changes.
 
 ## Empty recovery-content bucket `f5e2762e`
 
-Reverified at `a08dab1`: all 16 reported inputs already pass. The merged scanner
+Reverified at `2ab898f`: all 16 reported inputs already pass. The merged scanner
 initialization/reset correction above allows `bracket_argument_content` at EOF
 without an opener, including after `a` and after skipping the newline in `if(\n`.
 This zero-width token is a real scanner token, not an inserted missing node.
@@ -193,7 +193,12 @@ The block/while cases additionally verify that a complete header remains a sibli
 of the empty recovery content when its terminating command is missing. Tree
 cursor assertions confirm that the empty token remains traversable at EOF.
 
-Checks rerun for this bucket:
+The current C source was compared directly with the Rust scanner: creation uses
+`ts_calloc`, and empty/wrong-length deserialization clears both state fields.
+The matching implementation and all regression cases were already present at
+this starting revision, so no duplicate test or behavior change was warranted.
+
+Checks rerun for this bucket at `2ab898f`:
 
 - `run_oracle(inputs = "bucket:f5e2762e")`: 16/16 pass.
 - `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs
