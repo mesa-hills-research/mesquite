@@ -98,7 +98,7 @@ the existing host-owned generated YAML lexer warning described above.
 
 ## Empty recovery-content bucket `f5e2762e`
 
-Reverified at `45453af`: all 16 reported inputs already pass. The merged scanner
+Reverified at `8a5f00e`: all 16 reported inputs already pass. The merged scanner
 initialization/reset correction above allows `bracket_argument_content` at EOF
 without an opener, including after `a` and after skipping the newline in `if(\n`.
 This zero-width token is a real scanner token, not an inserted missing node.
