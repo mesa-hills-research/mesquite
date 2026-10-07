@@ -1013,14 +1013,34 @@ impl ExternalScanner for Scanner {
     }
 
     fn serialize(&mut self, buffer: &mut [u8]) -> usize {
-        // Most tokens have no open literal/heredoc. Keep their exact two-byte
-        // C snapshot on a small path, separate from the general stack writer.
-        if self.literal_stack.is_empty() && self.open_heredocs.is_empty() {
-            if let Some(header) = buffer.get_mut(..2) {
-                header.copy_from_slice(&[0, 0]);
-                return 2;
+        // Ordinary tokens and unnested strings have fixed-width snapshots.
+        // Keep their copies independent of the variable-depth writer.
+        if self.open_heredocs.is_empty() {
+            match self.literal_stack.as_slice() {
+                [] => {
+                    let Some(bytes) = buffer.get_mut(..2) else {
+                        return 0;
+                    };
+                    bytes.copy_from_slice(&[0, 0]);
+                    return 2;
+                }
+                [literal] => {
+                    let Some(bytes) = buffer.get_mut(..7) else {
+                        return 0;
+                    };
+                    bytes.copy_from_slice(&[
+                        1,
+                        literal.kind,
+                        literal.open_delimiter,
+                        literal.close_delimiter,
+                        literal.nesting_depth as u8,
+                        u8::from(literal.allows_interpolation),
+                        0,
+                    ]);
+                    return 7;
+                }
+                _ => {}
             }
-            return 0;
         }
         self.serialize_nonempty(buffer)
     }
@@ -1029,6 +1049,29 @@ impl ExternalScanner for Scanner {
         self.has_leading_whitespace = false;
         if buffer.is_empty() || buffer == [0, 0] {
             self.reset();
+        } else if let &[
+            1,
+            kind,
+            open_delimiter,
+            close_delimiter,
+            nesting_depth,
+            interpolation,
+            0,
+        ] = buffer
+            && let Some(top) = self.literal_stack.first_mut()
+        {
+            // Restore an existing one-literal stack in place. This is the common
+            // state between a string's start, content and end tokens. Matching
+            // the entire snapshot also excludes truncated heredoc states.
+            *top = Literal {
+                kind,
+                open_delimiter,
+                close_delimiter,
+                nesting_depth: i32::from(nesting_depth),
+                allows_interpolation: interpolation != 0,
+            };
+            self.literal_stack.truncate(1);
+            self.open_heredocs.clear();
         } else {
             self.deserialize_nonempty(buffer);
         }
@@ -1359,6 +1402,87 @@ mod tests {
         assert!(scanner.open_heredocs.is_empty());
         assert_eq!(scanner.serialize(&mut buffer), 2);
         assert_eq!(&buffer[..2], &[0, 0]);
+    }
+
+    #[test]
+    fn single_literal_snapshot_fast_writer_matches_general_writer() {
+        let mut scanner = Scanner::default();
+        scanner.literal_stack.push(Literal::default());
+        for byte in 0..=u8::MAX {
+            for depth in [i32::MIN, -1, 0, 1, 255, 256, 257, i32::MAX] {
+                scanner.literal_stack[0] = Literal {
+                    kind: byte,
+                    open_delimiter: byte.wrapping_add(1),
+                    close_delimiter: byte.wrapping_add(2),
+                    nesting_depth: depth,
+                    allows_interpolation: byte % 2 == 0,
+                };
+                let mut fast = [0xab; 9];
+                let mut general = fast;
+                assert_eq!(scanner.serialize(&mut fast), 7);
+                assert_eq!(scanner.serialize_nonempty(&mut general), 7);
+                assert_eq!(fast, general);
+                assert_eq!(&fast[7..], &[0xab; 2]);
+                for length in 0..7 {
+                    let mut short = [0xab; 7];
+                    assert_eq!(scanner.serialize(&mut short[..length]), 0);
+                    assert_eq!(short, [0xab; 7]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn single_literal_snapshot_restore_discards_stale_state_and_reuses_capacity() {
+        let mut fast = Scanner::default();
+        fast.literal_stack.reserve(16);
+        let capacity = fast.literal_stack.capacity();
+        let mut general = Scanner::default();
+        for byte in 0..=u8::MAX {
+            fast.literal_stack.resize(3, Literal::default());
+            fast.open_heredocs.push(heredoc(b"STALE", true, true));
+            fast.has_leading_whitespace = true;
+            let snapshot = [
+                1,
+                byte,
+                byte.wrapping_add(1),
+                byte.wrapping_add(2),
+                byte,
+                byte,
+                0,
+            ];
+            fast.deserialize(&snapshot);
+            general.deserialize_nonempty(&snapshot);
+            assert_eq!(fast.literal_stack, general.literal_stack);
+            assert_eq!(fast.open_heredocs, general.open_heredocs);
+            assert_eq!(fast.literal_stack.capacity(), capacity);
+            assert!(!fast.has_leading_whitespace);
+            let mut canonical = [0; 7];
+            assert_eq!(fast.serialize(&mut canonical), 7);
+            assert_eq!(&canonical[..5], &snapshot[..5]);
+            assert_eq!(canonical[5], u8::from(byte != 0));
+            assert_eq!(canonical[6], 0);
+        }
+
+        // With no existing entry, use the allocating/general restore path.
+        fast.deserialize(&[]);
+        fast.deserialize(&[1, STRING_START as u8, b'"', b'"', 255, 1, 0]);
+        assert_eq!(fast.literal_stack.len(), 1);
+        assert_eq!(fast.literal_stack[0].nesting_depth, 255);
+        assert_eq!(fast.literal_stack.capacity(), capacity);
+
+        // A seven-byte prefix is not sufficient: both header counts and the
+        // full snapshot length must match before the fixed-size path is used.
+        for snapshot in [
+            &[1, 3, b'"', b'"', 1, 1, 1][..],
+            &[2, 3, b'"', b'"', 1, 1, 0][..],
+            &[1, 3, b'"', b'"', 1, 1, 0, 0][..],
+        ] {
+            fast.literal_stack.push(Literal::default());
+            fast.deserialize(snapshot);
+            assert!(fast.literal_stack.is_empty());
+            assert!(fast.open_heredocs.is_empty());
+        }
     }
 
     #[test]
