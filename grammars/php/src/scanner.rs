@@ -23,11 +23,14 @@ struct Heredoc {
     word: Vec<i32>,
 }
 
-/// The scanner's state (C's `payload`).
+/// The scanner's state (C's `payload`). C's unused, unserialized
+/// `has_leading_whitespace` flag has no bearing on token recognition.
 #[derive(Default)]
 pub(crate) struct Scanner {
-    has_leading_whitespace: bool,
-    heredocs: Vec<Heredoc>,
+    // Inactive slots retain their delimiter capacity across deserialize/pop.
+    // Only the prefix ending at heredoc_count is semantic scanner state.
+    heredoc_slots: Vec<Heredoc>,
+    heredoc_count: usize,
 }
 
 // The reference runs in the default C locale: its wide-character predicates
@@ -48,59 +51,72 @@ fn is_valid_name_char(c: i32) -> bool {
         || c >= 0x80
 }
 
-fn scan_whitespace(lexer: &mut dyn Lexer) -> bool {
+fn scan_whitespace(lexer: &mut dyn Lexer) -> Option<i32> {
+    let mut c = lexer.lookahead();
     loop {
-        while is_space(lexer.lookahead()) {
+        while is_space(c) {
             lexer.advance(false);
+            c = lexer.lookahead();
         }
 
-        if lexer.lookahead() == '/' as i32 {
+        if c != '/' as i32 {
+            return Some(c);
+        }
+        lexer.advance(false);
+        if lexer.lookahead() != '/' as i32 {
+            return None;
+        }
+        lexer.advance(false);
+        c = lexer.lookahead();
+        // The C scanner tests lookahead, not eof, here.
+        while c != 0 && c != '\n' as i32 {
             lexer.advance(false);
-            if lexer.lookahead() == '/' as i32 {
-                lexer.advance(false);
-                // The C scanner tests lookahead, not eof, here.
-                while lexer.lookahead() != 0 && lexer.lookahead() != '\n' as i32 {
-                    lexer.advance(false);
-                }
-            } else {
-                return false;
-            }
-        } else {
-            return true;
+            c = lexer.lookahead();
         }
     }
 }
 
-fn is_escapable_sequence(lexer: &mut dyn Lexer) -> bool {
-    match char::from_u32(lexer.lookahead() as u32) {
-        Some('n' | 'r' | 't' | 'v' | 'e' | 'f' | '\\' | '$' | '"') => true,
-        Some('x') => {
+fn is_escapable_sequence(lexer: &mut dyn Lexer, c: i32) -> bool {
+    match c {
+        // n r t v e f \ $ " u, and octal digits. The grammar handles
+        // invalid Unicode escapes, including "\u{$a}".
+        0x6e | 0x72 | 0x74 | 0x76 | 0x65 | 0x66 | 0x5c | 0x24 | 0x22 | 0x75 | 0x30..=0x37 => true,
+        0x78 => {
             // Even an invalid hex escape consumes the 'x' during lookahead.
             lexer.advance(false);
-            let c = lexer.lookahead();
-            is_digit(c)
-                || (b'a' as i32..=b'f' as i32).contains(&c)
-                || (b'A' as i32..=b'F' as i32).contains(&c)
+            matches!(lexer.lookahead(), 0x30..=0x39 | 0x61..=0x66 | 0x41..=0x46)
         }
-        // The grammar handles invalid Unicode escapes, including "\u{$a}".
-        Some('u') => true,
-        Some('0'..='7') => true,
         _ => false,
     }
 }
 
-fn scan_heredoc_word(lexer: &mut dyn Lexer) -> Vec<i32> {
-    let mut result = Vec::new();
-    while is_valid_name_char(lexer.lookahead()) {
-        result.push(lexer.lookahead());
+fn scan_heredoc_word(lexer: &mut dyn Lexer, word: &mut Vec<i32>) {
+    let mut c = lexer.lookahead();
+    while is_valid_name_char(c) {
+        word.push(c);
         lexer.advance(false);
+        c = lexer.lookahead();
     }
-    result
 }
 
 impl Scanner {
+    fn heredocs(&self) -> &[Heredoc] {
+        &self.heredoc_slots[..self.heredoc_count]
+    }
+
+    fn push_heredoc(&mut self) -> &mut Heredoc {
+        if self.heredoc_count == self.heredoc_slots.len() {
+            self.heredoc_slots.push(Heredoc::default());
+        }
+        let heredoc = &mut self.heredoc_slots[self.heredoc_count];
+        self.heredoc_count += 1;
+        heredoc.end_word_indentation_allowed = false;
+        heredoc.word.clear();
+        heredoc
+    }
+
     fn scan_nowdoc_string(&self, lexer: &mut dyn Lexer) -> bool {
-        let Some(heredoc) = self.heredocs.last() else {
+        let Some(heredoc) = self.heredocs().last() else {
             return false;
         };
         let mut has_consumed_content = false;
@@ -126,13 +142,22 @@ impl Scanner {
         }
 
         let mut has_content = has_consumed_content;
+        // Ordinary content cannot end the token. Defer C's per-character
+        // mark_end until a possible boundary, before any lookahead advancement.
+        // EOF has lookahead 0; an embedded NUL still needs the eof query.
         loop {
-            lexer.mark_end();
-            match char::from_u32(lexer.lookahead() as u32) {
-                Some('\n' | '\r') => return has_content,
+            let c = lexer.lookahead();
+            match c {
+                0x0a | 0x0d => {
+                    lexer.mark_end();
+                    return has_content;
+                }
                 _ => {
-                    if lexer.eof() {
-                        return false;
+                    if c == 0 {
+                        lexer.mark_end();
+                        if lexer.eof() {
+                            return false;
+                        }
                     }
                     lexer.advance(false);
                 }
@@ -150,13 +175,10 @@ impl Scanner {
     ) -> bool {
         let mut has_consumed_content = false;
 
-        if is_heredoc && let Some(heredoc) = self.heredocs.last() {
+        if is_heredoc && let Some(heredoc) = self.heredocs().last() {
             // Indentation is allowed before a closing tag, but do not consume
             // line breaks when scanning heredoc content.
-            while is_space(lexer.lookahead())
-                && lexer.lookahead() != '\r' as i32
-                && lexer.lookahead() != '\n' as i32
-            {
+            while matches!(lexer.lookahead(), 0x09 | 0x0b | 0x0c | 0x20) {
                 lexer.advance(false);
                 has_consumed_content = true;
             }
@@ -177,50 +199,59 @@ impl Scanner {
         }
 
         let mut has_content = has_consumed_content;
+        // Ordinary content cannot end the token. Defer C's per-character
+        // mark_end until a possible boundary, before any lookahead advancement.
+        // EOF has lookahead 0; an embedded NUL still needs the eof query.
         loop {
-            lexer.mark_end();
-            match char::from_u32(lexer.lookahead() as u32) {
-                Some('"') => {
+            let c = lexer.lookahead();
+            match c {
+                0x22 => {
                     if !is_heredoc && !is_execution_string {
+                        lexer.mark_end();
                         return has_content;
                     }
                     lexer.advance(false);
                 }
-                Some('`') => {
+                0x60 => {
                     if is_execution_string {
+                        lexer.mark_end();
                         return has_content;
                     }
                     lexer.advance(false);
                 }
-                Some('\n' | '\r') => {
+                0x0a | 0x0d => {
                     if is_heredoc {
+                        lexer.mark_end();
                         return has_content;
                     }
                     lexer.advance(false);
                 }
-                Some('\\') => {
+                0x5c => {
+                    lexer.mark_end();
                     lexer.advance(false);
-                    if lexer.lookahead() == '{' as i32 {
+                    let c = lexer.lookahead();
+                    if c == '{' as i32 {
                         // \{ is ordinary content; consume both characters so
                         // the brace cannot start an interpolation.
                         lexer.advance(false);
-                    } else if is_execution_string && lexer.lookahead() == '`' as i32 {
+                    } else if is_execution_string && c == '`' as i32 {
                         return has_content;
-                    } else if is_heredoc && lexer.lookahead() == '\\' as i32 {
+                    } else if is_heredoc && c == '\\' as i32 {
                         lexer.advance(false);
-                    } else if is_escapable_sequence(lexer) {
+                    } else if is_escapable_sequence(lexer, c) {
                         return has_content;
                     }
                 }
-                Some('$') => {
+                0x24 => {
+                    lexer.mark_end();
                     lexer.advance(false);
-                    if (is_valid_name_char(lexer.lookahead()) && !is_digit(lexer.lookahead()))
-                        || lexer.lookahead() == '{' as i32
-                    {
+                    let c = lexer.lookahead();
+                    if (is_valid_name_char(c) && !is_digit(c)) || c == '{' as i32 {
                         return has_content;
                     }
                 }
-                Some('-') if is_after_variable => {
+                0x2d if is_after_variable => {
+                    lexer.mark_end();
                     lexer.advance(false);
                     if lexer.lookahead() == '>' as i32 {
                         lexer.advance(false);
@@ -230,21 +261,26 @@ impl Scanner {
                     }
                 }
                 // '-' falls through to '[' in C when not after a variable.
-                Some('-' | '[') => {
+                0x2d | 0x5b => {
                     if is_after_variable {
+                        lexer.mark_end();
                         return has_content;
                     }
                     lexer.advance(false);
                 }
-                Some('{') => {
+                0x7b => {
+                    lexer.mark_end();
                     lexer.advance(false);
                     if lexer.lookahead() == '$' as i32 {
                         return has_content;
                     }
                 }
                 _ => {
-                    if lexer.eof() {
-                        return false;
+                    if c == 0 {
+                        lexer.mark_end();
+                        if lexer.eof() {
+                            return false;
+                        }
                     }
                     lexer.advance(false);
                 }
@@ -261,7 +297,6 @@ impl ExternalScanner for Scanner {
             return false;
         }
 
-        self.has_leading_whitespace = false;
         lexer.mark_end();
 
         // Preserve the C dispatch order, including the after-variable forms
@@ -292,26 +327,36 @@ impl ExternalScanner for Scanner {
 
         if valid_symbols[HEREDOC_END] {
             lexer.set_result_symbol(HEREDOC_END as u16);
-            let Some(heredoc) = self.heredocs.last() else {
+            let Some(heredoc) = self.heredocs().last() else {
                 return false;
             };
             while is_space(lexer.lookahead()) {
                 lexer.advance(true);
             }
-            let word = scan_heredoc_word(lexer);
-            if word != heredoc.word {
+            // Compare in place instead of allocating a temporary closing
+            // word. Still consume the complete name on mismatch, as C does.
+            let mut matched = true;
+            let mut length = 0;
+            let mut c = lexer.lookahead();
+            while is_valid_name_char(c) {
+                matched &= heredoc.word.get(length) == Some(&c);
+                length += 1;
+                lexer.advance(false);
+                c = lexer.lookahead();
+            }
+            if !matched || length != heredoc.word.len() {
                 return false;
             }
             lexer.mark_end();
-            self.heredocs.pop();
+            self.heredoc_count -= 1;
             return true;
         }
 
-        if !scan_whitespace(lexer) {
+        let Some(c) = scan_whitespace(lexer) else {
             return false;
-        }
+        };
 
-        if valid_symbols[EOF_TOKEN] && lexer.eof() {
+        if valid_symbols[EOF_TOKEN] && c == 0 && lexer.eof() {
             lexer.set_result_symbol(EOF_TOKEN as u16);
             return true;
         }
@@ -321,23 +366,23 @@ impl ExternalScanner for Scanner {
             while is_space(lexer.lookahead()) {
                 lexer.advance(true);
             }
-            let word = scan_heredoc_word(lexer);
-            if word.is_empty() {
+            let heredoc = self.push_heredoc();
+            scan_heredoc_word(lexer, &mut heredoc.word);
+            if heredoc.word.is_empty() {
+                self.heredoc_count -= 1;
                 return false;
             }
             lexer.mark_end();
-            self.heredocs.push(Heredoc {
-                word,
-                ..Heredoc::default()
-            });
             return true;
         }
 
         if valid_symbols[AUTOMATIC_SEMICOLON] {
-            lexer.set_result_symbol(AUTOMATIC_SEMICOLON as u16);
-            if lexer.lookahead() != '?' as i32 {
+            if c != '?' as i32 {
                 return false;
             }
+            // Failed scans do not publish a result symbol. Most calls stop
+            // above, so avoid a dynamic setter for ordinary PHP tokens.
+            lexer.set_result_symbol(AUTOMATIC_SEMICOLON as u16);
             lexer.advance(false);
             return lexer.lookahead() == '>' as i32;
         }
@@ -347,9 +392,9 @@ impl ExternalScanner for Scanner {
 
     fn serialize(&mut self, buffer: &mut [u8]) -> usize {
         let mut size = 0;
-        buffer[size] = self.heredocs.len() as u8;
+        buffer[size] = self.heredoc_count as u8;
         size += 1;
-        for heredoc in &self.heredocs {
+        for heredoc in self.heredocs() {
             let word_size = heredoc.word.len() * size_of::<i32>();
             // C deliberately rejects a state that would exactly fill the buffer,
             // and leaves any already-written prefix intact on failure.
@@ -369,8 +414,7 @@ impl ExternalScanner for Scanner {
     }
 
     fn deserialize(&mut self, buffer: &[u8]) {
-        self.has_leading_whitespace = false;
-        self.heredocs.clear();
+        self.heredoc_count = 0;
         if buffer.is_empty() {
             return;
         }
@@ -384,17 +428,16 @@ impl ExternalScanner for Scanner {
                 u32::from_ne_bytes(buffer[size..size + 4].try_into().unwrap()) as usize;
             size += 4;
             let word_size = word_length * size_of::<i32>();
-            let word = buffer[size..size + word_size]
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|bytes| i32::from_ne_bytes(*bytes))
-                .collect();
+            let heredoc = self.push_heredoc();
+            heredoc.end_word_indentation_allowed = end_word_indentation_allowed;
+            heredoc.word.extend(
+                buffer[size..size + word_size]
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|bytes| i32::from_ne_bytes(*bytes)),
+            );
             size += word_size;
-            self.heredocs.push(Heredoc {
-                end_word_indentation_allowed,
-                word,
-            });
         }
         assert_eq!(size, buffer.len());
     }
@@ -499,8 +542,7 @@ mod tests {
     fn serializes_native_endian_codepoints_and_resets_state() {
         let mut scanner = with_heredoc("OUTER");
         assert!(scan_one(&mut scanner, "é終", HEREDOC_START).0);
-        scanner.heredocs[1].end_word_indentation_allowed = true;
-        scanner.has_leading_whitespace = true;
+        scanner.heredoc_slots[1].end_word_indentation_allowed = true;
         let mut expected = vec![2];
         for (flag, tag) in [(0, "OUTER"), (1, "é終")] {
             expected.push(flag);
@@ -512,26 +554,107 @@ mod tests {
         let mut buffer = [0xcc; SERIALIZATION_BUFFER_SIZE];
         let size = scanner.serialize(&mut buffer);
         assert_eq!(&buffer[..size], expected);
-        assert!(scanner.has_leading_whitespace);
 
         let mut restored = Scanner::default();
         restored.deserialize(&buffer[..size]);
-        assert!(!restored.has_leading_whitespace);
-        assert_eq!(restored.heredocs.len(), 2);
-        assert!(restored.heredocs[1].end_word_indentation_allowed);
+        assert_eq!(restored.heredoc_count, 2);
+        assert!(restored.heredoc_slots[1].end_word_indentation_allowed);
         assert_eq!(restored.serialize(&mut buffer), size);
         assert_eq!(&buffer[..size], expected);
         restored.deserialize(&[]);
-        assert!(restored.heredocs.is_empty());
+        assert!(restored.heredocs().is_empty());
         assert_eq!(restored.serialize(&mut buffer), 1);
         assert_eq!(buffer[0], 0);
 
         // Even an empty tag from a snapshot is preserved by the C deserializer.
         restored.deserialize(&[1, 2, 0, 0, 0, 0]);
-        assert!(restored.heredocs[0].word.is_empty());
-        assert!(restored.heredocs[0].end_word_indentation_allowed);
+        assert!(restored.heredoc_slots[0].word.is_empty());
+        assert!(restored.heredoc_slots[0].end_word_indentation_allowed);
         assert_eq!(restored.serialize(&mut buffer), 6);
         assert_eq!(&buffer[..6], &[1, 1, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn heredoc_slots_reuse_words_across_restore_pop_and_reset() {
+        let mut scanner = with_heredoc("OUTER");
+        assert!(scan_one(&mut scanner, "é終", HEREDOC_START).0);
+        let pointers = [
+            scanner.heredoc_slots[0].word.as_ptr(),
+            scanner.heredoc_slots[1].word.as_ptr(),
+        ];
+        let mut buffer = [0; SERIALIZATION_BUFFER_SIZE];
+        let size = scanner.serialize(&mut buffer);
+
+        for _ in 0..4 {
+            scanner.deserialize(&buffer[..size]);
+            assert_eq!(scanner.heredoc_count, 2);
+            assert_eq!(scanner.heredoc_slots[0].word.as_ptr(), pointers[0]);
+            assert_eq!(scanner.heredoc_slots[1].word.as_ptr(), pointers[1]);
+            assert!(scan_one(&mut scanner, "é終;", HEREDOC_END).0);
+            assert!(scan_one(&mut scanner, "OUTER;", HEREDOC_END).0);
+            assert!(scanner.heredocs().is_empty());
+            // The retained slots are storage only, not serialized state.
+            let mut empty = [0xcc; SERIALIZATION_BUFFER_SIZE];
+            assert_eq!(scanner.serialize(&mut empty), 1);
+            assert_eq!(empty[0], 0);
+            scanner.deserialize(&[]);
+        }
+
+        // An empty snapshot and a failed opener must not expose stale slots.
+        assert!(!scan_one(&mut scanner, ";", HEREDOC_START).0);
+        assert!(scanner.heredocs().is_empty());
+        assert!(scan_one(&mut scanner, "NEW", HEREDOC_START).0);
+        assert_eq!(scanner.heredoc_slots[0].word.as_ptr(), pointers[0]);
+        assert_eq!(scanner.heredoc_slots[0].word, [78, 69, 87]);
+        assert!(!scan_one(&mut scanner, "OUTER;", HEREDOC_END).0);
+        assert!(scan_one(&mut scanner, "NEW;", HEREDOC_END).0);
+    }
+
+    #[test]
+    fn closing_tag_mismatch_still_consumes_the_whole_name() {
+        let mut scanner = with_heredoc("END");
+        for word in ["EN", "ENDMORE", "ENDé", "OTHER"] {
+            let (result, lexer) = scan_one(&mut scanner, &format!("{word};"), HEREDOC_END);
+            assert!(!result, "{word}");
+            assert_eq!(lexer.position, word.chars().count());
+            assert_eq!(lexer.end, 0);
+            assert_eq!(scanner.heredoc_count, 1);
+        }
+        assert!(scan_one(&mut scanner, "END;", HEREDOC_END).0);
+    }
+
+    #[test]
+    fn ordinary_string_characters_need_no_intermediate_marks_or_eof_queries() {
+        let (result, lexer) = scan_one(&mut Scanner::default(), "abc$x", ENCAPSED_STRING_CHARS);
+        assert!(result);
+        assert_eq!((lexer.end, lexer.position), (3, 4));
+        assert_eq!(
+            lexer.events.into_inner(),
+            vec![
+                Event::MarkEnd(0),
+                Event::Symbol(ENCAPSED_STRING_CHARS as u16),
+                Event::Advance(0, false),
+                Event::Advance(1, false),
+                Event::Advance(2, false),
+                Event::MarkEnd(3),
+                Event::Advance(3, false),
+            ]
+        );
+
+        let (result, lexer) = scan_one(&mut with_heredoc("END"), "abc\n", NOWDOC_STRING);
+        assert!(result);
+        assert_eq!((lexer.end, lexer.position), (3, 3));
+        assert_eq!(
+            lexer.events.into_inner(),
+            vec![
+                Event::MarkEnd(0),
+                Event::Symbol(NOWDOC_STRING as u16),
+                Event::Advance(0, false),
+                Event::Advance(1, false),
+                Event::Advance(2, false),
+                Event::MarkEnd(3),
+            ]
+        );
     }
 
     #[test]
@@ -544,11 +667,11 @@ mod tests {
         assert_eq!(scanner.serialize(&mut buffer), 0);
         assert_eq!(buffer[0], 3);
         assert_eq!(buffer[19], 0xcc);
-        scanner.heredocs[2].word.pop();
+        scanner.heredoc_slots[2].word.pop();
         assert_eq!(scanner.serialize(&mut buffer), 1020);
 
-        scanner.heredocs.pop();
-        scanner.heredocs[1].word = vec!['B' as i32; 252];
+        scanner.heredoc_count -= 1;
+        scanner.heredoc_slots[1].word = vec!['B' as i32; 252];
         assert_eq!(scanner.serialize(&mut buffer), 1023);
     }
 
@@ -569,7 +692,7 @@ mod tests {
             ]
         );
         assert!(!scan_one(&mut scanner, "OUTER;", HEREDOC_END).0);
-        assert_eq!(scanner.heredocs.len(), 2);
+        assert_eq!(scanner.heredoc_count, 2);
         let (result, lexer) = scan_one(&mut scanner, "\n\tI;", HEREDOC_END);
         assert!(result);
         assert_eq!(
@@ -584,7 +707,7 @@ mod tests {
             ]
         );
         assert!(scan_one(&mut scanner, "OUTER;", HEREDOC_END).0);
-        assert!(scanner.heredocs.is_empty());
+        assert!(scanner.heredocs().is_empty());
         assert!(!scan_one(&mut scanner, "OUTER;", HEREDOC_END).0);
         assert!(!scan_one(&mut scanner, ";", HEREDOC_START).0);
     }
@@ -632,8 +755,6 @@ mod tests {
                 Event::MarkEnd(0),
                 Event::Advance(0, false),
                 Event::Advance(1, false),
-                Event::MarkEnd(2),
-                Event::Eof(2),
                 Event::Advance(2, false),
                 Event::MarkEnd(3),
             ]
@@ -717,7 +838,7 @@ mod tests {
                 (accepted, end, position),
                 "{text:?}"
             );
-            assert_eq!(scanner.heredocs.len(), 1);
+            assert_eq!(scanner.heredoc_count, 1);
         }
     }
 
@@ -738,7 +859,7 @@ mod tests {
                 (accepted, end, position),
                 "{text:?}"
             );
-            assert_eq!(scanner.heredocs.len(), 1);
+            assert_eq!(scanner.heredoc_count, 1);
         }
         assert!(!scan_one(&mut Scanner::default(), "text\n", NOWDOC_STRING).0);
     }
@@ -793,18 +914,15 @@ mod tests {
     #[test]
     fn recovery_and_dispatch_precedence() {
         let mut scanner = with_heredoc("END");
-        scanner.has_leading_whitespace = true;
         let mut lexer = TestLexer::new("a");
         let mut valid = [true; SENTINEL_ERROR + 1];
         assert!(!scanner.scan(&mut lexer, &valid));
         assert!(lexer.events.borrow().is_empty());
-        assert!(scanner.has_leading_whitespace);
-        assert_eq!(scanner.heredocs.len(), 1);
+        assert_eq!(scanner.heredoc_count, 1);
 
         valid[SENTINEL_ERROR] = false;
         assert!(!scanner.scan(&mut lexer, &valid));
         assert_eq!(lexer.symbol, ENCAPSED_STRING_CHARS_AFTER_VARIABLE as u16);
-        assert!(!scanner.has_leading_whitespace);
 
         // EOF wins over the heredoc start when both are enabled.
         let mut lexer = TestLexer::new("");
@@ -813,6 +931,6 @@ mod tests {
         valid[HEREDOC_START] = true;
         assert!(scanner.scan(&mut lexer, &valid));
         assert_eq!(lexer.symbol, EOF_TOKEN as u16);
-        assert_eq!(scanner.heredocs.len(), 1);
+        assert_eq!(scanner.heredoc_count, 1);
     }
 }
