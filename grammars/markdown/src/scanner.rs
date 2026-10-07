@@ -262,11 +262,28 @@ impl Symbols {
         Self(bits)
     }
 
+    /// Select compile-time flags for a specialized copy of the C dispatcher,
+    /// or retain the caller's flags for the general implementation.
+    #[inline]
+    fn specialize<const FLAGS: u64>(self) -> Self {
+        if FLAGS == DYNAMIC_SYMBOLS {
+            self
+        } else {
+            Self(FLAGS)
+        }
+    }
+
     #[inline]
     fn contains(self, symbol: usize) -> bool {
         self.0 & (1 << symbol) != 0
     }
 }
+
+// All 47 real flags fit below this sentinel. The common paragraph state and
+// the scanner's fixed paragraph-interruption lookahead each get one specialized
+// dispatcher; all other token sets share the dynamic implementation.
+const DYNAMIC_SYMBOLS: u64 = u64::MAX;
+const TEXT_SYMBOLS: u64 = (1 << LINE_ENDING) | (1 << SOFT_LINE_ENDING) | (1 << TOKEN_EOF);
 
 const PARAGRAPH_SYMBOLS: Symbols = Symbols::from_flags(&PARAGRAPH_INTERRUPT_SYMBOLS);
 
@@ -316,22 +333,15 @@ impl ExternalScanner for Scanner {
         let valid_symbols = self.symbols(flags);
         self.simulate = false;
         let mut lexer = ScanLexer::new(lexer);
-        // Most calls inside a paragraph reject ordinary text. ASCII letters
-        // consume no indentation and have no character-specific block parser.
-        // If neither an indented chunk nor a table can start, and no matching
-        // or control action takes precedence, C returns false without advancing
-        // or changing any serialized state. Avoid the full dispatch frame for
-        // that case; all punctuation, whitespace and non-ASCII use scan_inner.
-        if ((lexer.lookahead() | 0x20).wrapping_sub(i32::from(b'a')) as u32) < 26
-            && !((self.snapshot[STATE] & STATE_MATCHING != 0)
-                | valid_symbols.contains(TRIGGER_ERROR)
-                | valid_symbols.contains(CLOSE_BLOCK)
-                | valid_symbols.contains(PIPE_TABLE_START)
-                | valid_symbols.contains(INDENTED_CHUNK_START))
-        {
-            return false;
+        // Most calls inside text allow only line endings and EOF. Specialize
+        // the existing C control flow, rather than skipping invalid handlers:
+        // stars, underscores and fences still perform their original advances
+        // and marks even when no token can be returned.
+        if valid_symbols.0 == TEXT_SYMBOLS {
+            self.scan_inner::<TEXT_SYMBOLS>(&mut lexer, valid_symbols)
+        } else {
+            self.scan_inner::<DYNAMIC_SYMBOLS>(&mut lexer, valid_symbols)
         }
-        self.scan_inner(&mut lexer, valid_symbols)
     }
 
     fn serialize(&mut self, buffer: &mut [u8]) -> usize {
@@ -650,12 +660,13 @@ impl Scanner {
         false
     }
 
-    fn parse_fenced_code_block(
+    fn parse_fenced_code_block<const FLAGS: u64>(
         &mut self,
         delimiter: u8,
         lexer: &mut ScanLexer<'_>,
         valid_symbols: Symbols,
     ) -> bool {
+        let valid_symbols = valid_symbols.specialize::<FLAGS>();
         let mut level = 0u8;
         while lexer.lookahead() == i32::from(delimiter) {
             self.advance(lexer);
@@ -720,7 +731,8 @@ impl Scanner {
         extra
     }
 
-    fn parse_star(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: Symbols) -> bool {
+    fn parse_star<const FLAGS: u64>(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: Symbols) -> bool {
+        let valid_symbols = valid_symbols.specialize::<FLAGS>();
         self.advance(lexer);
         self.mark_end(lexer);
         let mut star_count = 1usize;
@@ -775,11 +787,12 @@ impl Scanner {
         false
     }
 
-    fn parse_thematic_break_underscore(
+    fn parse_thematic_break_underscore<const FLAGS: u64>(
         &mut self,
         lexer: &mut ScanLexer<'_>,
         valid_symbols: Symbols,
     ) -> bool {
+        let valid_symbols = valid_symbols.specialize::<FLAGS>();
         self.advance(lexer);
         self.mark_end(lexer);
         let mut underscore_count = 1usize;
@@ -803,7 +816,8 @@ impl Scanner {
         false
     }
 
-    fn parse_block_quote(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: Symbols) -> bool {
+    fn parse_block_quote<const FLAGS: u64>(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: Symbols) -> bool {
+        let valid_symbols = valid_symbols.specialize::<FLAGS>();
         if valid_symbols.contains(BLOCK_QUOTE_START) {
             self.advance(lexer);
             self.snapshot[INDENTATION] = 0;
@@ -820,7 +834,8 @@ impl Scanner {
         false
     }
 
-    fn parse_atx_heading(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: Symbols) -> bool {
+    fn parse_atx_heading<const FLAGS: u64>(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: Symbols) -> bool {
+        let valid_symbols = valid_symbols.specialize::<FLAGS>();
         if valid_symbols.contains(ATX_H1_MARKER) && self.snapshot[INDENTATION] <= 3 {
             self.mark_end(lexer);
             let mut level = 0u16;
@@ -838,11 +853,12 @@ impl Scanner {
         false
     }
 
-    fn parse_setext_underline(
+    fn parse_setext_underline<const FLAGS: u64>(
         &mut self,
         lexer: &mut ScanLexer<'_>,
         valid_symbols: Symbols,
     ) -> bool {
+        let valid_symbols = valid_symbols.specialize::<FLAGS>();
         if valid_symbols.contains(SETEXT_H1_UNDERLINE)
             && usize::from(self.snapshot[MATCHED]) == self.block_count()
         {
@@ -898,7 +914,8 @@ impl Scanner {
         false
     }
 
-    fn parse_plus(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: Symbols) -> bool {
+    fn parse_plus<const FLAGS: u64>(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: Symbols) -> bool {
+        let valid_symbols = valid_symbols.specialize::<FLAGS>();
         if self.snapshot[INDENTATION] <= 3
             && (valid_symbols.contains(LIST_MARKER_PLUS)
                 || valid_symbols.contains(LIST_MARKER_PLUS_DONT_INTERRUPT)
@@ -948,11 +965,12 @@ impl Scanner {
         false
     }
 
-    fn parse_ordered_list_marker(
+    fn parse_ordered_list_marker<const FLAGS: u64>(
         &mut self,
         lexer: &mut ScanLexer<'_>,
         valid_symbols: Symbols,
     ) -> bool {
+        let valid_symbols = valid_symbols.specialize::<FLAGS>();
         if self.snapshot[INDENTATION] <= 3
             && (valid_symbols.contains(LIST_MARKER_PARENTHESIS)
                 || valid_symbols.contains(LIST_MARKER_DOT)
@@ -1022,7 +1040,8 @@ impl Scanner {
         false
     }
 
-    fn parse_minus(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: Symbols) -> bool {
+    fn parse_minus<const FLAGS: u64>(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: Symbols) -> bool {
+        let valid_symbols = valid_symbols.specialize::<FLAGS>();
         if self.snapshot[INDENTATION] <= 3
             && (valid_symbols.contains(LIST_MARKER_MINUS)
                 || valid_symbols.contains(LIST_MARKER_MINUS_DONT_INTERRUPT)
@@ -1110,7 +1129,8 @@ impl Scanner {
         false
     }
 
-    fn parse_html_block(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: Symbols) -> bool {
+    fn parse_html_block<const FLAGS: u64>(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: Symbols) -> bool {
+        let valid_symbols = valid_symbols.specialize::<FLAGS>();
         if !(valid_symbols.contains(HTML_BLOCK_1_START)
             || valid_symbols.contains(HTML_BLOCK_1_END)
             || valid_symbols.contains(HTML_BLOCK_2_START)
@@ -1477,7 +1497,8 @@ impl Scanner {
         true
     }
 
-    fn scan_inner(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: Symbols) -> bool {
+    fn scan_inner<const FLAGS: u64>(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: Symbols) -> bool {
+        let valid_symbols = valid_symbols.specialize::<FLAGS>();
         if valid_symbols.contains(TRIGGER_ERROR) {
             lexer.set_result_symbol(ERROR as u16);
             return true;
@@ -1523,17 +1544,17 @@ impl Scanner {
                         return true;
                     }
                 }
-                0x60 => return self.parse_fenced_code_block(b'`', lexer, valid_symbols),
-                0x7e => return self.parse_fenced_code_block(b'~', lexer, valid_symbols),
-                0x2a => return self.parse_star(lexer, valid_symbols),
-                0x5f => return self.parse_thematic_break_underscore(lexer, valid_symbols),
-                0x3e => return self.parse_block_quote(lexer, valid_symbols),
-                0x23 => return self.parse_atx_heading(lexer, valid_symbols),
-                0x3d => return self.parse_setext_underline(lexer, valid_symbols),
-                0x2b => return self.parse_plus(lexer, valid_symbols),
-                0x30..=0x39 => return self.parse_ordered_list_marker(lexer, valid_symbols),
-                0x2d => return self.parse_minus(lexer, valid_symbols),
-                0x3c => return self.parse_html_block(lexer, valid_symbols),
+                0x60 => return self.parse_fenced_code_block::<FLAGS>(b'`', lexer, valid_symbols),
+                0x7e => return self.parse_fenced_code_block::<FLAGS>(b'~', lexer, valid_symbols),
+                0x2a => return self.parse_star::<FLAGS>(lexer, valid_symbols),
+                0x5f => return self.parse_thematic_break_underscore::<FLAGS>(lexer, valid_symbols),
+                0x3e => return self.parse_block_quote::<FLAGS>(lexer, valid_symbols),
+                0x23 => return self.parse_atx_heading::<FLAGS>(lexer, valid_symbols),
+                0x3d => return self.parse_setext_underline::<FLAGS>(lexer, valid_symbols),
+                0x2b => return self.parse_plus::<FLAGS>(lexer, valid_symbols),
+                0x30..=0x39 => return self.parse_ordered_list_marker::<FLAGS>(lexer, valid_symbols),
+                0x2d => return self.parse_minus::<FLAGS>(lexer, valid_symbols),
+                0x3c => return self.parse_html_block::<FLAGS>(lexer, valid_symbols),
                 _ => {}
             }
             if !is_line_end(lexer.lookahead()) && valid_symbols.contains(PIPE_TABLE_START) {
@@ -1604,7 +1625,7 @@ impl Scanner {
                     }
                 }
                 let all_will_be_matched = usize::from(self.snapshot[MATCHED]) == self.block_count();
-                if !lexer.eof() && !self.scan_inner(lexer, PARAGRAPH_SYMBOLS) {
+                if !lexer.eof() && !self.scan_inner::<{ PARAGRAPH_SYMBOLS.0 }>(lexer, PARAGRAPH_SYMBOLS) {
                     // C restores matched_temp here, then immediately resets it.
                     self.snapshot[MATCHED] = 0;
                     self.snapshot[INDENTATION] = 0;
@@ -1820,9 +1841,9 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_text_fast_rejection_matches_full_dispatch() {
-        // Exercise both the fast path and every guard that must fall back to
-        // the C dispatcher. Compare not only tokens but all state bytes and
+    fn text_specialization_matches_dynamic_dispatch() {
+        // Exercise the common text specialization and all token flags handled
+        // by dynamic dispatch. Compare not only tokens but all state bytes and
         // lexer advances/marks, including unsuccessful speculative scans.
         let mut symbol_sets = vec![
             [false; 47],
@@ -1867,7 +1888,7 @@ mod tests {
                     let mut fast_lexer = TestLexer::new(&input);
                     let mut slow_lexer = TestLexer::new(&input);
                     let result = fast.scan(&mut fast_lexer, symbols);
-                    let expected = slow.scan_inner(
+                    let expected = slow.scan_inner::<DYNAMIC_SYMBOLS>(
                         &mut ScanLexer::new(&mut slow_lexer), Symbols::from_flags(symbols),
                     );
                     assert_eq!(result, expected, "{input:?}, {snapshot:?}");
@@ -1876,6 +1897,49 @@ mod tests {
                     assert_eq!(fast.simulate, slow.simulate, "{input:?}");
                     assert_eq!(fast_lexer.lookahead_calls, slow_lexer.lookahead_calls);
                     assert_eq!(fast_lexer.eof_calls, slow_lexer.eof_calls);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_symbol_modes_preserve_speculative_scans() {
+        fn check<const FLAGS: u64>(input: &str, snapshot: &[u8], simulate: bool) {
+            let mut fixed = Scanner::default();
+            fixed.deserialize(snapshot);
+            fixed.simulate = simulate;
+            let mut dynamic = Scanner::default();
+            dynamic.deserialize(snapshot);
+            dynamic.simulate = simulate;
+            let mut fixed_lexer = TestLexer::new(input);
+            let mut dynamic_lexer = TestLexer::new(input);
+            let actual = fixed.scan_inner::<FLAGS>(
+                &mut ScanLexer::new(&mut fixed_lexer), Symbols(FLAGS),
+            );
+            let expected = dynamic.scan_inner::<DYNAMIC_SYMBOLS>(
+                &mut ScanLexer::new(&mut dynamic_lexer), Symbols(FLAGS),
+            );
+            assert_eq!(actual, expected, "{input:?}, {snapshot:?}");
+            assert_eq!(fixed_lexer.events, dynamic_lexer.events, "{input:?}");
+            assert_eq!(fixed_lexer.lookahead_calls, dynamic_lexer.lookahead_calls);
+            assert_eq!(fixed_lexer.eof_calls, dynamic_lexer.eof_calls);
+            assert_eq!(serialized(&mut fixed), serialized(&mut dynamic), "{input:?}");
+            assert_eq!(fixed.simulate, dynamic.simulate, "{input:?}");
+        }
+        for input in [
+            "***\n", "*  ** text\n", "_ _ _\r\n", "~~~ info\n", "```info\n",
+            "````info`\n", "- item\n", "+ item\n", "123. item\n", "# Heading\n",
+            "<script>\n", "<custom a='b'>\n", "a|b\n-|-\n", "a\0|b\n-|-\n",
+            "\ncontinued text\n", "\r\n> quote\n", "\n~~~ info\n", "\n* list\n",
+            "\t text\n", "\t", "", "\0",
+        ] {
+            for state in 0..=(STATE_CLOSE_BLOCK | STATE_WAS_SOFT_LINE_BREAK | STATE_MATCHING) {
+                let mut fixture = Scanner::with_blocks([Block::QUOTE, Block::list_item(0)]);
+                fixture.snapshot[..HEADER_SIZE].copy_from_slice(&[state, 0, 4, 3, 3]);
+                let snapshot = serialized(&mut fixture);
+                for simulate in [false, true] {
+                    check::<TEXT_SYMBOLS>(input, &snapshot, simulate);
+                    check::<{ PARAGRAPH_SYMBOLS.0 }>(input, &snapshot, simulate);
                 }
             }
         }
