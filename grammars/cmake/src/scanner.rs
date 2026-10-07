@@ -269,14 +269,15 @@ mod tests {
 
         // With all tokens enabled in recovery, the initial token permits
         // content without an opener. An embedded NUL is content, not EOF.
-        for _ in 0..2 {
-            let mut lexer = TestLexer::new("text\\\0\nmore");
+        for input in ["text\\\0\nmore", "", "text", "text\\\0\nmore"] {
+            let mut lexer = TestLexer::new(input);
             assert!(scanner.scan(&mut lexer, &[true; 7]));
             assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
-            assert_eq!(lexer.end, Some(lexer.input.len()));
-            assert_eq!(lexer.position, lexer.input.len());
+            assert_eq!(lexer.end, (!input.is_empty()).then_some(input.len()));
+            assert_eq!(lexer.position, input.len());
 
-            // Reset after the successful scan must discard its content token.
+            // Reset after the successful scan must discard its content token,
+            // allowing content again even at EOF.
             scanner.deserialize(&[]);
             assert_eq!(scanner.serialize(&mut buffer), STATE_SIZE);
             assert_eq!(buffer, [0; STATE_SIZE]);
@@ -447,12 +448,14 @@ mod tests {
         restored.deserialize(&buffer[..8]);
         assert_eq!(restored.level, scanner.level);
         assert_eq!(restored.token, scanner.token);
-        for length in [0, 1, 7, 9, 16] {
-            restored.level = 42;
-            restored.token = BRACKET_COMMENT_OPEN as u32;
-            restored.deserialize(&buffer[..length]);
-            assert_eq!(restored.level, 0);
-            assert_eq!(restored.token, BRACKET_ARGUMENT_OPEN as u32);
+        for token in [BRACKET_COMMENT_OPEN as u32, scanner.token] {
+            for length in [0, 1, 7, 9, 16] {
+                restored.level = 42;
+                restored.token = token;
+                restored.deserialize(&buffer[..length]);
+                assert_eq!(restored.level, 0);
+                assert_eq!(restored.token, BRACKET_ARGUMENT_OPEN as u32);
+            }
         }
     }
 }
