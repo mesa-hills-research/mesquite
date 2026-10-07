@@ -40,6 +40,74 @@ pub(crate) struct TableEntry {
     pub actions: &'static [ParseActionEntry],
     pub is_reusable: bool,
 }
+/// Parser-local memoization of immutable grammar lookups. The full state/symbol
+/// key is checked on every hit, so direct-map collisions only cause a new scan.
+/// Reset this cache whenever the parser's language changes.
+pub(crate) struct LookupCache {
+    entries: Box<[u64; 1024]>,
+}
+
+impl Default for LookupCache {
+    fn default() -> Self {
+        Self { entries: Box::new([u64::MAX; 1024]) }
+    }
+}
+
+impl LookupCache {
+    pub fn clear(&mut self) {
+        self.entries.fill(u64::MAX);
+    }
+
+    fn lookup(&mut self, language: &Language, state: StateId, symbol: Symbol) -> u16 {
+        let key = (u32::from(state) << 16) | u32::from(symbol);
+        let index = (usize::from(state) * 31 + usize::from(symbol) * 17) & (self.entries.len() - 1);
+        let entry = &mut self.entries[index];
+        if (*entry >> 16) as u32 == key {
+            return *entry as u16;
+        }
+        let value = ts_language_lookup(language, state, symbol);
+        *entry = (u64::from(key) << 16) | u64::from(value);
+        value
+    }
+
+    pub fn table_entry(&mut self, language: &Language, state: StateId, symbol: Symbol) -> TableEntry {
+        if symbol == BUILTIN_SYM_ERROR || symbol == BUILTIN_SYM_ERROR_REPEAT {
+            return TableEntry::default();
+        }
+        ts_assert!(u32::from(symbol) < language.tables.token_count);
+        let index = self.lookup(language, state, symbol);
+        let (is_reusable, actions) = language.tables.action_list(index as usize);
+        TableEntry { actions, is_reusable }
+    }
+
+    pub fn next_state(&mut self, language: &Language, state: StateId, symbol: Symbol) -> StateId {
+        if symbol == BUILTIN_SYM_ERROR || symbol == BUILTIN_SYM_ERROR_REPEAT {
+            0
+        } else if u32::from(symbol) < language.tables.token_count {
+            match self.actions(language, state, symbol).last() {
+                Some(ParseActionEntry::Action(ParseAction::Shift { state: next_state, extra, .. })) => {
+                    if *extra { state } else { *next_state }
+                }
+                _ => 0,
+            }
+        } else {
+            self.lookup(language, state, symbol)
+        }
+    }
+
+    pub fn actions(&mut self, language: &Language, state: StateId, symbol: Symbol) -> &'static [ParseActionEntry] {
+        self.table_entry(language, state, symbol).actions
+    }
+
+    pub fn has_actions(&mut self, language: &Language, state: StateId, symbol: Symbol) -> bool {
+        self.lookup(language, state, symbol) != 0
+    }
+
+    pub fn has_reduce_action(&mut self, language: &Language, state: StateId, symbol: Symbol) -> bool {
+        matches!(self.actions(language, state, symbol).first(), Some(ParseActionEntry::Action(ParseAction::Reduce { .. })))
+    }
+}
+
 /// Internal lookaheads are needed by error recovery. No public iterator API.
 #[derive(Clone, Debug)]
 pub(crate) struct LookaheadIterator {
