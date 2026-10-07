@@ -130,3 +130,41 @@ After the workflow restarted at `60f946f`, verification completed:
 
 No code, generated files, or behavior changed; no bucket failure remains to fix.
 The unrelated languages' oracle sets were not rerun.
+
+## Stop-time verification at `8d199b0`
+
+Rechecked bucket `1b5a6fb7` on the current merged checkout before the operator
+stopped the run. All four inputs already pass; the scanner's zero-initialized
+state and full reset on invalid snapshot lengths still match the current C
+source. No additional runtime changes or duplicate regressions were needed.
+
+Checks completed during this verification:
+
+- `run_oracle(inputs = "bucket:1b5a6fb7")`: **4/4 pass**, queries enabled,
+  incremental checks off.
+- `cargo check --workspace --all-targets`: passes; only the existing warning
+  in host-owned `grammars/yaml/src/lex.rs:20` was reported.
+- `cargo test -p ts_port --test cmake_quoted_variable_recovery`: **3/3 pass**.
+- `cargo clippy -p ts_port -p ts_port_cmake --all-targets -- -D warnings`: passes.
+
+No bucket work remains. The broader oracle was not rerun in this stop-time
+verification; the all-input results above belong to their stated earlier
+revisions. No deviations from C, unsafe code, or generated-file edits were made.
+
+## Resumed verification at `0bdcd07`
+
+After the operator restarted the run, completed the deferred broader CMake
+verification on the same runtime/scanner checkout:
+
+- `run_oracle(inputs = "all", languages = "cmake")`: **270/270 gate inputs**
+  pass with incremental (`incremental=7`) and query checks; **9878/9878 fresh
+  inputs** pass with query checks, including the four assigned bucket inputs.
+- `cargo check --workspace --all-targets`: passes, with only the unchanged
+  host-owned YAML unused-assignment warning described above.
+- `cargo test -p ts_port_cmake -p ts_port`: **212 runtime unit tests**, **24 CMake
+  scanner unit tests**, and **20 integration tests** pass; doc tests pass.
+- `cargo clippy -p ts_port -p ts_port_cmake --all-targets -- -D warnings`: passes.
+
+The bucket remains fully resolved by the existing scanner initialization/reset
+fix. No additional behavior changes were needed, and no work remains for this
+assignment.
