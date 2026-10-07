@@ -78,6 +78,24 @@ including the parser regression with both fresh and reused scanner state.
 This revalidation only updates this note. No behavior changes, C deviations,
 new warnings, unsafe code, or generated-file changes were introduced.
 
+### Registry-query parser regression (`538cd80`)
+
+Bucket `4d6cc948` already passes at this starting revision. The C scanner still
+uses zero-initialization and whole-state reset, matching the merged correction;
+no additional runtime change is needed. Extended
+`cmake_quoted_variable_recovery.rs` with the reduced Registry-query expression
+`${CMAKE_ CURRENT_SOURCE_DIR}/${FILE_DIR}`. It checks that the second variable
+reference remains within the recovery content, using the same exact tree/range/
+flag assertions as the existing whitespace cases. The new case runs with fresh
+and reused scanners and through two incremental repair/restoration cycles.
+
+Validation: bucket **1/1**, CMake gate **270/270** (incremental/query checks), and
+fresh CMake **9878/9878** (query checks) pass. Both parser regressions and all
+24 CMake scanner/grammar tests pass. Workspace all-targets checking passes with
+the pre-existing host-owned YAML warning above; strict all-targets clippy for
+`ts_port` and `ts_port_cmake` passes. No new runtime behavior, C deviations,
+unsafe code, or generated-file changes are introduced.
+
 ## ERROR range bucket `e0b0bff8`
 
 Reverified at `adc3fd3`: all five reported inputs already pass with the merged
@@ -164,7 +182,7 @@ changes are introduced.
 
 ## Unterminated-call bucket `7f8795fb`
 
-Reverified at `e6417fb`: all three reported inputs already pass on the starting
+Reverified at `76f5685`: all three reported inputs already pass on the starting
 checkout with the merged scanner initialization/reset correction above. The
 current C scanner uses
 `ts_calloc` and clears both fields on empty or invalid-length snapshots, matching

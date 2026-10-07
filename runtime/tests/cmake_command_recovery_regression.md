@@ -55,14 +55,19 @@ scanners. All 7 bucket, 270 gate, and 9878 fresh inputs still pass; both integra
 tests, all 24 CMake crate tests, workspace checking, and targeted clippy pass
 (the same host-owned YAML warning remains unchanged).
 
-## Revalidation at `69f98e0`
+## Chunked-input regression and revalidation at `0413745`
 
 The assigned bucket already passes on this merged baseline. Comparing the Rust
 scanner with the current C source confirms the zero-valued initialization and
-whole-state reset described above are present and correct. Existing integration
-coverage already checks the five smallest reported inputs with fresh and reused
-scanners, including exact recovery ranges and progress-callback counts; no
-additional implementation change or duplicate test is warranted.
+whole-state reset described above are present and correct. No additional scanner
+or runtime behavior change is warranted.
+
+Extended both command-recovery integration tests to run with whole-source and
+one-byte input callbacks. All five covered inputs exercise fresh and reused
+scanners independently for each chunk size. This splits variable-reference
+punctuation, skipped whitespace, recovery content, and the final newline across
+chunks while requiring the same ERROR structure, byte/point ranges, and zero
+progress-callback counts.
 
 Checks rerun on this revision:
 
@@ -72,8 +77,9 @@ Checks rerun on this revision:
 - `cargo check --workspace --all-targets`: passes; the pre-existing warning in
   host-owned `grammars/yaml/src/lex.rs:20` is unchanged.
 - `cargo test -p ts_port_cmake`: **24 tests pass**.
-- `cargo test -p ts_port --test cmake_command_recovery`: **2 tests pass**.
+- `cargo test -p ts_port --test cmake_command_recovery`: **2 tests pass**, now
+  including one-byte input chunks.
 - `cargo clippy -p ts_port_cmake -p ts_port --all-targets -- -D warnings`: passes.
 
-This follow-up only records verification. It introduces no runtime changes,
+This follow-up adds regression coverage only. It introduces no runtime changes,
 C deviations, unsafe code, new warnings, or host-owned generated-file changes.
