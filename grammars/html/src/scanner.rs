@@ -41,61 +41,9 @@ macro_rules! tag_types {
                 NAMES[self as usize]
             }
 
-            // The scanner's zero-filled short buffer lets the whole spelling
-            // be checked with a fixed-width comparison, not a libc byte-slice
-            // comparison. Checking length also distinguishes embedded NULs in
-            // the helper's input, and excludes the prefix of a long name.
-            fn matches_short_name(self, len: usize, padded: &[u8; 16]) -> bool {
-                const PADDED_NAMES: [[u8; 16]; TagType::End as usize + 1] = {
-                    let mut names = [[0; 16]; TagType::End as usize + 1];
-                    $($({
-                        let mut i = 0;
-                        while i < $name.len() {
-                            names[TagType::$variant as usize][i] = $name[i];
-                            i += 1;
-                        }
-                    })?)*
-                    names
-                };
-                self.name().len() == len && PADDED_NAMES[self as usize] == *padded
-            }
-
-            fn for_scanned_name(name: &[u8], padded: &[u8; 16]) -> Self {
-                const MAX_BUILTIN_LENGTH: usize = 10;
-                // One candidate per slot for tag.h's fixed vocabulary. The
-                // exact comparison below is still required for custom names.
-                const LOOKUP: [TagType; 1024] = {
-                    const ENTRIES: &[(TagType, &[u8])] = &[
-                        $($((TagType::$variant, $name),)?) *
-                    ];
-                    let mut lookup = [TagType::Custom; 1024];
-                    let mut occupied = [false; 1024];
-                    let mut i = 0;
-                    while i < ENTRIES.len() {
-                        let (kind, name) = ENTRIES[i];
-                        assert!(!name.is_empty() && name.len() <= MAX_BUILTIN_LENGTH);
-                        let index = tag_name_hash(name);
-                        assert!(!occupied[index], "builtin tag hash collision");
-                        occupied[index] = true;
-                        lookup[index] = kind;
-                        i += 1;
-                    }
-                    lookup
-                };
-                if name.is_empty() || name.len() > MAX_BUILTIN_LENGTH {
-                    return Self::Custom;
-                }
-                let kind = LOOKUP[tag_name_hash(name)];
-                if kind.matches_short_name(name.len(), padded) {
-                    kind
-                } else {
-                    Self::Custom
-                }
-            }
-
-            #[cfg(test)]
             fn for_name(name: &[u8]) -> Self {
-                // Independent reference for testing the indexed lookup.
+                // A byte-slice match lets the compiler dispatch by length and
+                // bytes instead of searching all 126 entries for every tag.
                 match name {
                     $($($name => Self::$variant,)?)*
                     _ => Self::Custom,
@@ -108,16 +56,6 @@ macro_rules! tag_types {
             $($(($name, TagType::$variant),)?)*
         ];
     };
-}
-
-// These weights give distinct indices to all tag.h spellings. Const table
-// construction checks that property if the vocabulary ever changes; arbitrary
-// non-builtin names are allowed to collide and are checked against the candidate.
-const fn tag_name_hash(name: &[u8]) -> usize {
-    let first = name[0] as usize;
-    let second = name[if name.len() > 1 { 1 } else { 0 }] as usize;
-    let last = name[name.len() - 1] as usize;
-    (name.len() + first * 3 + second * 33 + last * 17) & 1023
 }
 
 tag_types! {
@@ -277,17 +215,8 @@ impl Default for Tag<'_> {
 }
 
 impl<'a> Tag<'a> {
-    #[cfg(test)]
     fn for_name(name: &'a [u8]) -> Self {
         let kind = TagType::for_name(name);
-        Self {
-            kind,
-            custom_tag_name: if kind == TagType::Custom { name } else { &[] },
-        }
-    }
-
-    fn for_scanned_name(name: &'a [u8], padded: &[u8; 16]) -> Self {
-        let kind = TagType::for_scanned_name(name, padded);
         Self {
             kind,
             custom_tag_name: if kind == TagType::Custom { name } else { &[] },
@@ -369,15 +298,14 @@ impl TagStack {
         }
     }
 
-    fn last_matches_name(&self, name: &[u8], padded: &[u8; 16]) -> bool {
+    fn last_matches_name(&self, name: &[u8]) -> bool {
         self.last().is_some_and(|tag| {
             if tag.kind == TagType::Custom {
-                tag.custom_tag_name == name
-                    && TagType::for_scanned_name(name, padded) == TagType::Custom
+                tag.custom_tag_name == name && TagType::for_name(name) == TagType::Custom
             } else {
                 // Sentinels have no spelling, and cannot match the empty
                 // custom name produced when an implicit scan reaches EOF.
-                !name.is_empty() && tag.kind.matches_short_name(name.len(), padded)
+                !name.is_empty() && tag.kind.name() == name
             }
         })
     }
@@ -525,27 +453,22 @@ fn to_upper(c: i32) -> i32 {
 // Almost all tag names fit on the stack. Use a local length and a fixed
 // buffer in that case, rather than updating a Vec and checking its capacity
 // for each character. The reusable Vec is needed only for long custom names.
-// Return the length so callers can borrow both the full zero-padded short
-// buffer (for fixed-width builtin comparisons) and the unpadded spelling.
-// Inlining keeps the short scan and those comparisons in the same frame;
-// the uncommon long-name path stays outlined.
-#[inline(always)]
-fn scan_tag_name(
+fn scan_tag_name<'a>(
     lexer: &mut dyn Lexer,
-    long_name: &mut Vec<u8>,
-    short_name: &mut [u8; 16],
+    long_name: &'a mut Vec<u8>,
+    short_name: &'a mut [u8; 16],
     mut c: i32,
-) -> usize {
-    for (i, slot) in short_name.iter_mut().enumerate() {
+) -> &'a [u8] {
+    for i in 0..short_name.len() {
         let byte = TAG_NAME_CHARS.get(c as usize).copied().unwrap_or(0);
         if byte == 0 {
-            return i;
+            return &short_name[..i];
         }
-        *slot = byte;
+        short_name[i] = byte;
         lexer.advance(false);
         c = lexer.lookahead();
     }
-    scan_long_tag_name(lexer, long_name, short_name, c).len()
+    scan_long_tag_name(lexer, long_name, short_name, c)
 }
 
 #[inline(never)]
@@ -566,6 +489,45 @@ fn scan_long_tag_name<'a>(
         lexer.advance(false);
         c = lexer.lookahead();
     }
+}
+
+// A builtin closing name normally matches its parent. Compare directly while
+// advancing; only a mismatching implicit close needs a collected spelling.
+fn scan_builtin_prefix(lexer: &mut dyn Lexer, expected: &[u8], mut c: i32) -> (usize, i32) {
+    for (i, &byte) in expected.iter().enumerate() {
+        let normalized = if byte.is_ascii_uppercase() {
+            c & !0x20
+        } else {
+            c
+        };
+        if normalized != i32::from(byte) {
+            return (i, c);
+        }
+        lexer.advance(false);
+        c = lexer.lookahead();
+    }
+    (expected.len(), c)
+}
+
+#[inline(never)]
+fn scan_name_after_prefix<'a>(
+    lexer: &mut dyn Lexer,
+    long_name: &'a mut Vec<u8>,
+    short_name: &'a mut [u8; 16],
+    prefix: &[u8],
+    mut c: i32,
+) -> &'a [u8] {
+    short_name[..prefix.len()].copy_from_slice(prefix);
+    for i in prefix.len()..short_name.len() {
+        let byte = TAG_NAME_CHARS.get(c as usize).copied().unwrap_or(0);
+        if byte == 0 {
+            return &short_name[..i];
+        }
+        short_name[i] = byte;
+        lexer.advance(false);
+        c = lexer.lookahead();
+    }
+    scan_long_tag_name(lexer, long_name, short_name, c)
 }
 
 fn scan_comment(lexer: &mut dyn Lexer) -> bool {
@@ -658,11 +620,30 @@ impl Scanner {
         }
 
         let mut short_name = [0; 16];
-        let len = scan_tag_name(lexer, &mut self.long_tag_name, &mut short_name, c);
-        let name = if len < short_name.len() {
-            &short_name[..len]
+        let expected = if is_closing_tag {
+            self.tags
+                .last()
+                .filter(|tag| tag.kind != TagType::Custom)
+                .map_or(&[][..], |tag| tag.kind.name())
         } else {
-            &self.long_tag_name[..len]
+            &[][..]
+        };
+        let name = if expected.is_empty() {
+            scan_tag_name(lexer, &mut self.long_tag_name, &mut short_name, c)
+        } else {
+            let (prefix, next) = scan_builtin_prefix(lexer, expected, c);
+            if prefix == expected.len()
+                && TAG_NAME_CHARS.get(next as usize).copied().unwrap_or(0) == 0
+            {
+                return false;
+            }
+            scan_name_after_prefix(
+                lexer,
+                &mut self.long_tag_name,
+                &mut short_name,
+                &expected[..prefix],
+                next,
+            )
         };
         if name.is_empty() && !lexer.eof() {
             return false;
@@ -670,11 +651,11 @@ impl Scanner {
         if is_closing_tag {
             // Most closing tags match their parent. Compare its spelling
             // directly instead of searching the full builtin name map.
-            if self.tags.last_matches_name(name, &short_name) {
+            if self.tags.last_matches_name(name) {
                 return false;
             }
 
-            let next_tag = Tag::for_scanned_name(name, &short_name);
+            let next_tag = Tag::for_name(name);
             // Recovery deliberately compares only types here, not custom names.
             // Only one stack entry is removed, even if the match is much deeper.
             if self.tags.contains_kind(next_tag.kind) {
@@ -683,7 +664,7 @@ impl Scanner {
                 return true;
             }
         } else if self.tags.last().is_some_and(|parent| {
-            !parent.can_contain(&Tag::for_scanned_name(name, &short_name))
+            !parent.can_contain(&Tag::for_name(name))
                 || (matches!(parent.kind, TagType::Html | TagType::Head | TagType::Body)
                     && lexer.eof())
         }) {
@@ -696,17 +677,12 @@ impl Scanner {
 
     fn scan_start_tag_name(&mut self, lexer: &mut dyn Lexer, c: i32) -> bool {
         let mut short_name = [0; 16];
-        let len = scan_tag_name(lexer, &mut self.long_tag_name, &mut short_name, c);
-        let name = if len < short_name.len() {
-            &short_name[..len]
-        } else {
-            &self.long_tag_name[..len]
-        };
+        let name = scan_tag_name(lexer, &mut self.long_tag_name, &mut short_name, c);
         if name.is_empty() {
             return false;
         }
 
-        let tag = Tag::for_scanned_name(name, &short_name);
+        let tag = Tag::for_name(name);
         let kind = tag.kind;
         self.tags.push(tag);
         lexer.set_result_symbol(match kind {
@@ -718,18 +694,39 @@ impl Scanner {
     }
 
     fn scan_end_tag_name(&mut self, lexer: &mut dyn Lexer, c: i32) -> bool {
+        let expected = self
+            .tags
+            .last()
+            .filter(|tag| tag.kind != TagType::Custom)
+            .map_or(&[][..], |tag| tag.kind.name());
+        if !expected.is_empty() {
+            let (prefix, mut next) = scan_builtin_prefix(lexer, expected, c);
+            let mut byte = TAG_NAME_CHARS.get(next as usize).copied().unwrap_or(0);
+            if prefix == 0 && byte == 0 {
+                return false;
+            }
+            let matched = prefix == expected.len() && byte == 0;
+            while byte != 0 {
+                lexer.advance(false);
+                next = lexer.lookahead();
+                byte = TAG_NAME_CHARS.get(next as usize).copied().unwrap_or(0);
+            }
+            if matched {
+                self.tags.pop();
+                lexer.set_result_symbol(END_TAG_NAME as u16);
+            } else {
+                lexer.set_result_symbol(ERRONEOUS_END_TAG_NAME as u16);
+            }
+            return true;
+        }
+
         let mut short_name = [0; 16];
-        let len = scan_tag_name(lexer, &mut self.long_tag_name, &mut short_name, c);
-        let name = if len < short_name.len() {
-            &short_name[..len]
-        } else {
-            &self.long_tag_name[..len]
-        };
+        let name = scan_tag_name(lexer, &mut self.long_tag_name, &mut short_name, c);
         if name.is_empty() {
             return false;
         }
 
-        if self.tags.last_matches_name(name, &short_name) {
+        if self.tags.last_matches_name(name) {
             self.tags.pop();
             lexer.set_result_symbol(END_TAG_NAME as u16);
         } else {
@@ -1048,45 +1045,6 @@ mod tests {
     }
 
     #[test]
-    fn indexed_tag_lookup_checks_every_byte_and_length() {
-        fn check(name: &[u8]) {
-            let mut padded = [0; 16];
-            let length = name.len().min(padded.len());
-            padded[..length].copy_from_slice(&name[..length]);
-            assert_eq!(
-                Tag::for_scanned_name(name, &padded),
-                Tag::for_name(name),
-                "{name:?}",
-            );
-        }
-
-        for &(name, _) in TAG_TYPES_BY_TAG_NAME {
-            check(name);
-            // Include same-hash mutations of the interior characters: a
-            // candidate's hash alone must never classify an arbitrary name.
-            let mut changed = name.to_vec();
-            for index in 0..name.len() {
-                for byte in 0..=u8::MAX {
-                    changed[index] = byte;
-                    check(&changed);
-                }
-                changed[index] = name[index];
-            }
-            for length in 0..name.len() {
-                check(&name[..length]);
-            }
-            for byte in [0, b'X', b'-', b':', 0xff] {
-                changed.push(byte);
-                check(&changed);
-                changed.pop();
-            }
-        }
-        for length in [0, 1, 10, 11, 15, 16, 17, 255, 256, 1024] {
-            check(&vec![b'X'; length]);
-        }
-    }
-
-    #[test]
     fn parent_name_comparison_matches_tag_classification() {
         let mut parents: Vec<_> = TAG_TYPES_BY_TAG_NAME
             .iter()
@@ -1116,17 +1074,15 @@ mod tests {
         for parent in parents {
             let stack = TagStack::from_iter([parent]);
             for &name in &names {
-                let mut padded = [0; 16];
-                padded[..name.len()].copy_from_slice(name);
                 assert_eq!(
-                    stack.last_matches_name(name, &padded),
+                    stack.last_matches_name(name),
                     parent == Tag::for_name(name),
                     "parent={parent:?}, name={name:?}",
                 );
             }
         }
         for name in names {
-            assert!(!TagStack::default().last_matches_name(name, &[0; 16]));
+            assert!(!TagStack::default().last_matches_name(name));
         }
     }
 
@@ -1555,12 +1511,7 @@ mod tests {
                 let mut short_name = [0xa5; 16];
                 let c = lexer.lookahead();
                 let capacity = long_name.capacity();
-                let len = scan_tag_name(&mut lexer, &mut long_name, &mut short_name, c);
-                let name = if len < short_name.len() {
-                    &short_name[..len]
-                } else {
-                    &long_name[..len]
-                };
+                let name = scan_tag_name(&mut lexer, &mut long_name, &mut short_name, c);
                 assert_eq!(name, expected, "{input:?}");
                 assert_eq!(lexer.position, reference.position, "{input:?}");
                 assert_eq!(lexer.calls, reference.calls, "{input:?}");
@@ -1653,6 +1604,52 @@ mod tests {
         assert_eq!(lexer.symbol, END_TAG_NAME as u16);
         assert_eq!(scanner.tags, with_tags(&["DIV"]).tags);
         assert!(!scan(&mut scanner, ">", &[END_TAG_NAME]).0);
+    }
+
+    #[test]
+    fn streamed_builtin_closes_match_collected_names() {
+        for &(parent_name, parent_kind) in TAG_TYPES_BY_TAG_NAME {
+            if parent_kind == TagType::Custom {
+                continue;
+            }
+            let spelling = std::str::from_utf8(parent_name).unwrap();
+            for prefix in [
+                spelling.to_owned(),
+                spelling.to_ascii_lowercase(),
+                spelling[..spelling.len() - 1].to_owned(),
+                String::new(),
+            ] {
+                for suffix in [">", "X>", "-tail>", "é>", "\0>", "\u{11}>"] {
+                    let input = format!("{prefix}{suffix}");
+                    let mut expected = with_tags(&[spelling]);
+                    let mut reference = TestLexer::new(&input);
+                    let mut short = [0; 16];
+                    let c = reference.lookahead();
+                    let name =
+                        scan_tag_name(&mut reference, &mut expected.long_tag_name, &mut short, c);
+                    let accepted = !name.is_empty();
+                    if accepted {
+                        if expected.tags.last_matches_name(name) {
+                            expected.tags.pop();
+                            reference.set_result_symbol(END_TAG_NAME as u16);
+                        } else {
+                            reference.set_result_symbol(ERRONEOUS_END_TAG_NAME as u16);
+                        }
+                    }
+                    let mut actual = with_tags(&[spelling]);
+                    let mut lexer = TestLexer::new(&input);
+                    let c = lexer.lookahead();
+                    assert_eq!(
+                        actual.scan_end_tag_name(&mut lexer, c),
+                        accepted,
+                        "{input:?}"
+                    );
+                    assert_eq!(actual.tags, expected.tags, "{input:?}");
+                    assert_eq!(lexer.position, reference.position, "{input:?}");
+                    assert_eq!(lexer.calls, reference.calls, "{input:?}");
+                }
+            }
+        }
     }
 
     #[test]
