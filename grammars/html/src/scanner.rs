@@ -244,11 +244,13 @@ impl<'a> Tag<'a> {
     }
 }
 
-/// Tags are kept in serialization order: one byte per builtin and a type,
-/// length byte, and spelling for customs. Long names keep their full spelling
-/// here; only serialization truncates them. A sparse index locates custom
-/// names when popping, without imposing an offset word on every builtin.
-#[derive(Default, Debug, PartialEq, Eq)]
+/// Tags are kept in serialization order after a four-byte native-endian count
+/// header: one byte per builtin and a type, length byte, and spelling for
+/// customs. Long names keep their full spelling here; only serialization
+/// truncates them. A sparse index locates custom names when popping, without
+/// imposing an offset word on every builtin. Keeping the header in the same
+/// buffer lets frequent unchanged restores compare just one byte slice.
+#[derive(Debug, PartialEq, Eq)]
 struct TagStack {
     bytes: Vec<u8>,
     custom: Vec<CustomTag>,
@@ -259,6 +261,18 @@ struct TagStack {
     // type so those reads do not decode the packed tail and custom index again.
     // Push knows the type; pop and restore refresh it after changing the stack.
     top_kind: Option<TagType>,
+}
+
+impl Default for TagStack {
+    fn default() -> Self {
+        Self {
+            bytes: vec![0; 4],
+            custom: Vec::new(),
+            depth: 0,
+            noncanonical_names: 0,
+            top_kind: None,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -279,11 +293,21 @@ impl TagStack {
     }
 
     fn clear(&mut self) {
-        self.bytes.clear();
+        self.bytes.truncate(4);
+        self.bytes[..4].fill(0);
         self.custom.clear();
         self.depth = 0;
         self.noncanonical_names = 0;
         self.top_kind = None;
+    }
+
+    fn refresh_header(&mut self) {
+        // Both u16 counts describe the full live stack. Truncating serialization
+        // overwrites the output's first count, never this live representation.
+        // Repeating the u16 in a u32 gives the same two native-endian counts on
+        // both little- and big-endian hosts.
+        let count = self.depth.min(usize::from(u16::MAX)) as u32;
+        self.bytes[..4].copy_from_slice(&(count | (count << 16)).to_ne_bytes());
     }
 
     fn refresh_top_kind(&mut self) {
@@ -345,6 +369,7 @@ impl TagStack {
             self.bytes.push(tag.kind as u8);
         }
         self.depth += 1;
+        self.refresh_header();
         self.top_kind = Some(tag.kind);
     }
 
@@ -365,11 +390,12 @@ impl TagStack {
             self.bytes.pop();
         }
         self.refresh_top_kind();
+        self.refresh_header();
     }
 
     fn iter(&self) -> impl Iterator<Item = Tag<'_>> {
         let mut custom = self.custom.iter();
-        let mut offset = 0;
+        let mut offset = 4;
         (0..self.depth).map(move |_| {
             let kind = TagType::from_byte(self.bytes[offset]);
             offset += 1;
@@ -403,7 +429,7 @@ impl TagStack {
             }
             end = custom.start;
         }
-        self.bytes[..end]
+        self.bytes[4..end]
             .iter()
             .rev()
             .any(|&byte| byte == kind as u8)
@@ -415,15 +441,10 @@ impl TagStack {
         // Long live names have a clamped length byte but retain all bytes. They
         // are not wire format: their tail can even look like additional tags.
         // Conservatively rebuild states containing any noncanonical name.
-        if self.noncanonical_names != 0 {
+        if self.noncanonical_names != 0 || self.depth > usize::from(u16::MAX) {
             return false;
         }
-        let Some((counts, bytes)) = buffer.split_first_chunk::<4>() else {
-            return buffer.is_empty() && self.is_empty();
-        };
-        usize::from(u16::from_ne_bytes([counts[0], counts[1]])) == self.depth
-            && usize::from(u16::from_ne_bytes([counts[2], counts[3]])) == self.depth
-            && bytes == self.bytes
+        (buffer.is_empty() && self.is_empty()) || buffer == self.bytes
     }
 }
 
@@ -822,26 +843,25 @@ impl ExternalScanner for Scanner {
     }
 
     fn serialize(&mut self, buffer: &mut [u8]) -> usize {
+        // The full native-endian header is maintained alongside the entries.
+        // Canonical snapshots can be copied without separately writing counts.
+        // Each entry takes at least one byte, so fitting implies a u16 depth.
+        // C always leaves the last byte of the serialization buffer unused.
+        if self.tags.noncanonical_names == 0
+            && self.tags.bytes.len() < SERIALIZATION_BUFFER_SIZE
+        {
+            let size = self.tags.bytes.len();
+            buffer[..size].copy_from_slice(&self.tags.bytes);
+            return size;
+        }
         let tag_count = self.tags.len().min(usize::from(u16::MAX)) as u16;
         let mut serialized_tag_count = 0u16;
-        // C uses memcpy for both uint16_t counts, so the format is native-endian.
         buffer[2..4].copy_from_slice(&tag_count.to_ne_bytes());
         let mut size = 4;
 
-        // Each entry occupies at least one byte, so fitting also implies the
-        // depth fits u16. C always leaves the last buffer byte unused.
-        if self.tags.noncanonical_names == 0
-            && self.tags.bytes.len() < SERIALIZATION_BUFFER_SIZE - 4
-        {
-            let count = self.tags.len() as u16;
-            buffer[..2].copy_from_slice(&count.to_ne_bytes());
-            let size = 4 + self.tags.bytes.len();
-            buffer[4..size].copy_from_slice(&self.tags.bytes);
-            return size;
-        }
         if self.tags.custom.is_empty() {
             let count = usize::from(tag_count).min(SERIALIZATION_BUFFER_SIZE - 5);
-            buffer[4..4 + count].copy_from_slice(&self.tags.bytes[..count]);
+            buffer[4..4 + count].copy_from_slice(&self.tags.bytes[4..4 + count]);
             buffer[..2].copy_from_slice(&(count as u16).to_ne_bytes());
             return 4 + count;
         }
@@ -899,7 +919,7 @@ impl Scanner {
         }
         self.tags.bytes.extend_from_slice(&buffer[4..]);
         if buffer.len() != 4 + serialized_tag_count {
-            let mut offset = 0;
+            let mut offset = 4;
             for depth in 0..serialized_tag_count {
                 if self.tags.bytes[offset] == TagType::Custom as u8 {
                     let start = offset;
@@ -925,6 +945,7 @@ impl Scanner {
             TagType::End as u8,
         );
         self.tags.depth = tag_count;
+        self.tags.refresh_header();
         self.tags.refresh_top_kind();
     }
 }
@@ -1136,7 +1157,7 @@ mod tests {
         let mut restored = Scanner::default();
         restored.deserialize(&bytes);
         assert_eq!(restored.tags.len(), usize::from(u16::MAX));
-        assert_eq!(restored.tags.bytes[..1019], scanner.tags.bytes[..1019]);
+        assert_eq!(restored.tags.bytes[4..1023], scanner.tags.bytes[4..1023]);
         assert!(
             restored
                 .tags
@@ -1145,6 +1166,54 @@ mod tests {
                 .all(|tag| tag == Tag::default())
         );
         assert_eq!(serialized(&mut restored), bytes);
+    }
+
+    #[test]
+    fn packed_header_tracks_count_boundaries_and_backtracking() {
+        let mut scanner = Scanner::default();
+        let mut snapshots = Vec::new();
+        for depth in 0..=300 {
+            let expected = header(depth, depth);
+            assert_eq!(&scanner.tags.bytes[..4], expected);
+            let snapshot = serialized(&mut scanner);
+            assert!(scanner.tags.matches(&snapshot));
+            // Header-only changes must defeat the unchanged-restore shortcut.
+            for index in 0..4 {
+                let mut altered = snapshot.clone();
+                altered[index] ^= 1;
+                assert!(!scanner.tags.matches(&altered));
+            }
+            if matches!(depth, 0 | 1 | 254 | 255 | 256 | 257 | 300) {
+                snapshots.push(snapshot);
+            }
+            scanner.tags.push(Tag::for_name(b"DIV"));
+        }
+        for depth in (0..=300).rev() {
+            scanner.tags.pop();
+            assert_eq!(&scanner.tags.bytes[..4], header(depth, depth));
+        }
+        for snapshot in snapshots.iter().rev().chain(&snapshots) {
+            scanner.deserialize(snapshot);
+            assert!(scanner.tags.matches(snapshot));
+            assert_eq!(&serialized(&mut scanner), snapshot);
+        }
+        scanner.deserialize(&[]);
+        assert_eq!(scanner.tags.bytes, [0; 4]);
+    }
+
+    #[test]
+    fn clamped_live_header_cannot_short_circuit_a_restore() {
+        let mut tags: TagStack =
+            std::iter::repeat_n(Tag::for_name(b"DIV"), usize::from(u16::MAX)).collect();
+        assert_eq!(&tags.bytes[..4], header(u16::MAX, u16::MAX));
+        assert!(tags.matches(&tags.bytes));
+        tags.push(Tag::for_name(b"P"));
+        assert_eq!(&tags.bytes[..4], header(u16::MAX, u16::MAX));
+        // Like a clamped custom-name length, clamped counts are not a canonical
+        // live representation, even if all the bytes themselves match.
+        assert!(!tags.matches(&tags.bytes));
+        tags.pop();
+        assert!(tags.matches(&tags.bytes));
     }
 
     #[test]
@@ -1384,7 +1453,7 @@ mod tests {
             let bytes = serialized(&mut scanner);
             assert_eq!(bytes, reference_serialized(&tags));
             if expected_noncanonical == 0 {
-                assert_eq!(&bytes[4..], scanner.tags.bytes);
+                assert_eq!(bytes, scanner.tags.bytes);
             }
         }
     }
@@ -1401,7 +1470,7 @@ mod tests {
         scanner.tags.push(Tag::for_name(&long_name));
         scanner.tags.push(Tag::for_name(b"P"));
         let mut snapshot = header(2, 2);
-        snapshot.extend_from_slice(&scanner.tags.bytes);
+        snapshot.extend_from_slice(&scanner.tags.bytes[4..]);
         assert!(!scanner.tags.matches(&snapshot));
         scanner.deserialize(&snapshot);
         let tags: Vec<_> = scanner.tags.iter().collect();
