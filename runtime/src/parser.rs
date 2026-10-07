@@ -515,7 +515,7 @@ pub(crate) fn ts_parser_parse(
                     }
 
                     if let Some(output) = parser.dot_graph.as_mut() {
-                        let _ = ts_stack_print_dot_graph(&parser.stack, &language, output);
+                        let _ = ts_stack_print_dot_graph(&mut parser.stack, &language, output);
                         let _ = output.write_all(b"\n\n");
                     }
 
