@@ -1,27 +1,1011 @@
-//! The grammar's external scanner: a translation of its C `scanner.c`.
-//!
-//! STUB WRITTEN BY THE TS_PORT HOST: the scanner has not been translated yet. Replace
-//! this file with a faithful translation of the C scanner. The generated `lib.rs` uses
-//! only `create()`.
+//! The HTML external scanner, translated from `src/scanner.c` and `src/tag.h`.
 
-use ts_port_tables::{ExternalScanner, Lexer};
+use ts_port_tables::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE};
 
-/// The scanner's state (C's `payload`).
-pub(crate) struct Scanner;
+// External token indices, in the order of the C TokenType enum.
+const START_TAG_NAME: usize = 0;
+const SCRIPT_START_TAG_NAME: usize = 1;
+const STYLE_START_TAG_NAME: usize = 2;
+const END_TAG_NAME: usize = 3;
+const ERRONEOUS_END_TAG_NAME: usize = 4;
+const SELF_CLOSING_TAG_DELIMITER: usize = 5;
+const IMPLICIT_END_TAG: usize = 6;
+const RAW_TEXT: usize = 7;
+const COMMENT: usize = 8;
 
-impl ExternalScanner for Scanner {
-    fn scan(&mut self, _lexer: &mut dyn Lexer, _valid_symbols: &[bool]) -> bool {
-        panic!("this grammar's external scanner has not been translated yet (scanner.rs is a stub)")
-    }
+// Keep the serialized discriminants and the name map in the same order as tag.h.
+// The two sentinels have no name-map entry. The array also permits decoding the
+// discriminants without an unsafe integer-to-enum conversion.
+macro_rules! tag_types {
+    ($($variant:ident $(: $name:literal)?),* $(,)?) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        #[repr(u8)]
+        enum TagType {
+            $($variant),*
+        }
 
-    fn serialize(&mut self, _buffer: &mut [u8]) -> usize {
-        0
-    }
+        impl TagType {
+            fn from_byte(byte: u8) -> Self {
+                const TYPES: &[TagType] = &[$(TagType::$variant),*];
+                TYPES[usize::from(byte)]
+            }
+        }
 
-    fn deserialize(&mut self, _buffer: &[u8]) {}
+        const TAG_TYPES_BY_TAG_NAME: &[(&[u8], TagType)] = &[
+            $($(($name, TagType::$variant),)?)*
+        ];
+    };
 }
 
-/// Creates a scanner (C's `tree_sitter_<grammar>_external_scanner_create`).
+tag_types! {
+    Area: b"AREA",
+    Base: b"BASE",
+    Basefont: b"BASEFONT",
+    Bgsound: b"BGSOUND",
+    Br: b"BR",
+    Col: b"COL",
+    Command: b"COMMAND",
+    Embed: b"EMBED",
+    Frame: b"FRAME",
+    Hr: b"HR",
+    Image: b"IMAGE",
+    Img: b"IMG",
+    Input: b"INPUT",
+    Isindex: b"ISINDEX",
+    Keygen: b"KEYGEN",
+    Link: b"LINK",
+    Menuitem: b"MENUITEM",
+    Meta: b"META",
+    Nextid: b"NEXTID",
+    Param: b"PARAM",
+    Source: b"SOURCE",
+    Track: b"TRACK",
+    Wbr: b"WBR",
+    EndOfVoidTags,
+
+    A: b"A",
+    Abbr: b"ABBR",
+    Address: b"ADDRESS",
+    Article: b"ARTICLE",
+    Aside: b"ASIDE",
+    Audio: b"AUDIO",
+    B: b"B",
+    Bdi: b"BDI",
+    Bdo: b"BDO",
+    Blockquote: b"BLOCKQUOTE",
+    Body: b"BODY",
+    Button: b"BUTTON",
+    Canvas: b"CANVAS",
+    Caption: b"CAPTION",
+    Cite: b"CITE",
+    Code: b"CODE",
+    Colgroup: b"COLGROUP",
+    Data: b"DATA",
+    Datalist: b"DATALIST",
+    Dd: b"DD",
+    Del: b"DEL",
+    Details: b"DETAILS",
+    Dfn: b"DFN",
+    Dialog: b"DIALOG",
+    Div: b"DIV",
+    Dl: b"DL",
+    Dt: b"DT",
+    Em: b"EM",
+    Fieldset: b"FIELDSET",
+    Figcaption: b"FIGCAPTION",
+    Figure: b"FIGURE",
+    Footer: b"FOOTER",
+    Form: b"FORM",
+    H1: b"H1",
+    H2: b"H2",
+    H3: b"H3",
+    H4: b"H4",
+    H5: b"H5",
+    H6: b"H6",
+    Head: b"HEAD",
+    Header: b"HEADER",
+    Hgroup: b"HGROUP",
+    Html: b"HTML",
+    I: b"I",
+    Iframe: b"IFRAME",
+    Ins: b"INS",
+    Kbd: b"KBD",
+    Label: b"LABEL",
+    Legend: b"LEGEND",
+    Li: b"LI",
+    Main: b"MAIN",
+    Map: b"MAP",
+    Mark: b"MARK",
+    Math: b"MATH",
+    Menu: b"MENU",
+    Meter: b"METER",
+    Nav: b"NAV",
+    Noscript: b"NOSCRIPT",
+    Object: b"OBJECT",
+    Ol: b"OL",
+    Optgroup: b"OPTGROUP",
+    Option: b"OPTION",
+    Output: b"OUTPUT",
+    P: b"P",
+    Picture: b"PICTURE",
+    Pre: b"PRE",
+    Progress: b"PROGRESS",
+    Q: b"Q",
+    Rb: b"RB",
+    Rp: b"RP",
+    Rt: b"RT",
+    Rtc: b"RTC",
+    Ruby: b"RUBY",
+    S: b"S",
+    Samp: b"SAMP",
+    Script: b"SCRIPT",
+    Section: b"SECTION",
+    Select: b"SELECT",
+    Slot: b"SLOT",
+    Small: b"SMALL",
+    Span: b"SPAN",
+    Strong: b"STRONG",
+    Style: b"STYLE",
+    Sub: b"SUB",
+    Summary: b"SUMMARY",
+    Sup: b"SUP",
+    Svg: b"SVG",
+    Table: b"TABLE",
+    Tbody: b"TBODY",
+    Td: b"TD",
+    Template: b"TEMPLATE",
+    Textarea: b"TEXTAREA",
+    Tfoot: b"TFOOT",
+    Th: b"TH",
+    Thead: b"THEAD",
+    Time: b"TIME",
+    Title: b"TITLE",
+    Tr: b"TR",
+    U: b"U",
+    Ul: b"UL",
+    Var: b"VAR",
+    Video: b"VIDEO",
+
+    Custom: b"CUSTOM",
+    End,
+}
+
+const TAG_TYPES_NOT_ALLOWED_IN_PARAGRAPHS: [TagType; 26] = {
+    use TagType::*;
+    [
+        Address, Article, Aside, Blockquote, Details, Div, Dl, Fieldset, Figcaption, Figure,
+        Footer, Form, H1, H2, H3, H4, H5, H6, Header, Hr, Main, Nav, Ol, P, Pre, Section,
+    ]
+};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Tag {
+    kind: TagType,
+    custom_tag_name: Vec<u8>,
+}
+
+impl Default for Tag {
+    fn default() -> Self {
+        Self {
+            kind: TagType::End,
+            custom_tag_name: Vec::new(),
+        }
+    }
+}
+
+impl Tag {
+    fn for_name(name: Vec<u8>) -> Self {
+        let kind = TAG_TYPES_BY_TAG_NAME
+            .iter()
+            .find_map(|&(tag_name, kind)| (tag_name == name).then_some(kind))
+            .unwrap_or(TagType::Custom);
+        Self {
+            kind,
+            custom_tag_name: if kind == TagType::Custom {
+                name
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    fn is_void(&self) -> bool {
+        (self.kind as u8) < TagType::EndOfVoidTags as u8
+    }
+
+    fn can_contain(&self, other: &Self) -> bool {
+        use TagType::*;
+        let child = other.kind;
+        match self.kind {
+            Li => child != Li,
+            Dt | Dd => child != Dt && child != Dd,
+            P => !TAG_TYPES_NOT_ALLOWED_IN_PARAGRAPHS.contains(&child),
+            Colgroup => child == Col,
+            Rb | Rt | Rp => child != Rb && child != Rt && child != Rp,
+            Optgroup => child != Optgroup,
+            Tr => child != Tr,
+            Td | Th => child != Td && child != Th && child != Tr,
+            _ => true,
+        }
+    }
+}
+
+// The reference uses the default C locale, not Unicode character classes.
+// iswspace includes vertical tab, unlike Rust's u8::is_ascii_whitespace.
+fn is_space(c: i32) -> bool {
+    matches!(c, 0x09..=0x0d | 0x20)
+}
+
+fn is_alnum(c: i32) -> bool {
+    matches!(c, 0x30..=0x39 | 0x41..=0x5a | 0x61..=0x7a)
+}
+
+fn to_upper(c: i32) -> i32 {
+    if (i32::from(b'a')..=i32::from(b'z')).contains(&c) {
+        c - i32::from(b'a' - b'A')
+    } else {
+        c
+    }
+}
+
+fn scan_tag_name(lexer: &mut dyn Lexer) -> Vec<u8> {
+    let mut tag_name = Vec::new();
+    while is_alnum(lexer.lookahead())
+        || lexer.lookahead() == i32::from(b'-')
+        || lexer.lookahead() == i32::from(b':')
+    {
+        tag_name.push(to_upper(lexer.lookahead()) as u8);
+        lexer.advance(false);
+    }
+    tag_name
+}
+
+fn scan_comment(lexer: &mut dyn Lexer) -> bool {
+    if lexer.lookahead() != i32::from(b'-') {
+        return false;
+    }
+    lexer.advance(false);
+    if lexer.lookahead() != i32::from(b'-') {
+        return false;
+    }
+    lexer.advance(false);
+
+    let mut dashes = 0u32;
+    while lexer.lookahead() != 0 {
+        match lexer.lookahead() {
+            0x2d => dashes = dashes.wrapping_add(1),
+            0x3e if dashes >= 2 => {
+                lexer.set_result_symbol(COMMENT as u16);
+                lexer.advance(false);
+                lexer.mark_end();
+                return true;
+            }
+            _ => dashes = 0,
+        }
+        lexer.advance(false);
+    }
+    false
+}
+
+/// The scanner's tag stack. Owned vectors also implement C's free/destroy steps.
+#[derive(Default)]
+pub(crate) struct Scanner {
+    tags: Vec<Tag>,
+}
+
+impl Scanner {
+    fn scan_raw_text(&self, lexer: &mut dyn Lexer) -> bool {
+        let Some(parent) = self.tags.last() else {
+            return false;
+        };
+
+        lexer.mark_end();
+        let end_delimiter: &[u8] = if parent.kind == TagType::Script {
+            b"</SCRIPT"
+        } else {
+            b"</STYLE"
+        };
+
+        let mut delimiter_index = 0;
+        while lexer.lookahead() != 0 {
+            if to_upper(lexer.lookahead()) == i32::from(end_delimiter[delimiter_index]) {
+                delimiter_index += 1;
+                if delimiter_index == end_delimiter.len() {
+                    break;
+                }
+                lexer.advance(false);
+            } else {
+                // A mismatching character is consumed, not reconsidered as the
+                // first character of another delimiter (even when it is '<').
+                delimiter_index = 0;
+                lexer.advance(false);
+                lexer.mark_end();
+            }
+        }
+
+        lexer.set_result_symbol(RAW_TEXT as u16);
+        true
+    }
+
+    fn scan_implicit_end_tag(&mut self, lexer: &mut dyn Lexer) -> bool {
+        let is_closing_tag = lexer.lookahead() == i32::from(b'/');
+        if is_closing_tag {
+            lexer.advance(false);
+        } else if self.tags.last().is_some_and(Tag::is_void) {
+            self.tags.pop();
+            lexer.set_result_symbol(IMPLICIT_END_TAG as u16);
+            return true;
+        }
+
+        let tag_name = scan_tag_name(lexer);
+        if tag_name.is_empty() && !lexer.eof() {
+            return false;
+        }
+        let next_tag = Tag::for_name(tag_name);
+
+        if is_closing_tag {
+            // A matching topmost tag is handled by the explicit end-tag scanner.
+            if self.tags.last() == Some(&next_tag) {
+                return false;
+            }
+
+            // Recovery deliberately compares only types here, not custom names.
+            // Only one stack entry is removed, even if the match is much deeper.
+            if self.tags.iter().rev().any(|tag| tag.kind == next_tag.kind) {
+                self.tags.pop();
+                lexer.set_result_symbol(IMPLICIT_END_TAG as u16);
+                return true;
+            }
+        } else if self.tags.last().is_some_and(|parent| {
+            !parent.can_contain(&next_tag)
+                || (matches!(parent.kind, TagType::Html | TagType::Head | TagType::Body)
+                    && lexer.eof())
+        }) {
+            self.tags.pop();
+            lexer.set_result_symbol(IMPLICIT_END_TAG as u16);
+            return true;
+        }
+        false
+    }
+
+    fn scan_start_tag_name(&mut self, lexer: &mut dyn Lexer) -> bool {
+        let tag_name = scan_tag_name(lexer);
+        if tag_name.is_empty() {
+            return false;
+        }
+
+        let tag = Tag::for_name(tag_name);
+        let kind = tag.kind;
+        self.tags.push(tag);
+        lexer.set_result_symbol(match kind {
+            TagType::Script => SCRIPT_START_TAG_NAME as u16,
+            TagType::Style => STYLE_START_TAG_NAME as u16,
+            _ => START_TAG_NAME as u16,
+        });
+        true
+    }
+
+    fn scan_end_tag_name(&mut self, lexer: &mut dyn Lexer) -> bool {
+        let tag_name = scan_tag_name(lexer);
+        if tag_name.is_empty() {
+            return false;
+        }
+
+        let tag = Tag::for_name(tag_name);
+        if self.tags.last() == Some(&tag) {
+            self.tags.pop();
+            lexer.set_result_symbol(END_TAG_NAME as u16);
+        } else {
+            lexer.set_result_symbol(ERRONEOUS_END_TAG_NAME as u16);
+        }
+        true
+    }
+
+    fn scan_self_closing_tag_delimiter(&mut self, lexer: &mut dyn Lexer) -> bool {
+        lexer.advance(false);
+        if lexer.lookahead() == i32::from(b'>') {
+            lexer.advance(false);
+            if !self.tags.is_empty() {
+                self.tags.pop();
+                lexer.set_result_symbol(SELF_CLOSING_TAG_DELIMITER as u16);
+            }
+            // C succeeds without setting the result when the tag stack is empty.
+            return true;
+        }
+        false
+    }
+}
+
+impl ExternalScanner for Scanner {
+    fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
+        if valid_symbols[RAW_TEXT] && !valid_symbols[START_TAG_NAME] && !valid_symbols[END_TAG_NAME]
+        {
+            return self.scan_raw_text(lexer);
+        }
+
+        while is_space(lexer.lookahead()) {
+            lexer.advance(true);
+        }
+
+        match lexer.lookahead() {
+            0x3c => {
+                lexer.mark_end();
+                lexer.advance(false);
+                if lexer.lookahead() == i32::from(b'!') {
+                    lexer.advance(false);
+                    return scan_comment(lexer);
+                }
+                if valid_symbols[IMPLICIT_END_TAG] {
+                    return self.scan_implicit_end_tag(lexer);
+                }
+            }
+            0 => {
+                if valid_symbols[IMPLICIT_END_TAG] {
+                    return self.scan_implicit_end_tag(lexer);
+                }
+            }
+            0x2f => {
+                if valid_symbols[SELF_CLOSING_TAG_DELIMITER] {
+                    return self.scan_self_closing_tag_delimiter(lexer);
+                }
+            }
+            _ => {
+                if (valid_symbols[START_TAG_NAME] || valid_symbols[END_TAG_NAME])
+                    && !valid_symbols[RAW_TEXT]
+                {
+                    return if valid_symbols[START_TAG_NAME] {
+                        self.scan_start_tag_name(lexer)
+                    } else {
+                        self.scan_end_tag_name(lexer)
+                    };
+                }
+            }
+        }
+        false
+    }
+
+    fn serialize(&mut self, buffer: &mut [u8]) -> usize {
+        let tag_count = self.tags.len().min(usize::from(u16::MAX)) as u16;
+        let mut serialized_tag_count = 0u16;
+        // C uses memcpy for both uint16_t counts, so the format is native-endian.
+        buffer[2..4].copy_from_slice(&tag_count.to_ne_bytes());
+        let mut size = 4;
+
+        for tag in self.tags.iter().take(usize::from(tag_count)) {
+            if tag.kind == TagType::Custom {
+                let name_length = tag.custom_tag_name.len().min(usize::from(u8::MAX));
+                if size + 2 + name_length >= SERIALIZATION_BUFFER_SIZE {
+                    break;
+                }
+                buffer[size] = tag.kind as u8;
+                buffer[size + 1] = name_length as u8;
+                size += 2;
+
+                // Match strncpy's zero padding, including names restored by
+                // deserialize that contain an embedded NUL.
+                let name = &tag.custom_tag_name[..name_length];
+                let copy_length = name.iter().position(|&c| c == 0).unwrap_or(name_length);
+                buffer[size..size + copy_length].copy_from_slice(&name[..copy_length]);
+                buffer[size + copy_length..size + name_length].fill(0);
+                size += name_length;
+            } else {
+                if size + 1 >= SERIALIZATION_BUFFER_SIZE {
+                    break;
+                }
+                buffer[size] = tag.kind as u8;
+                size += 1;
+            }
+            serialized_tag_count += 1;
+        }
+        buffer[..2].copy_from_slice(&serialized_tag_count.to_ne_bytes());
+        size
+    }
+
+    fn deserialize(&mut self, buffer: &[u8]) {
+        self.tags.clear();
+        if buffer.is_empty() {
+            return;
+        }
+
+        let serialized_tag_count = u16::from_ne_bytes([buffer[0], buffer[1]]);
+        let tag_count = u16::from_ne_bytes([buffer[2], buffer[3]]);
+        let mut size = 4;
+        self.tags.reserve(usize::from(tag_count));
+        if tag_count > 0 {
+            for _ in 0..serialized_tag_count {
+                let kind = TagType::from_byte(buffer[size]);
+                size += 1;
+                let custom_tag_name = if kind == TagType::Custom {
+                    let name_length = usize::from(buffer[size]);
+                    size += 1;
+                    let name = buffer[size..size + name_length].to_vec();
+                    size += name_length;
+                    name
+                } else {
+                    Vec::new()
+                };
+                self.tags.push(Tag {
+                    kind,
+                    custom_tag_name,
+                });
+            }
+            // The stack depth survives buffer exhaustion. Missing entries are
+            // END_ tags (tag_new), not zero-valued AREA tags.
+            for _ in serialized_tag_count..tag_count {
+                self.tags.push(Tag::default());
+            }
+        }
+    }
+}
+
+/// Creates a scanner (C's `tree_sitter_html_external_scanner_create`).
 pub(crate) fn create() -> Box<dyn ExternalScanner> {
-    Box::new(Scanner)
+    Box::<Scanner>::default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum Call {
+        Advance(usize, bool),
+        MarkEnd(usize),
+        Result(u16),
+        Eof(usize),
+    }
+
+    struct TestLexer {
+        input: Vec<i32>,
+        position: usize,
+        end: Option<usize>,
+        symbol: u16,
+        calls: RefCell<Vec<Call>>,
+    }
+
+    impl TestLexer {
+        fn new(input: &str) -> Self {
+            Self {
+                input: input.chars().map(|c| c as i32).collect(),
+                position: 0,
+                end: None,
+                symbol: u16::MAX,
+                calls: RefCell::default(),
+            }
+        }
+    }
+
+    impl Lexer for TestLexer {
+        fn lookahead(&self) -> i32 {
+            self.input.get(self.position).copied().unwrap_or(0)
+        }
+
+        fn result_symbol(&self) -> u16 {
+            self.symbol
+        }
+
+        fn set_result_symbol(&mut self, symbol: u16) {
+            self.symbol = symbol;
+            self.calls.borrow_mut().push(Call::Result(symbol));
+        }
+
+        fn advance(&mut self, skip: bool) {
+            self.calls
+                .borrow_mut()
+                .push(Call::Advance(self.position, skip));
+            if self.position < self.input.len() {
+                self.position += 1;
+            }
+        }
+
+        fn mark_end(&mut self) {
+            self.end = Some(self.position);
+            self.calls.borrow_mut().push(Call::MarkEnd(self.position));
+        }
+
+        fn eof(&self) -> bool {
+            self.calls.borrow_mut().push(Call::Eof(self.position));
+            self.position == self.input.len()
+        }
+
+        fn get_column(&mut self) -> u32 {
+            panic!("the HTML scanner does not call get_column")
+        }
+
+        fn is_at_included_range_start(&self) -> bool {
+            panic!("the HTML scanner does not check included ranges")
+        }
+    }
+
+    fn scan(scanner: &mut Scanner, input: &str, symbols: &[usize]) -> (bool, TestLexer) {
+        let mut lexer = TestLexer::new(input);
+        let mut valid = [false; 9];
+        for &symbol in symbols {
+            valid[symbol] = true;
+        }
+        let accepted = scanner.scan(&mut lexer, &valid);
+        (accepted, lexer)
+    }
+
+    fn with_tags(names: &[&str]) -> Scanner {
+        Scanner {
+            tags: names
+                .iter()
+                .map(|name| Tag::for_name(name.as_bytes().to_vec()))
+                .collect(),
+        }
+    }
+
+    fn serialized(scanner: &mut dyn ExternalScanner) -> Vec<u8> {
+        let mut buffer = [0xa5; SERIALIZATION_BUFFER_SIZE];
+        let size = scanner.serialize(&mut buffer);
+        assert!(buffer[size..].iter().all(|&byte| byte == 0xa5));
+        buffer[..size].to_vec()
+    }
+
+    fn header(serialized_count: u16, total_count: u16) -> Vec<u8> {
+        [serialized_count.to_ne_bytes(), total_count.to_ne_bytes()].concat()
+    }
+
+    #[test]
+    fn tag_map_and_serialized_discriminants() {
+        assert_eq!(TAG_TYPES_BY_TAG_NAME.len(), 126);
+        for (i, &(name, kind)) in TAG_TYPES_BY_TAG_NAME.iter().enumerate() {
+            let id = if i < 23 { i } else { i + 1 } as u8;
+            assert_eq!(kind as u8, id);
+            assert_eq!(TagType::from_byte(id), kind);
+            let tag = Tag::for_name(name.to_vec());
+            assert_eq!(tag.kind, kind);
+            assert_eq!(tag.is_void(), i < 23);
+            if kind == TagType::Custom {
+                assert_eq!(tag.custom_tag_name, b"CUSTOM");
+            } else {
+                assert!(tag.custom_tag_name.is_empty());
+            }
+        }
+        assert_eq!(Tag::default().kind as u8, 127);
+        for name in [b"".as_slice(), b"END_", b"div", b"DIV\0", b"X-A"] {
+            assert_eq!(Tag::for_name(name.to_vec()).kind, TagType::Custom);
+        }
+    }
+
+    #[test]
+    fn serialization_layout_and_reset() {
+        let mut scanner = with_tags(&["HTML", "SCRIPT", "X-A"]);
+        let mut expected = header(3, 3);
+        expected.extend_from_slice(&[66, 99, 126, 3, b'X', b'-', b'A']);
+        assert_eq!(serialized(&mut scanner), expected);
+
+        let mut restored = with_tags(&["OLD"]);
+        restored.deserialize(&expected);
+        assert_eq!(restored.tags, scanner.tags);
+        assert_eq!(serialized(&mut restored), expected);
+        restored.deserialize(&[]);
+        assert!(restored.tags.is_empty());
+        assert_eq!(serialized(&mut restored), header(0, 0));
+        assert_eq!(serialized(create().as_mut()), header(0, 0));
+    }
+
+    #[test]
+    fn serialization_limits_preserve_depth_with_end_sentinels() {
+        let mut scanner = Scanner {
+            tags: vec![Tag::for_name(b"DIV".to_vec()); usize::from(u16::MAX) + 1],
+        };
+        let bytes = serialized(&mut scanner);
+        assert_eq!(bytes.len(), 1023);
+        assert_eq!(bytes[..4], header(1019, u16::MAX));
+        assert!(bytes[4..].iter().all(|&byte| byte == 48));
+        assert_eq!(scanner.tags.len(), usize::from(u16::MAX) + 1);
+
+        let mut restored = Scanner::default();
+        restored.deserialize(&bytes);
+        assert_eq!(restored.tags.len(), usize::from(u16::MAX));
+        assert_eq!(restored.tags[..1019], scanner.tags[..1019]);
+        assert!(
+            restored.tags[1019..]
+                .iter()
+                .all(|tag| *tag == Tag::default())
+        );
+        assert_eq!(serialized(&mut restored), bytes);
+    }
+
+    #[test]
+    fn custom_name_truncation_and_strict_buffer_boundary() {
+        for (builtin_count, fits) in [(762, true), (763, false)] {
+            let mut scanner = Scanner {
+                tags: vec![Tag::for_name(b"DIV".to_vec()); builtin_count],
+            };
+            scanner.tags.push(Tag::for_name(vec![b'X'; 300]));
+            let bytes = serialized(&mut scanner);
+            let expected_count = builtin_count + usize::from(fits);
+            assert_eq!(
+                bytes[..4],
+                header(expected_count as u16, (builtin_count + 1) as u16)
+            );
+            let mut restored = Scanner::default();
+            restored.deserialize(&bytes);
+            let last = restored.tags.last().unwrap();
+            if fits {
+                assert_eq!(bytes.len(), 1023);
+                assert_eq!(&bytes[766..768], &[126, 255]);
+                assert_eq!(last.custom_tag_name, vec![b'X'; 255]);
+            } else {
+                assert_eq!(bytes.len(), 767);
+                assert_eq!(*last, Tag::default());
+            }
+        }
+    }
+
+    #[test]
+    fn serialization_uses_strncpy_not_memcpy_for_custom_names() {
+        let mut bytes = header(1, 1);
+        bytes.extend_from_slice(&[126, 4, b'X', 0, b'Y', b'Z']);
+        let mut scanner = Scanner::default();
+        scanner.deserialize(&bytes);
+        assert_eq!(scanner.tags[0].custom_tag_name, b"X\0YZ");
+        assert_eq!(&serialized(&mut scanner)[4..], &[126, 4, b'X', 0, 0, 0]);
+    }
+
+    #[test]
+    fn start_names_are_case_insensitive_and_use_c_locale_classes() {
+        for (input, name, symbol, position) in [
+            ("sCrIpT>", "SCRIPT", SCRIPT_START_TAG_NAME, 6),
+            ("style ", "STYLE", STYLE_START_TAG_NAME, 5),
+            ("DiV>", "DIV", START_TAG_NAME, 3),
+            ("x-Ab:9>", "X-AB:9", START_TAG_NAME, 6),
+            ("0-d>", "0-D", START_TAG_NAME, 3),
+            ("div_foo", "DIV", START_TAG_NAME, 3),
+            ("p\u{e9}>", "P", START_TAG_NAME, 1),
+        ] {
+            let mut scanner = Scanner::default();
+            let (accepted, lexer) = scan(&mut scanner, input, &[START_TAG_NAME]);
+            assert!(accepted, "{input:?}");
+            assert_eq!(lexer.symbol, symbol as u16);
+            assert_eq!(lexer.position, position);
+            assert_eq!(lexer.end, None);
+            assert_eq!(scanner.tags, with_tags(&[name]).tags);
+        }
+        for input in ["", "_x", "\u{e9}>", "\u{2003}div>", "\0div>"] {
+            let mut scanner = Scanner::default();
+            assert!(!scan(&mut scanner, input, &[START_TAG_NAME]).0, "{input:?}");
+            assert!(scanner.tags.is_empty());
+        }
+        let (_, lexer) = scan(
+            &mut Scanner::default(),
+            " \t\n\x0b\x0c\rbr>",
+            &[START_TAG_NAME],
+        );
+        for i in 0..6 {
+            assert_eq!(lexer.calls.borrow()[i], Call::Advance(i, true));
+        }
+    }
+
+    #[test]
+    fn end_names_match_only_the_top_tag_and_custom_names_exactly() {
+        let mut scanner = with_tags(&["DIV", "X-ONE"]);
+        for name in ["div>", "x-two>"] {
+            let (accepted, lexer) = scan(&mut scanner, name, &[END_TAG_NAME]);
+            assert!(accepted);
+            assert_eq!(lexer.symbol, ERRONEOUS_END_TAG_NAME as u16);
+            assert_eq!(scanner.tags.len(), 2);
+        }
+        let (accepted, lexer) = scan(&mut scanner, "x-oNe>", &[END_TAG_NAME]);
+        assert!(accepted);
+        assert_eq!(lexer.symbol, END_TAG_NAME as u16);
+        assert_eq!(scanner.tags, with_tags(&["DIV"]).tags);
+        assert!(!scan(&mut scanner, ">", &[END_TAG_NAME]).0);
+    }
+
+    #[test]
+    fn all_containment_rules() {
+        for &(parent_name, parent_kind) in TAG_TYPES_BY_TAG_NAME {
+            let parent = Tag::for_name(parent_name.to_vec());
+            for &(child_name, child_kind) in TAG_TYPES_BY_TAG_NAME {
+                let forbidden = match parent_kind {
+                    TagType::Li => child_name == b"LI",
+                    TagType::Dt | TagType::Dd => {
+                        matches!(child_name, b"DT" | b"DD")
+                    }
+                    TagType::P => TAG_TYPES_NOT_ALLOWED_IN_PARAGRAPHS.contains(&child_kind),
+                    TagType::Colgroup => child_name != b"COL",
+                    TagType::Rb | TagType::Rt | TagType::Rp => {
+                        matches!(child_name, b"RB" | b"RT" | b"RP")
+                    }
+                    TagType::Optgroup => child_name == b"OPTGROUP",
+                    TagType::Tr => child_name == b"TR",
+                    TagType::Td | TagType::Th => matches!(child_name, b"TD" | b"TH" | b"TR"),
+                    _ => false,
+                };
+                assert_eq!(
+                    parent.can_contain(&Tag::for_name(child_name.to_vec())),
+                    !forbidden
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn implicit_closes_are_zero_width_and_pop_only_one_entry() {
+        let mut scanner = with_tags(&["UL", "LI"]);
+        let (accepted, lexer) = scan(&mut scanner, "<li>", &[IMPLICIT_END_TAG]);
+        assert!(accepted);
+        assert_eq!(lexer.symbol, IMPLICIT_END_TAG as u16);
+        assert_eq!(lexer.end, Some(0));
+        assert_eq!(lexer.position, 3);
+        assert_eq!(scanner.tags, with_tags(&["UL"]).tags);
+        assert_eq!(
+            lexer.calls.into_inner(),
+            [
+                Call::MarkEnd(0),
+                Call::Advance(0, false),
+                Call::Advance(1, false),
+                Call::Advance(2, false),
+                Call::Result(IMPLICIT_END_TAG as u16),
+            ]
+        );
+
+        let mut scanner = with_tags(&["DIV", "SPAN", "P"]);
+        assert!(scan(&mut scanner, "</div>", &[IMPLICIT_END_TAG]).0);
+        assert_eq!(scanner.tags, with_tags(&["DIV", "SPAN"]).tags);
+        assert!(scan(&mut scanner, "</div>", &[IMPLICIT_END_TAG]).0);
+        assert_eq!(scanner.tags, with_tags(&["DIV"]).tags);
+        assert!(!scan(&mut scanner, "</div>", &[IMPLICIT_END_TAG]).0);
+        assert!(!scan(&mut scanner, "</other>", &[IMPLICIT_END_TAG]).0);
+    }
+
+    #[test]
+    fn implicit_custom_recovery_compares_type_not_name() {
+        let mut scanner = with_tags(&["X-ONE", "DIV"]);
+        assert!(scan(&mut scanner, "</x-two>", &[IMPLICIT_END_TAG]).0);
+        assert_eq!(scanner.tags, with_tags(&["X-ONE"]).tags);
+        assert!(!scan(&mut scanner, "</x-one>", &[IMPLICIT_END_TAG]).0);
+        assert!(scan(&mut scanner, "</x-two>", &[IMPLICIT_END_TAG]).0);
+        assert!(scanner.tags.is_empty());
+    }
+
+    #[test]
+    fn void_tags_and_eof_implicit_closes() {
+        let mut scanner = with_tags(&["BR"]);
+        let (accepted, lexer) = scan(&mut scanner, "<?>", &[IMPLICIT_END_TAG]);
+        assert!(accepted);
+        assert_eq!(lexer.position, 1);
+        assert_eq!(lexer.end, Some(0));
+        assert!(scanner.tags.is_empty());
+        assert_eq!(
+            lexer.calls.into_inner(),
+            [
+                Call::MarkEnd(0),
+                Call::Advance(0, false),
+                Call::Result(IMPLICIT_END_TAG as u16),
+            ]
+        );
+
+        for (parent, closes) in [
+            ("HTML", true),
+            ("HEAD", true),
+            ("BODY", true),
+            ("COLGROUP", true),
+            ("BR", true),
+            ("DIV", false),
+            ("P", false),
+            ("X-ONE", false),
+        ] {
+            let mut scanner = with_tags(&[parent]);
+            assert_eq!(
+                scan(&mut scanner, "", &[IMPLICIT_END_TAG]).0,
+                closes,
+                "{parent}"
+            );
+        }
+        let (_, lexer) = scan(&mut with_tags(&["HTML"]), "", &[IMPLICIT_END_TAG]);
+        assert_eq!(
+            lexer.calls.into_inner(),
+            [
+                Call::Eof(0),
+                Call::Eof(0),
+                Call::Result(IMPLICIT_END_TAG as u16)
+            ]
+        );
+        // An embedded NUL has zero lookahead but is not EOF.
+        assert!(!scan(&mut with_tags(&["HTML"]), "\0x", &[IMPLICIT_END_TAG]).0);
+        assert!(!scan(&mut with_tags(&["BR"]), "</div>", &[IMPLICIT_END_TAG]).0);
+    }
+
+    #[test]
+    fn self_closing_delimiters_preserve_empty_stack_result() {
+        let mut scanner = with_tags(&["DIV"]);
+        let (accepted, lexer) = scan(&mut scanner, "/>", &[SELF_CLOSING_TAG_DELIMITER]);
+        assert!(accepted);
+        assert_eq!(lexer.symbol, SELF_CLOSING_TAG_DELIMITER as u16);
+        assert!(scanner.tags.is_empty());
+        let (accepted, lexer) = scan(&mut scanner, "/>", &[SELF_CLOSING_TAG_DELIMITER]);
+        assert!(accepted);
+        assert_eq!(lexer.symbol, u16::MAX);
+        assert_eq!(lexer.position, 2);
+        assert_eq!(lexer.end, None);
+        let (accepted, lexer) = scan(&mut scanner, "/ >", &[SELF_CLOSING_TAG_DELIMITER]);
+        assert!(!accepted);
+        assert_eq!(lexer.position, 1);
+    }
+
+    #[test]
+    fn comments_ignore_valid_symbols_and_preserve_callback_order() {
+        let (accepted, lexer) = scan(&mut Scanner::default(), "<!---->", &[]);
+        assert!(accepted);
+        assert_eq!(
+            lexer.calls.into_inner(),
+            [
+                Call::MarkEnd(0),
+                Call::Advance(0, false),
+                Call::Advance(1, false),
+                Call::Advance(2, false),
+                Call::Advance(3, false),
+                Call::Advance(4, false),
+                Call::Advance(5, false),
+                Call::Result(COMMENT as u16),
+                Call::Advance(6, false),
+                Call::MarkEnd(7),
+            ]
+        );
+        for input in ["<!-->", "<!--->", "<!-x", "<!x", "<!--a--x>", "<!--a\0-->"] {
+            assert!(
+                !scan(&mut Scanner::default(), input, &[COMMENT]).0,
+                "{input:?}"
+            );
+        }
+        for input in ["<!--a--->", "<!--a->b-->", "<!--a-->extra"] {
+            assert!(
+                scan(&mut Scanner::default(), input, &[COMMENT]).0,
+                "{input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_text_delimiter_lookahead_and_partial_matches() {
+        for (input, position, end) in [
+            ("", 0, 0),
+            ("abc", 3, 3),
+            ("</sCrIpT>", 7, 0),
+            ("a</SCRIPT>", 8, 1),
+            ("a</SCRIPTING>", 8, 1),
+            ("a</SCR", 6, 1),
+            ("a<", 2, 1),
+            ("<</SCRIPT>", 10, 10),
+            ("abc\0more", 3, 3),
+        ] {
+            let mut scanner = with_tags(&["SCRIPT"]);
+            let (accepted, lexer) = scan(&mut scanner, input, &[RAW_TEXT]);
+            assert!(accepted, "{input:?}");
+            assert_eq!(lexer.symbol, RAW_TEXT as u16);
+            assert_eq!(lexer.position, position, "{input:?}");
+            assert_eq!(lexer.end, Some(end), "{input:?}");
+            assert_eq!(scanner.tags.len(), 1);
+        }
+        for parent in ["STYLE", "DIV", "X-A"] {
+            let (_, lexer) = scan(&mut with_tags(&[parent]), " </sTyLe>", &[RAW_TEXT]);
+            assert_eq!(lexer.position, 7);
+            assert_eq!(lexer.end, Some(1));
+            assert_eq!(lexer.calls.borrow()[1], Call::Advance(0, false));
+        }
+        let (accepted, lexer) = scan(&mut Scanner::default(), "abc", &[RAW_TEXT]);
+        assert!(!accepted);
+        assert!(lexer.calls.into_inner().is_empty());
+    }
+
+    #[test]
+    fn raw_text_is_disabled_when_start_or_end_names_are_valid() {
+        for symbols in [vec![RAW_TEXT, START_TAG_NAME], vec![RAW_TEXT, END_TAG_NAME]] {
+            let mut scanner = with_tags(&["SCRIPT"]);
+            let (accepted, lexer) = scan(&mut scanner, "abc", &symbols);
+            assert!(!accepted);
+            assert_eq!(lexer.position, 0);
+        }
+        let mut scanner = with_tags(&["DIV"]);
+        let (accepted, lexer) = scan(&mut scanner, "div>", &[START_TAG_NAME, END_TAG_NAME]);
+        assert!(accepted);
+        assert_eq!(lexer.symbol, START_TAG_NAME as u16);
+        assert_eq!(scanner.tags.len(), 2);
+    }
 }
