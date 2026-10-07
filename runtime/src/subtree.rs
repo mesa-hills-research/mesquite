@@ -410,7 +410,13 @@ pub(crate) fn ts_subtree_compress(
 }
 
 pub(crate) fn ts_subtree_summarize_children(tree: &mut Subtree, language: &Language) {
-    let data = tree.heap_mut().expect("cannot summarize an inline leaf");
+    summarize_children(
+        tree.heap_mut().expect("cannot summarize an inline leaf"),
+        language,
+    );
+}
+
+fn summarize_children(data: &mut SubtreeHeapData, language: &Language) {
     let SubtreePayload::Branch(branch) = &mut data.payload else {
         panic!("child summaries require a branch payload");
     };
@@ -558,7 +564,7 @@ pub(crate) fn ts_subtree_new_node(
 ) -> Subtree {
     let metadata = ts_language_symbol_metadata(language, symbol);
     let fragile = symbol == BUILTIN_SYM_ERROR || symbol == BUILTIN_SYM_ERROR_REPEAT;
-    let mut result = Subtree::Heap(Arc::new(SubtreeHeapData {
+    let mut result = SubtreeHeapData {
         symbol,
         visible: metadata.visible,
         named: metadata.named,
@@ -570,9 +576,11 @@ pub(crate) fn ts_subtree_new_node(
             ..BranchData::default()
         }),
         ..SubtreeHeapData::default()
-    }));
-    ts_subtree_summarize_children(&mut result, language);
-    result
+    };
+    // Initialize before sharing: summarizing a fresh header needs no atomic
+    // uniqueness check or copy-on-write machinery.
+    summarize_children(&mut result, language);
+    Subtree::Heap(Arc::new(result))
 }
 
 pub(crate) fn ts_subtree_new_error_node(

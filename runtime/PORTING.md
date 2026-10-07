@@ -184,6 +184,15 @@ C parameter was removed to avoid borrowing the parser and its own field mutably
 at once. Other borrow conflicts should be resolved with scoped field borrows or
 `mem::take` followed by restoration, never unsafe aliases or wholesale state clones.
 
+Balancing borrows disjoint mutable subtree slots in a LIFO worklist. Do not clone
+handles into this worklist: that would change uniqueness-gated compression. Each
+pending entry records its depth and child index; the cursor maintains a path to
+the current node. On cancellation, drop the borrows and keep only that path in
+`Parser.balance_path`. On resumption, reconstruct the pending left siblings along
+the path without repeating progress checks or processing completed ancestors.
+New branch headers are summarized before wrapping them in `Arc`; subsequent
+re-summarization still uses normal COW mutation.
+
 ## Trees, nodes, cursors, changes and API
 
 Tree owns a **Box<Subtree> root slot**, Language and included-range Vec. Boxing keeps
