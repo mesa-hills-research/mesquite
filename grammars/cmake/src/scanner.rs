@@ -319,6 +319,39 @@ mod tests {
     }
 
     #[test]
+    fn recovery_in_quoted_variable_names_skips_only_leading_whitespace() {
+        // Recovery in a malformed quoted variable name starts at its first
+        // space/tab. C skips that leading whitespace, then emits the entire
+        // suffix as bracket content, including later whitespace and quotes.
+        for input in [
+            "message(\"${var\twith\ttab}\")\n",
+            "message(\"${var with space}\")\n",
+        ] {
+            let mut scanner = create();
+            for _ in 0..2 {
+                let mut lexer = TestLexer::new(input);
+                lexer.position = 14;
+                assert!(scanner.scan(&mut lexer, &[true; 7]));
+                assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
+                assert_eq!(lexer.position, input.len());
+                assert_eq!(lexer.end, Some(input.len()));
+
+                let mut expected = vec![Event::Advance(14, true)];
+                for position in 15..input.len() {
+                    expected.push(Event::Advance(position, false));
+                    expected.push(Event::MarkEnd(position + 1));
+                }
+                expected.push(Event::Symbol(BRACKET_ARGUMENT_CONTENT as u16));
+                assert_eq!(lexer.events, expected);
+
+                // Reset must restore OPEN, not retain the CONTENT token that
+                // this scan just set. Otherwise the next recovery scan fails.
+                scanner.deserialize(&[]);
+            }
+        }
+    }
+
+    #[test]
     fn recovery_content_keeps_multiline_error_ranges_through_eof() {
         // Recovery can start after an identifier or at the beginning of a
         // non-CMake file. The content token includes the final newline, so the
