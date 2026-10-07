@@ -1,6 +1,6 @@
 //! Additional quoted-argument recovery regressions from oracle bucket 1b5a6fb7.
 
-use ts_port::{Parser, Point};
+use ts_port::{ParseOptions, ParseState, Parser, Point};
 
 #[test]
 fn invalid_escape_keeps_the_quote_directly_under_error() {
@@ -10,6 +10,7 @@ fn invalid_escape_keeps_the_quote_directly_under_error() {
             "cmake_language(DEFER CALL message \"Deferred \\X Error\")\n",
         ),
         2,
+        1,
         &[
             ("identifier", 57..71),
             ("(", 71..72),
@@ -33,6 +34,7 @@ fn variable_template_keeps_quote_and_variable_prefix_directly_under_error() {
             "add_library(foo \"@RunCMake_SOURCE_DIR@/empty.@ext@\")\n",
         ),
         3,
+        2,
         &[
             ("identifier", 72..78),
             ("(", 78..79),
@@ -54,6 +56,7 @@ fn variable_template_keeps_quote_and_variable_prefix_directly_under_error() {
 fn assert_recovery_children(
     source: &str,
     root_child_count: usize,
+    expected_progress_calls: usize,
     expected: &[(&str, std::ops::Range<usize>)],
 ) {
     fn point_at(source: &str, byte: usize) -> Point {
@@ -76,33 +79,51 @@ fn assert_recovery_children(
             assert!(!parser.parse(warmup, None).unwrap().root_node().has_error());
         }
 
-        let tree = parser.parse(source, None).unwrap();
-        let root = tree.root_node();
-        assert_eq!(root.kind(), "source_file");
-        assert_eq!(root.byte_range(), 0..source.len());
-        assert_eq!(root.child_count(), root_child_count);
-        assert_eq!(root.named_child_count(), root_child_count);
-        assert!(root.has_error());
+        // Reuse the scanner with both contiguous and one-byte input. Recovery
+        // content must keep the same ranges across input-buffer boundaries and
+        // preserve the oracle-matched number of progress checkpoints.
+        for chunk_size in [source.len(), 1] {
+            let mut progress_calls = 0;
+            let mut progress = |_: &ParseState| {
+                progress_calls += 1;
+                false
+            };
+            let mut read = |byte: usize, _: Point| {
+                let start = byte.min(source.len());
+                &source.as_bytes()[start..(start + chunk_size).min(source.len())]
+            };
+            let options = ParseOptions::new().progress_callback(&mut progress);
+            let tree = parser
+                .parse_with_options(&mut read, None, Some(options))
+                .unwrap();
+            assert_eq!(progress_calls, expected_progress_calls);
+            let root = tree.root_node();
+            assert_eq!(root.kind(), "source_file");
+            assert_eq!(root.byte_range(), 0..source.len());
+            assert_eq!(root.child_count(), root_child_count);
+            assert_eq!(root.named_child_count(), root_child_count);
+            assert!(root.has_error());
 
-        let error = root.child(root_child_count - 1).unwrap();
-        assert!(error.is_error());
-        assert!(error.is_named());
-        assert!(error.is_extra());
-        assert!(!error.is_missing());
-        assert_eq!(error.byte_range(), expected[0].1.start..source.len());
-        assert_eq!(error.child_count(), expected.len());
-        assert_eq!(error.start_position(), point_at(source, error.start_byte()));
-        assert_eq!(error.end_position(), point_at(source, source.len()));
+            let error = root.child(root_child_count - 1).unwrap();
+            assert!(error.is_error());
+            assert!(error.is_named());
+            assert!(error.is_extra());
+            assert!(!error.is_missing());
+            assert_eq!(error.byte_range(), expected[0].1.start..source.len());
+            assert_eq!(error.child_count(), expected.len());
+            assert_eq!(error.start_position(), point_at(source, error.start_byte()));
+            assert_eq!(error.end_position(), point_at(source, source.len()));
 
-        for (i, (kind, range)) in expected.iter().enumerate() {
-            let child = error.child(i).unwrap();
-            assert_eq!(child.kind(), *kind, "child {i}");
-            assert_eq!(child.byte_range(), *range);
-            assert_eq!(child.start_position(), point_at(source, range.start));
-            assert_eq!(child.end_position(), point_at(source, range.end));
-            assert!(!child.has_error());
-            assert!(!child.is_extra());
-            assert!(!child.is_missing());
+            for (i, (kind, range)) in expected.iter().enumerate() {
+                let child = error.child(i).unwrap();
+                assert_eq!(child.kind(), *kind, "child {i}");
+                assert_eq!(child.byte_range(), *range);
+                assert_eq!(child.start_position(), point_at(source, range.start));
+                assert_eq!(child.end_position(), point_at(source, range.end));
+                assert!(!child.has_error());
+                assert!(!child.is_extra());
+                assert!(!child.is_missing());
+            }
         }
     }
 }
