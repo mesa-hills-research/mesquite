@@ -6,7 +6,7 @@ an exposed `(` in the port, around byte 3335 in a malformed quoted variable
 reference.
 
 The bucket already passed at revision `9b5a105` and was reverified after the
-merged fixes through `5a2aac7`. The scanner initialization/reset correction is
+merged fixes through `82828d1`. The scanner initialization/reset correction is
 already merged; no additional runtime or scanner behavior change is needed.
 
 ## Root cause and existing correction
@@ -31,7 +31,7 @@ scanners.
 
 ## Verification
 
-All checks below were rerun at `5a2aac7`; the assigned input passed before
+All checks below were rerun at `82828d1`; the assigned input passed before
 any changes. Existing scanner and parser regressions already cover the reduced
 Registry-query expression, so no duplicate test or further behavior change was
 needed.
@@ -171,7 +171,7 @@ changes.
 
 ## Empty recovery-content bucket `f5e2762e`
 
-Reverified at `4977a30`: all 16 reported inputs already pass. The merged scanner
+Reverified at `a08dab1`: all 16 reported inputs already pass. The merged scanner
 initialization/reset correction above allows `bracket_argument_content` at EOF
 without an opener, including after `a` and after skipping the newline in `if(\n`.
 This zero-width token is a real scanner token, not an inserted missing node.
@@ -183,9 +183,12 @@ both with fresh scanners and after parsing bracket arguments/comments. Scanner
 unit tests additionally check the EOF callback order and snapshot reset behavior.
 The existing parser-level whitespace cases also cover CRLF, lone CR, spaces/tabs,
 and multiple newlines, asserting exact EOF byte and point ranges after skipping
-that whitespace with both fresh and reused scanners. Both integration tests run
+that whitespace with both fresh and reused scanners. All three integration tests run
 with whole-source and byte-at-a-time input callbacks, covering whitespace and
 CRLF split across chunks without changing the zero-width token's EOF position.
+The block/while cases additionally verify that a complete header remains a sibling
+of the empty recovery content when its terminating command is missing. Tree
+cursor assertions confirm that the empty token remains traversable at EOF.
 
 Checks rerun for this bucket:
 
@@ -195,7 +198,7 @@ Checks rerun for this bucket:
 - `cargo check --workspace --all-targets`: passes with the pre-existing warning
   in host-owned `grammars/yaml/src/lex.rs:20` noted above.
 - `cargo test -p ts_port_cmake`: 24 tests pass.
-- `cargo test -p ts_port --test cmake_empty_recovery_content`: 2 tests pass.
+- `cargo test -p ts_port --test cmake_empty_recovery_content`: 3 tests pass.
 - `cargo clippy -p ts_port_cmake -p ts_port --all-targets -- -D warnings`: passes.
 
 This follow-up only updates the verification record: the implementation and
@@ -205,7 +208,7 @@ changes are introduced.
 
 ## Unterminated-call bucket `7f8795fb`
 
-Reverified at `5605c32`: all three reported inputs already pass on the starting
+Reverified at `4f9d98d`: all three reported inputs already pass on the starting
 checkout with the merged scanner initialization/reset correction above. The
 current C scanner uses
 `ts_calloc` and clears both fields on empty or invalid-length snapshots, matching
@@ -223,7 +226,7 @@ input chunks. The earlier verification note incorrectly described all three coun
 as zero; the existing tests already assert the correct counts. No additional
 behavior change or duplicate test is needed.
 
-Validation rerun for this bucket:
+Validation rerun for this bucket at `4f9d98d` (all checks completed successfully):
 
 - `run_oracle(inputs = "bucket:7f8795fb")`: 3/3 pass.
 - `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs
