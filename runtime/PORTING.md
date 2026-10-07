@@ -208,7 +208,10 @@ the current node. On cancellation, drop the borrows and keep only that path in
 `Parser.balance_path`. On resumption, reconstruct the pending left siblings along
 the path without repeating progress checks or processing completed ancestors.
 New branch headers are summarized before wrapping them in `Arc`; subsequent
-re-summarization still uses normal COW mutation.
+re-summarization still uses normal COW mutation. Unambiguous reductions also finish
+parse-state, fragility, and precedence initialization before sharing the header.
+For ambiguous reductions, compare alternative child summaries **before** adding
+the action's dynamic precedence; initialize the selected parent only afterwards.
 
 ## Trees, nodes, cursors, changes and API
 
