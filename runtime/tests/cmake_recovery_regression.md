@@ -6,7 +6,7 @@ an exposed `(` in the port, around byte 3335 in a malformed quoted variable
 reference.
 
 The bucket already passed at revision `9b5a105` and was reverified after the
-merged fixes through `4390c9d`. The scanner initialization/reset correction is
+merged fixes through `029b957`. The scanner initialization/reset correction is
 already merged; no additional runtime or scanner behavior change is needed.
 
 ## Root cause and existing correction
@@ -31,7 +31,7 @@ scanners.
 
 ## Verification
 
-All checks below were rerun at `4390c9d`; the assigned input passed before
+All checks below were rerun at `029b957`; the assigned input passed before
 any changes. Existing scanner and parser regressions already cover the reduced
 Registry-query expression, including single-byte input chunks and incremental
 repair/restoration, so no duplicate test or further behavior change was needed.
@@ -179,6 +179,29 @@ checking. The latter still reports the pre-existing host-owned generated YAML
 lexer warning noted above. This change only strengthens regression coverage;
 there are no runtime changes, C deviations, new unsafe code, or generated-file
 changes.
+
+### ERROR-range revalidation at `512817f`
+
+Bucket `e0b0bff8` already passes on this starting checkout. Comparing the current
+C scanner with Rust confirms the merged zero-valued creation/reset fix remains
+correct; no new implementation change or duplicate regression is needed.
+Existing `cmake_error_ranges` tests cover both smallest inputs, fresh/reused
+scanners, whole/seven-byte/single-byte chunks, incremental EOF deletion and
+restoration, exact tree ranges/flags, and zero progress calls.
+
+Checks rerun at this revision:
+
+- Assigned bucket: **5/5 pass** (query checks enabled).
+- All CMake inputs: **270/270 gate** (incremental/query checks) and
+  **9878/9878 fresh** (query checks) pass.
+- `cargo check --workspace --all-targets`: passes; the pre-existing warning in
+  host-owned `grammars/yaml/src/lex.rs:20` remains unchanged.
+- `cargo test -p ts_port_cmake -p ts_port`: passes, including 212 runtime unit
+  tests, all integration/doc tests, both ERROR-range tests, and 24 CMake tests.
+- `cargo clippy -p ts_port_cmake -p ts_port --all-targets -- -D warnings`: passes.
+
+This follow-up only records verification: no behavior changes, C deviations,
+new unsafe code, warnings, or generated-file modifications are introduced.
 
 ## Empty recovery-content bucket `f5e2762e`
 
