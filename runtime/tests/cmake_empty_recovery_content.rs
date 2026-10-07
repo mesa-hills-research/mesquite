@@ -3,7 +3,12 @@
 use std::ops::Range;
 use ts_port::{Language, ParseOptions, ParseState, Parser, Point};
 
-fn assert_empty_recovery_content(source: &str, prefix: &[(&str, Range<usize>)], end: Point) {
+fn assert_empty_recovery_content(
+    source: &str,
+    prefix: &[(&str, Range<usize>)],
+    end: Point,
+    chunk_size: usize,
+) {
     let language = Language::from(ts_port_cmake::language());
     let mut parser = Parser::new();
     parser.set_language(&language).unwrap();
@@ -25,7 +30,10 @@ fn assert_empty_recovery_content(source: &str, prefix: &[(&str, Range<usize>)], 
         };
         let tree = parser
             .parse_with_options(
-                &mut |offset, _| source.as_bytes().get(offset..).unwrap_or_default(),
+                &mut |offset, _| {
+                    let remaining = source.as_bytes().get(offset..).unwrap_or_default();
+                    &remaining[..remaining.len().min(chunk_size)]
+                },
                 None,
                 Some(ParseOptions::new().progress_callback(&mut progress)),
             )
@@ -79,8 +87,16 @@ fn assert_empty_recovery_content(source: &str, prefix: &[(&str, Range<usize>)], 
 
 #[test]
 fn incomplete_commands_retain_zero_width_content_at_eof() {
-    assert_empty_recovery_content("a", &[("identifier", 0..1)], Point::new(0, 1));
-    assert_empty_recovery_content("message", &[("identifier", 0..7)], Point::new(0, 7));
+    for source in ["a", "message"] {
+        for chunk_size in [source.len(), 1] {
+            assert_empty_recovery_content(
+                source,
+                &[("identifier", 0..source.len())],
+                Point::new(0, source.len()),
+                chunk_size,
+            );
+        }
+    }
 }
 
 #[test]
@@ -96,6 +112,10 @@ fn incomplete_if_skips_trailing_whitespace_before_empty_content() {
         ("if( \t\r\n \t", Point::new(1, 2)),
         ("if(\n\n\t", Point::new(2, 1)),
     ] {
-        assert_empty_recovery_content(source, &[("if", 0..2), ("(", 2..3)], end);
+        // Byte-at-a-time reads split CRLF and trailing whitespace across
+        // chunks: the empty token must still start at the true EOF position.
+        for chunk_size in [source.len(), 1] {
+            assert_empty_recovery_content(source, &[("if", 0..2), ("(", 2..3)], end, chunk_size);
+        }
     }
 }

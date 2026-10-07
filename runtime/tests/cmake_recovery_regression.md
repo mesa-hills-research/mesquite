@@ -55,7 +55,7 @@ This follow-up changes only this verification note; it introduces no deviation
 from C and no new unsafe code.
 
 
-### Revalidation of `4d6cc948` at `31e563f`
+### Revalidation of `4d6cc948` at `b332424`
 
 The assigned Registry-query input still passes before any new changes. Direct
 comparison with the current C scanner confirms that the merged zero-valued
@@ -70,7 +70,9 @@ including the parser regression with both fresh and reused scanner state.
   host-owned YAML lexer unused-assignment warning remains.
 - `cargo test -p ts_port_cmake`: **24 tests pass**, including the reduced
   Registry-query scanner regression.
-- `cargo test -p ts_port --test cmake_quoted_variable_recovery`: passes.
+- `cargo test -p ts_port --test cmake_quoted_variable_recovery`: **2 tests pass**,
+  covering fresh/reused scanners and incremental repair/restoration of malformed
+  quoted variable references.
 - `cargo clippy -p ts_port_cmake -p ts_port --all-targets -- -D warnings`: passes.
 
 This revalidation only updates this note. No behavior changes, C deviations,
@@ -78,7 +80,7 @@ new warnings, unsafe code, or generated-file changes were introduced.
 
 ## ERROR range bucket `e0b0bff8`
 
-Reverified at `5671d20`: all five reported inputs already pass with the merged
+Reverified at `d80a304`: all five reported inputs already pass with the merged
 scanner initialization/reset correction above. In particular, recovery from
 byte 5 of `E_sleep-no-args-stderr.cmake` emits bracket content through byte 72,
 including the final newline. The enclosing ERROR therefore reaches EOF, rather
@@ -114,7 +116,7 @@ and point ranges through the final newline, and zero progress callbacks. Each
 case also runs after bracket arguments and bracket comments on the same parser
 to exercise scanner reset through the public API, not just scanner unit tests.
 
-Revalidation at `5671d20`: bucket **5/5**, CMake gate **270/270**, and fresh
+Revalidation at `d80a304`: bucket **5/5**, CMake gate **270/270**, and fresh
 **9878/9878** pass. `cargo check --workspace --all-targets`,
 `cargo test -p ts_port`, and `cargo test -p ts_port_cmake` pass (24
 scanner/grammar tests). The two `cmake_error_ranges` parser tests also pass
@@ -157,7 +159,7 @@ changes are introduced.
 
 ## Unterminated-call bucket `7f8795fb`
 
-Reverified at `ad767ee`: all three reported inputs already pass with the merged
+Reverified at `1d2f655`: all three reported inputs already pass with the merged
 scanner initialization/reset correction above. The current C scanner uses
 `ts_calloc` and clears both fields on empty or invalid-length snapshots, matching
 the Rust implementation. This allows recovery content without an opener:
@@ -167,9 +169,12 @@ input in `NullTerminatedArgument.cmake`. An inert initial token instead produced
 `source_file` roots with missing delimiters rather than the reference `ERROR`.
 
 Existing `cmake_unterminated_call_recovery` integration tests cover all three
-inputs, asserting root/content kinds, flags, byte/point ranges, and zero progress
-callbacks. They exercise fresh and reused scanners with both whole-source and
-one-byte input chunks. No additional behavior change or duplicate test is needed.
+inputs, asserting root/content kinds, flags, byte/point ranges, and exact progress
+callback counts: one for each unterminated-call input and zero for the embedded-NUL
+input. They exercise fresh and reused scanners with both whole-source and one-byte
+input chunks. The earlier verification note incorrectly described all three counts
+as zero; the existing tests already assert the correct counts. No additional
+behavior change or duplicate test is needed.
 
 Validation rerun for this bucket:
 
