@@ -113,17 +113,17 @@ in host-owned `grammars/yaml/src/lex.rs:20`.
 This follow-up records verification only, with no behavior changes or deviations
 from C and nothing left unresolved in this bucket.
 
-## Chunked-input coverage at `d7945e6`
+## Chunked-input coverage; latest revalidation at `f137cfe`
 
 The merged starting revision already passes all four reported inputs. The
-quoted-variable parser regression now also returns input one byte at a time,
+existing quoted-variable parser regression also returns input one byte at a time,
 checking the same C-derived flat ERROR children, ranges, flags, and zero progress
 callbacks across chunk boundaries, including the trailing newline and EOF. This
 exercises parser reuse after both bracket content and earlier malformed parses;
 no additional runtime behavior change or deviation from C was necessary.
 
-Validation: bucket **4/4**, full CMake gate **270/270** (incremental and queries),
-and fresh CMake **9878/9878** (queries) pass. Both quoted-variable parser tests and
+Validation rerun at `f137cfe`: bucket **4/4**, full CMake gate **270/270**
+(incremental and queries), and fresh CMake **9878/9878** (queries) pass. Both quoted-variable parser tests and
 all **24** scanner tests pass. Workspace all-targets checking passes with only
 the pre-existing host-owned YAML lexer warning; all-targets clippy for `ts_port`
 and `ts_port_cmake` passes with `-D warnings`.
