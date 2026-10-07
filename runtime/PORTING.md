@@ -240,8 +240,9 @@ before constructing the droppable `SubtreeHeapData` header and wrapping it in
 `Arc`. This keeps header initialization out of the summary loop. Subsequent
 re-summarization uses the same helper and normal COW mutation; it must seed the
 accumulator with the old padding, size, first-leaf data, fragility and parse state
-because C preserves or consults these values in empty/first-child cases. Unambiguous reductions also finish
-parse-state, fragility, and precedence initialization before sharing the header.
+because C preserves or consults these values in empty/first-child cases.
+Unambiguous reductions also finish parse-state, fragility, and precedence
+initialization before sharing the header.
 For ambiguous reductions, compare alternative child summaries **before** adding
 the action's dynamic precedence; initialize the selected parent only afterwards.
 
