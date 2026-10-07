@@ -6,7 +6,7 @@ an exposed `(` in the port, around byte 3335 in a malformed quoted variable
 reference.
 
 The bucket already passed at revision `9b5a105` and was reverified after the
-merged fixes through `6df21f5`. The scanner initialization/reset correction is
+merged fixes through `41bd48a`. The scanner initialization/reset correction is
 already merged; no additional runtime or scanner behavior change is needed.
 
 ## Root cause and existing correction
@@ -31,7 +31,7 @@ scanners.
 
 ## Verification
 
-All checks below were rerun at `6df21f5`; the assigned input passed before
+All checks below were rerun at `41bd48a`; the assigned input passed before
 any changes. Existing scanner and parser regressions already cover the reduced
 Registry-query expression, including single-byte input chunks and incremental
 repair/restoration, so no duplicate test or further behavior change was needed.
@@ -181,16 +181,16 @@ lexer warning noted above. This change only strengthens regression coverage;
 there are no runtime changes, C deviations, new unsafe code, or generated-file
 changes.
 
-### ERROR-range revalidation at `0e2ef72`
+### ERROR-range revalidation at `e49d25c`
 
 Rechecked the previously resolved bucket at this starting revision; all checks
-below were rerun, rather than relying on the earlier verification at `5acc770`.
+below were rerun, rather than relying on the earlier verification at `0e2ef72`.
 Bucket `e0b0bff8` already passes on this starting checkout. Comparing the current
 C scanner with Rust confirms the merged zero-valued creation/reset fix remains
 correct; no new implementation change or duplicate regression is needed.
 Existing `cmake_error_ranges` tests cover both smallest inputs, fresh/reused
 scanners, whole/seven-byte/single-byte chunks, incremental EOF deletion and
-restoration, exact tree ranges/flags, and zero progress calls.
+restoration, exact tree ranges/flags, boundary navigation, and zero progress calls.
 
 Checks rerun at this revision:
 
@@ -202,13 +202,16 @@ Checks rerun at this revision:
 - `cargo test -p ts_port_cmake -p ts_port`: passes, including 212 runtime unit
   tests, all integration/doc tests, both ERROR-range tests, and 24 CMake tests.
 - `cargo clippy -p ts_port_cmake -p ts_port --all-targets -- -D warnings`: passes.
+- `cargo clippy --workspace --all-targets -- -D warnings`: blocked by that same
+  pre-existing unused-assignment warning in host-owned `grammars/yaml/src/lex.rs:20`.
+  The generated lexer was not modified.
 
 This follow-up only records verification: no behavior changes, C deviations,
 new unsafe code, warnings, or generated-file modifications are introduced.
 
 ## Empty recovery-content bucket `f5e2762e`
 
-Reverified at `b875c2d` (previously at `f36ba56`):
+Reverified at `662a354` (previously at `b875c2d` and `f36ba56`):
 all 16 reported inputs already pass on the starting checkout. The merged scanner
 initialization/reset correction above allows `bracket_argument_content` at EOF
 without an opener, including after `a` and after skipping the newline in `if(\n`.
@@ -236,7 +239,7 @@ The current C source was compared directly with the Rust scanner: creation uses
 The matching implementation and all regression cases were already present at
 this starting revision, so no duplicate test or behavior change was warranted.
 
-Checks rerun for this bucket at `b875c2d`:
+Checks rerun for this bucket at `662a354`:
 
 - `run_oracle(inputs = "bucket:f5e2762e")`: 16/16 pass.
 - `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs
