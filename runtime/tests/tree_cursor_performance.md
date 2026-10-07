@@ -51,48 +51,44 @@ The experimental runtime changes were reverted because they did not meet the
 required parse-time acceptance gate. That initial investigation retained only
 this report, not a parsing optimization.
 
-## Follow-up: optimize parsing, not the tree walk
+## Follow-up after the documentation-only result was rejected
 
-After the documentation-only result was rejected, a parser-loop profile over the
-same 360-file input list (no tree walking) showed approximately 7% self time in
-reductions and 5% in stack popping. Experiments transferred exclusively owned
-stack paths instead of cloning them and separated committed reductions from the
-general slice worklist. Main acquired overlapping implementations while these
-experiments were being tested. Those changes were merged rather than duplicated,
-and their earlier gains are **not** claimed as this branch's final contribution.
+A parser-loop profile over the same 360-file input list (no tree walking) showed
+approximately 7% self time in reductions and 5% in stack popping. Experiments
+transferred exclusively owned stack paths rather than cloning them, separated
+committed reductions from the general slice worklist, and exposed the small
+reduction/push paths to call-site inlining. These produced measurable gains at
+several intermediate main revisions:
 
-### Retained optimization after merging current main
+| Main revision | Main port/C | Candidate median port/C | Improvement |
+| --- | ---: | ---: | ---: |
+| `af419b8` | 1.121 | 1.026 | 8.5% |
+| `9edb29b` | 1.013 | 0.985 | 2.8% |
+| `5aedb91` | 0.974 | 0.950 | 2.5% |
 
-The final runtime delta is ordinary `#[inline]` hints on four functions:
+These are historical results, **not a claim of improvement over current main**.
+Main acquired overlapping implementations while the experiments were being
+tested. Each was merged and remeasured rather than claiming the old gains as a
+new contribution. Following main's lexer and one-child-pop optimizations, the
+remaining inline hints no longer beat the noise threshold.
 
-- `ts_parser__reduce`: expose its small committed-reduction path to advance,
-  while leaving the large general reduction worklist out of line;
-- `ts_stack_pop_count_in_place`: expose ownership transfer to its immediate
-  consumer;
-- `ts_stack_push` and `stack_node_new`: specialize push sites for an always-present
-  predecessor and remove extra call layers carrying owned subtree/node state.
+An additional safe layout experiment encoded a link's pending flag alongside
+its integer arena index. The Vec allocation bound guarantees room for that bit,
+so this needed no unsafe or narrower node IDs. It reduced StackLink from 32 to
+24 bytes and StackNode from 72 to 64 bytes on the measured target. The combined
+runtime still did not beat updated main (both measured about 0.917 port/C), so
+this experiment was also withdrawn.
 
-This keeps the algorithms, operation order, ownership rules, recovery costs,
-limits and progress checkpoints unchanged. No unsafe code, forced inlining,
-new allocations, or grammar-table changes are introduced.
+## Final state
 
-After merging main's direct reduction, stack condensation and subtree changes
-(main `5aedb91`), three pinned `run_oracle(inputs="benchmark")` runs gave:
+The branch retains **only regression tests and this investigation report**.
+Production parser and stack code match main `de86b49`; there are no new runtime
+algorithms, inlining policies, layout changes, unsafe code, or grammar changes.
+Main itself already measures below the requested overall 1.00 port/C target.
+There is no distinct current-branch speedup to submit through the optimization
+gate, and the earlier measurements must not be used to claim one.
 
-| | Overall port/C |
-| --- | --- |
-| Main | 0.974 |
-| Candidate run 1 | 0.950 |
-| Candidate run 2 | 0.950 |
-| Candidate run 3 | 0.947 |
-
-The median is **about 2.5% less parse time**, beyond the reported 1.9% noise.
-No language is slower; the measured overall port/C ratio is below 1.00.
-
-Validation: all **4,712 oracle inputs passed**, with incremental seed 7 and
-queries on; **190 runtime unit tests** and the runtime integration tests passed;
-`cargo clippy --workspace --all-targets -- -D warnings` was clean. New regression
-tests retained from the ownership experiments cover child-handle transfer,
-predecessor reference counts, extras/nulls, zero-count reductions,
-shared/short/branching fallback, and preservation of head scanner state, summary,
-and error baseline compared with pop-then-renumber.
+The retained tests exercise the now-shared ownership-transfer implementation:
+child-handle transfer, predecessor reference counts, extras/nulls, zero-count
+reductions, shared/short/branching fallback, and preservation of head scanner
+state, summary, and error baseline compared with pop-then-renumber.

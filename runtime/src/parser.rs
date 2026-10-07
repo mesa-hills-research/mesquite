@@ -1020,9 +1020,6 @@ pub(crate) fn ts_parser__shift(
     }
 }
 
-// Expose the small committed path to advance without inlining the large
-// general reduction worklist below it.
-#[inline]
 pub(crate) fn ts_parser__reduce(
     parser: &mut Parser,
     version: StackVersion,
@@ -2773,7 +2770,7 @@ mod parser3_tests {
                     .unwrap();
                 assert_eq!(ts_subtree_symbol(&link.subtree), symbol);
                 assert!(ts_subtree_extra(&link.subtree));
-                node = link.node();
+                node = link.node;
             }
             let tree = &parser.stack.arena.nodes[node.0].as_ref().unwrap().links[0]
                 .as_ref()
