@@ -37,6 +37,7 @@ members = [
     "grammars/ocaml",
     "grammars/ocaml_interface",
     "grammars/odin",
+    "grammars/perl",
     "grammars/php",
     "grammars/php_only",
     "grammars/powershell",
