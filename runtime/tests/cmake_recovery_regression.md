@@ -59,11 +59,13 @@ This follow-up changes only this verification note; it introduces no deviation
 from C and no new unsafe code.
 
 
-### Revalidation of `4d6cc948` at `8f652b4`
+### Revalidation of `4d6cc948` at `a0b7071`
 
-The assigned Registry-query input already passes on this starting revision.
-Direct comparison with the current C scanner confirms that the merged
-zero-valued creation/reset behavior above is the required correction; no
+The assigned Registry-query input already passes on this starting revision
+(previously verified at `8f652b4`). All checks below were rerun rather than
+relying on that earlier verification. Direct comparison with the current C
+scanner confirms that the merged zero-valued creation/reset behavior above is
+the required correction; no
 additional runtime change is warranted. All checks below were rerun at this
 revision, including the parser regression with fresh and reused scanner state,
 single-byte input chunks, and incremental repair/restoration. The reduced
@@ -179,10 +181,10 @@ lexer warning noted above. This change only strengthens regression coverage;
 there are no runtime changes, C deviations, new unsafe code, or generated-file
 changes.
 
-### ERROR-range revalidation at `5acc770`
+### ERROR-range revalidation at `0e2ef72`
 
 Rechecked the previously resolved bucket at this starting revision; all checks
-below were rerun, rather than relying on the earlier verification at `1717dd4`.
+below were rerun, rather than relying on the earlier verification at `5acc770`.
 Bucket `e0b0bff8` already passes on this starting checkout. Comparing the current
 C scanner with Rust confirms the merged zero-valued creation/reset fix remains
 correct; no new implementation change or duplicate regression is needed.
@@ -206,7 +208,7 @@ new unsafe code, warnings, or generated-file modifications are introduced.
 
 ## Empty recovery-content bucket `f5e2762e`
 
-Reverified at `1e51df0` (previously at `49dddb9`, `6a16e7c`, and `4949d42`):
+Reverified at `f36ba56` (previously at `1e51df0`, `49dddb9`, `6a16e7c`, and `4949d42`):
 all 16 reported inputs already pass on the starting checkout. The merged scanner
 initialization/reset correction above allows `bracket_argument_content` at EOF
 without an opener, including after `a` and after skipping the newline in `if(\n`.
@@ -234,7 +236,7 @@ The current C source was compared directly with the Rust scanner: creation uses
 The matching implementation and all regression cases were already present at
 this starting revision, so no duplicate test or behavior change was warranted.
 
-Checks rerun for this bucket at `1e51df0`:
+Checks rerun for this bucket at `f36ba56`:
 
 - `run_oracle(inputs = "bucket:f5e2762e")`: 16/16 pass.
 - `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs
@@ -253,8 +255,8 @@ changes are introduced.
 
 ## Unterminated-call bucket `7f8795fb`
 
-Reverified at `6674d74` (previously at `9a8563b`): all three reported inputs already pass on the starting
-checkout with the merged scanner
+Reverified at `7586f2b` (previously at `6674d74` and `9a8563b`): all three
+reported inputs already pass on the starting checkout with the merged scanner
 initialization/reset correction above. The current C scanner uses
 `ts_calloc` and clears both fields on empty or invalid-length snapshots, matching
 the Rust implementation. This allows recovery content without an opener:
@@ -271,7 +273,7 @@ input chunks. The earlier verification note incorrectly described all three coun
 as zero; the existing tests already assert the correct counts. No additional
 behavior change or duplicate test is needed.
 
-Validation rerun for this bucket at `6674d74`:
+Validation rerun for this bucket at `7586f2b`:
 
 - `run_oracle(inputs = "bucket:7f8795fb")`: 3/3 pass.
 - `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs
