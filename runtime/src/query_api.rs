@@ -1,6 +1,6 @@
 //! Official 0.25.10 Rust query binding surface; implementation unit query-api.
-// std::todo!("label") uses formatting, which is not const-compatible. This
-// temporary equivalent keeps the official const signatures on tagged stubs.
+// The standard todo macro formats its message, which is not const-compatible.
+// This temporary equivalent keeps the official const signatures on tagged stubs.
 macro_rules! todo {
     ($label:literal) => {
         ::core::panic!(concat!("not yet implemented: ", $label))
