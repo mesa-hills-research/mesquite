@@ -1,6 +1,37 @@
 # C parsing investigation — worker 8
 
-## Current candidate (against main `298df50`)
+## Merged candidate (against main `b362e28`)
+
+Merge commit `7cff8c7` resolves the overlap with main's non-owning child-summary
+accumulator and outlined leaf constructor. The unary shortcut now operates on
+`ChildSummary` plus a borrowed child, so fresh reductions still summarize before
+constructing an owning header. Main's `ts_subtree_new_leaf_with` callback and
+external-scanner initialization before Arc sharing are retained unchanged, along
+with all of main's regression tests. The remaining independent runtime changes
+are the unary shortcut and constructor/trailing-extra inline hints.
+
+Three post-merge pinned runs reported **0.854, 0.854, 0.855** overall port/C,
+versus main's **0.874**. The median improvement is approximately **2.3%**, above
+the reported 1.9% noise, with every language's median faster:
+
+| Language | New main port/C | Merged candidate median |
+| --- | ---: | ---: |
+| c | 0.86 | 0.85 |
+| cpp | 0.92 | 0.90 |
+| go | 0.87 | 0.85 |
+| java | 0.83 | 0.81 |
+| javascript | 0.90 | 0.87 |
+| python | 0.86 | 0.85 |
+| rust | 0.87 | 0.84 |
+| tsx | 0.87 | 0.85 |
+| typescript | 0.89 | 0.86 |
+
+Post-merge checks: all **4,712** incremental/query gate files pass; **194** unit
+tests and both integration tests pass; workspace check and warnings-denied
+workspace/all-target clippy pass. No unsafe or host-owned changes were added.
+Full kernel/fresh-repository validation remains with the host.
+
+## Original independent candidate (against main `298df50`)
 
 This supersedes the earlier report-only submission. There is now an independent
 production change in `subtree.rs`; the discarded stack/child-storage experiments
