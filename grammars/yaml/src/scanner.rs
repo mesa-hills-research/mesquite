@@ -1575,7 +1575,23 @@ pub(crate) fn create() -> Box<dyn ExternalScanner> {
 
 // This is the core schema's incremental DFA, not a post-token string parser:
 // trailing spaces, tabs, and schema freezing must be handled at the same points.
+#[inline]
 fn advance_schema(state: i8, c: i32, result: &mut ResultSchema) -> i8 {
+    // Most plain scalars freeze as strings at their first character. Keep this
+    // absorbing state in the scalar loop instead of dispatching the whole DFA
+    // for every remaining character. A frozen non-string retains its type only
+    // through C's four schema terminators (not through tabs).
+    if state == SCH_STT_FRZ {
+        if !matches!(c, 0 | 0x0d | 0x0a | 0x20) {
+            *result = ResultSchema::String;
+        }
+        SCH_STT_FRZ
+    } else {
+        advance_schema_dfa(state, c, result)
+    }
+}
+
+fn advance_schema_dfa(state: i8, c: i32, result: &mut ResultSchema) -> i8 {
     match state {
         SCH_STT_FRZ => {}
         0 => {
@@ -2175,6 +2191,56 @@ mod tests {
             SCH_STT_FRZ
         );
         assert_eq!(result, ResultSchema::String);
+    }
+
+    #[test]
+    fn frozen_schema_fast_path_matches_dfa_for_every_codepoint() {
+        for schema in [
+            ResultSchema::String,
+            ResultSchema::Int,
+            ResultSchema::Null,
+            ResultSchema::Bool,
+            ResultSchema::Float,
+        ] {
+            // Include invalid scalars and negative lookahead as well: the C
+            // resolver compares int32_t values without Unicode conversion.
+            for c in (0..=0x10ffff).chain([-1, 0x110000, i32::MIN, i32::MAX]) {
+                let mut expected = schema;
+                let expected_state = advance_schema_dfa(SCH_STT_FRZ, c, &mut expected);
+                let mut actual = schema;
+                let actual_state = advance_schema(SCH_STT_FRZ, c, &mut actual);
+                assert_eq!(
+                    (actual_state, actual),
+                    (expected_state, expected),
+                    "{schema:?} {c:#x}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn frozen_schema_preserves_types_only_through_spaces() {
+        for (input, symbol, end) in [
+            ("123   # comment", R_SGL_PLN_INT_BLK, 3),
+            ("123   456", R_SGL_PLN_STR_BLK, 9),
+            ("123\t # comment", R_SGL_PLN_STR_BLK, 3),
+            ("null   # comment", R_SGL_PLN_NUL_BLK, 4),
+            ("null   tail", R_SGL_PLN_STR_BLK, 11),
+            ("true   # comment", R_SGL_PLN_BOL_BLK, 4),
+            ("true \t# comment", R_SGL_PLN_STR_BLK, 4),
+            (".inf   # comment", R_SGL_PLN_FLT_BLK, 4),
+            (".inf   tail", R_SGL_PLN_STR_BLK, 11),
+            ("ordinary text", R_SGL_PLN_STR_BLK, 13),
+        ] {
+            let mut scanner = scanner();
+            let mut lexer = TestLexer::new(input);
+            assert!(
+                scanner.scan(&mut lexer, &valid(&[R_SGL_PLN_STR_BLK])),
+                "{input:?}"
+            );
+            assert_eq!(lexer.symbol, symbol as u16, "{input:?}");
+            assert_eq!(lexer.end, end, "{input:?}");
+        }
     }
 
     #[test]
