@@ -148,6 +148,13 @@ leaking freshly allocated strings. Actions are the host's header-free slices of
 `ParseActionEntry`; use `.action()` on each action entry, do not reinterpret a
 slice or allocate a new action Vec for every lookup. TableEntry count is len().
 
+The parser also owns a bounded 4096-entry lookup cache (32 KiB). It memoizes only
+compressed grammar rows; dense rows still use direct indexing. Each entry stores
+the full state/symbol key and its u16 table value, and collisions fall back to the
+original table scan. `ts_parser_set_language` must clear the cache even when the
+new language is rejected. Ordinary reset can retain it because tables are immutable.
+No cache entry owns grammar data or changes action/progress ordering.
+
 `LexerState` is persistent data, while `Lexer<'a>` is a short-lived adapter
 implementing `ts_port_tables::Lexer`. It borrows state, input, and an optional
 logger, and is constructed only while calling a generated lexer/scanner. State-only

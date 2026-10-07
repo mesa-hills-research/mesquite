@@ -40,16 +40,20 @@ pub(crate) struct TableEntry {
     pub actions: &'static [ParseActionEntry],
     pub is_reusable: bool,
 }
+const LOOKUP_CACHE_SIZE: usize = 4096;
+
 /// Parser-local memoization of immutable grammar lookups. The full state/symbol
 /// key is checked on every hit, so direct-map collisions only cause a new scan.
 /// Reset this cache whenever the parser's language changes.
 pub(crate) struct LookupCache {
-    entries: Box<[u64; 1024]>,
+    entries: Box<[u64; LOOKUP_CACHE_SIZE]>,
 }
 
 impl Default for LookupCache {
     fn default() -> Self {
-        Self { entries: Box::new([u64::MAX; 1024]) }
+        Self {
+            entries: Box::new([u64::MAX; LOOKUP_CACHE_SIZE]),
+        }
     }
 }
 
@@ -59,10 +63,16 @@ impl LookupCache {
     }
 
     fn lookup(&mut self, language: &Language, state: StateId, symbol: Symbol) -> u16 {
+        // Dense rows are already a single indexed load; cache only compressed rows.
+        if u32::from(state) < language.tables.large_state_count {
+            return ts_language_lookup(language, state, symbol);
+        }
         let key = (u32::from(state) << 16) | u32::from(symbol);
         let index = (usize::from(state) * 31 + usize::from(symbol) * 17) & (self.entries.len() - 1);
         let entry = &mut self.entries[index];
-        if (*entry >> 16) as u32 == key {
+        // Bits 0..16 hold the value and 16..48 the key. The unused high bits
+        // distinguish the empty sentinel from every possible state/symbol pair.
+        if *entry >> 16 == u64::from(key) {
             return *entry as u16;
         }
         let value = ts_language_lookup(language, state, symbol);
@@ -70,14 +80,22 @@ impl LookupCache {
         value
     }
 
-    pub fn table_entry(&mut self, language: &Language, state: StateId, symbol: Symbol) -> TableEntry {
+    pub fn table_entry(
+        &mut self,
+        language: &Language,
+        state: StateId,
+        symbol: Symbol,
+    ) -> TableEntry {
         if symbol == BUILTIN_SYM_ERROR || symbol == BUILTIN_SYM_ERROR_REPEAT {
             return TableEntry::default();
         }
         ts_assert!(u32::from(symbol) < language.tables.token_count);
         let index = self.lookup(language, state, symbol);
         let (is_reusable, actions) = language.tables.action_list(index as usize);
-        TableEntry { actions, is_reusable }
+        TableEntry {
+            actions,
+            is_reusable,
+        }
     }
 
     pub fn next_state(&mut self, language: &Language, state: StateId, symbol: Symbol) -> StateId {
@@ -85,8 +103,16 @@ impl LookupCache {
             0
         } else if u32::from(symbol) < language.tables.token_count {
             match self.actions(language, state, symbol).last() {
-                Some(ParseActionEntry::Action(ParseAction::Shift { state: next_state, extra, .. })) => {
-                    if *extra { state } else { *next_state }
+                Some(ParseActionEntry::Action(ParseAction::Shift {
+                    state: next_state,
+                    extra,
+                    ..
+                })) => {
+                    if *extra {
+                        state
+                    } else {
+                        *next_state
+                    }
                 }
                 _ => 0,
             }
@@ -95,7 +121,12 @@ impl LookupCache {
         }
     }
 
-    pub fn actions(&mut self, language: &Language, state: StateId, symbol: Symbol) -> &'static [ParseActionEntry] {
+    pub fn actions(
+        &mut self,
+        language: &Language,
+        state: StateId,
+        symbol: Symbol,
+    ) -> &'static [ParseActionEntry] {
         self.table_entry(language, state, symbol).actions
     }
 
@@ -103,8 +134,16 @@ impl LookupCache {
         self.lookup(language, state, symbol) != 0
     }
 
-    pub fn has_reduce_action(&mut self, language: &Language, state: StateId, symbol: Symbol) -> bool {
-        matches!(self.actions(language, state, symbol).first(), Some(ParseActionEntry::Action(ParseAction::Reduce { .. })))
+    pub fn has_reduce_action(
+        &mut self,
+        language: &Language,
+        state: StateId,
+        symbol: Symbol,
+    ) -> bool {
+        matches!(
+            self.actions(language, state, symbol).first(),
+            Some(ParseActionEntry::Action(ParseAction::Reduce { .. }))
+        )
     }
 }
 

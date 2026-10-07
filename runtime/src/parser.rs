@@ -2550,6 +2550,57 @@ mod parser3_tests {
     }
 
     #[test]
+    fn changing_language_invalidates_lookup_cache() {
+        fn unused_lex(_: &mut dyn ts_port_tables::Lexer, _: StateId) -> bool {
+            unreachable!()
+        }
+        static FIRST: std::sync::LazyLock<ts_port_tables::LanguageTables> =
+            std::sync::LazyLock::new(|| {
+                ts_port_tables::LanguageTables::decode(
+                    include_bytes!("../../grammars/c/src/tables.bin"),
+                    unused_lex,
+                    Some(unused_lex),
+                    None,
+                )
+            });
+        static SECOND: std::sync::LazyLock<ts_port_tables::LanguageTables> =
+            std::sync::LazyLock::new(|| {
+                let mut tables = FIRST.clone();
+                for &offset in &tables.small_parse_table_map {
+                    let mut index = offset as usize;
+                    let groups = tables.small_parse_table[index];
+                    index += 1;
+                    for _ in 0..groups {
+                        tables.small_parse_table[index] = 0;
+                        index += 2 + tables.small_parse_table[index + 1] as usize;
+                    }
+                }
+                tables
+            });
+        let first = Language::from(&*FIRST);
+        let second = Language::from(&*SECOND);
+        let state = FIRST.large_state_count as StateId;
+        let symbol = (0..FIRST.token_count as Symbol)
+            .find(|&symbol| {
+                !ts_language_table_entry(&first, state, symbol)
+                    .actions
+                    .is_empty()
+            })
+            .unwrap();
+        let mut parser = ts_parser_new();
+        for language in [&first, &second, &first] {
+            assert!(ts_parser_set_language(&mut parser, Some(language)));
+            assert_eq!(
+                parser
+                    .lookup_cache
+                    .table_entry(language, state, symbol)
+                    .actions,
+                ts_language_table_entry(language, state, symbol).actions,
+            );
+        }
+    }
+
+    #[test]
     fn reductions_reuse_slice_storage_without_retaining_children() {
         // Reductions only need the tables, not a generated lexer or scanner.
         static TABLES: std::sync::LazyLock<ts_port_tables::LanguageTables> =
