@@ -105,7 +105,7 @@ unsafe code, or generated-file changes are introduced.
 
 ## ERROR range bucket `e0b0bff8`
 
-Reverified at `61e4869`: all five reported inputs already pass on the starting
+Reverified at `3cb8c98`: all five reported inputs already pass on the starting
 checkout with the merged scanner initialization/reset correction above. Direct
 comparison with the current C scanner confirms that no additional implementation
 change is needed: creation uses `ts_calloc`, and invalid-length deserialization
@@ -126,7 +126,7 @@ checks both recovery starting after an identifier and recovery starting at byte
 zero, before and after an empty-snapshot reset. The differential oracle checks
 the complete resulting trees and progress callbacks for all five bucket inputs.
 
-Checks rerun for this bucket:
+Checks rerun for this bucket at `3cb8c98` (before this documentation-only update):
 
 - `run_oracle(inputs = "bucket:e0b0bff8")`: 5/5 pass.
 - `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs
