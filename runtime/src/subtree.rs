@@ -34,89 +34,6 @@ pub(crate) enum Subtree {
     Inline(InlineLeaf),
     Heap(Arc<SubtreeHeapData>),
 }
-/// Unary branches can keep their only child in the header instead of allocating
-/// a separate child buffer. Larger branches retain the transferred Vec.
-#[derive(Clone, Debug, Default)]
-pub(crate) enum SubtreeChildren {
-    #[default]
-    Empty,
-    One([Subtree; 1]),
-    Many(Vec<Subtree>),
-}
-
-impl SubtreeChildren {
-    pub fn as_slice(&self) -> &[Subtree] {
-        match self {
-            Self::Empty => &[],
-            Self::One(child) => child,
-            Self::Many(children) => children,
-        }
-    }
-
-    pub fn into_vec(self) -> Vec<Subtree> {
-        match self {
-            Self::Empty => Vec::new(),
-            Self::One([child]) => vec![child],
-            Self::Many(children) => children,
-        }
-    }
-
-    fn append_to(self, destination: &mut Vec<Subtree>) {
-        match self {
-            Self::Empty => {},
-            Self::One([child]) => destination.push(child),
-            Self::Many(mut children) => destination.append(&mut children),
-        }
-    }
-
-    #[cfg(test)]
-    fn push(&mut self, child: Subtree) {
-        *self = match std::mem::take(self) {
-            Self::Empty => Self::One([child]),
-            Self::One([first]) => Self::Many(vec![first, child]),
-            Self::Many(mut children) => { children.push(child); Self::Many(children) },
-        };
-    }
-}
-
-impl From<Vec<Subtree>> for SubtreeChildren {
-    fn from(mut children: Vec<Subtree>) -> Self {
-        match children.len() {
-            0 => Self::Empty,
-            1 => Self::One([children.pop().unwrap()]),
-            _ => Self::Many(children),
-        }
-    }
-}
-
-impl std::ops::Deref for SubtreeChildren {
-    type Target = [Subtree];
-    fn deref(&self) -> &Self::Target { self.as_slice() }
-}
-
-impl std::ops::DerefMut for SubtreeChildren {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        match self {
-            Self::Empty => &mut [],
-            Self::One(child) => child,
-            Self::Many(children) => children,
-        }
-    }
-}
-
-impl IntoIterator for SubtreeChildren {
-    type Item = Subtree;
-    type IntoIter = std::iter::Chain<std::option::IntoIter<Subtree>, std::vec::IntoIter<Subtree>>;
-    fn into_iter(self) -> Self::IntoIter {
-        let (one, many) = match self {
-            Self::Empty => (None, Vec::new()),
-            Self::One([child]) => (Some(child), Vec::new()),
-            Self::Many(children) => (None, children),
-        };
-        one.into_iter().chain(many)
-    }
-}
-
 /// A mutable subtree is an owned handle. `Arc::make_mut` before heap mutation.
 pub(crate) type MutableSubtree = Subtree;
 pub(crate) type SubtreeArray = Vec<Subtree>;
@@ -140,7 +57,7 @@ pub(crate) struct SubtreeHeapData {
     pub depends_on_column: bool,
     pub is_missing: bool,
     pub is_keyword: bool,
-    pub children: SubtreeChildren,
+    pub children: Vec<Subtree>,
     pub payload: SubtreePayload,
 }
 #[derive(Clone, Debug, Default)]
@@ -148,17 +65,8 @@ pub(crate) enum SubtreePayload {
     #[default]
     Leaf,
     Branch(BranchData),
-    ExternalInline { length: u8, data: [u8; 24] },
-    ExternalHeap(Arc<[u8]>),
+    External(ExternalScannerState),
     Error(i32),
-}
-impl From<ExternalScannerState> for SubtreePayload {
-    fn from(state: ExternalScannerState) -> Self {
-        match state {
-            ExternalScannerState::Inline { length, data } => Self::ExternalInline { length, data },
-            ExternalScannerState::Heap(data) => Self::ExternalHeap(data),
-        }
-    }
 }
 #[derive(Clone, Debug, Default)]
 pub(crate) struct BranchData {
@@ -199,8 +107,10 @@ impl Drop for SubtreeHeapData {
     #[inline]
     fn drop(&mut self) {
         // Most headers are leaves or have already been drained by release.
+        // Keep that case inline, without bringing the traversal loop into every
+        // Arc drop and every replacement of a freshly initialized header.
         if !self.children.is_empty() {
-            drop_subtree_children(std::mem::take(&mut self.children).into_vec());
+            drop_subtree_children(std::mem::take(&mut self.children));
         }
     }
 }
@@ -210,7 +120,7 @@ fn drop_subtree_children(mut pending: Vec<Subtree>) {
         if let Subtree::Heap(data) = tree
             && let Ok(mut data) = Arc::try_unwrap(data)
         {
-            std::mem::take(&mut data.children).append_to(&mut pending);
+            pending.append(&mut data.children);
         }
     }
 }
@@ -364,9 +274,9 @@ pub(crate) fn ts_subtree_new_leaf(
             has_external_tokens,
             depends_on_column,
             is_keyword,
-            children: SubtreeChildren::Empty,
+            children: Vec::new(),
             payload: if has_external_tokens {
-                ExternalScannerState::default().into()
+                SubtreePayload::External(ExternalScannerState::default())
             } else {
                 SubtreePayload::Leaf
             },
@@ -752,7 +662,7 @@ pub(crate) fn ts_subtree_new_node(
 /// introduces the need for copy-on-write uniqueness checks.
 pub(crate) fn ts_subtree_new_node_with(
     symbol: Symbol,
-    children: impl Into<SubtreeChildren>,
+    children: Vec<Subtree>,
     production_id: u32,
     language: &Language,
     initialize: impl FnOnce(&mut SubtreeHeapData),
@@ -768,7 +678,7 @@ pub(crate) fn ts_subtree_new_node_with(
         named: metadata.named,
         fragile_left: fragile,
         fragile_right: fragile,
-        children: children.into(),
+        children,
         payload: SubtreePayload::Branch(BranchData {
             production_id: production_id as u16,
             ..BranchData::default()
@@ -990,7 +900,7 @@ pub(crate) fn ts_subtree_edit(
                         extra: data.flags & EXTRA != 0,
                         is_missing: data.flags & MISSING != 0,
                         is_keyword: data.flags & KEYWORD != 0,
-                        children: SubtreeChildren::Empty,
+                        children: Vec::new(),
                         payload: SubtreePayload::Leaf,
                         ..SubtreeHeapData::default()
                     };
@@ -1335,15 +1245,15 @@ pub(crate) fn ts_subtree_print_dot_graph(
     writeln!(output, "}}")
 }
 
-pub(crate) fn ts_subtree_external_scanner_state(tree: &Subtree) -> Option<&[u8]> {
+pub(crate) fn ts_subtree_external_scanner_state(tree: &Subtree) -> Option<&ExternalScannerState> {
     let data = tree.heap()?;
-    if !data.has_external_tokens || !data.children.is_empty() {
-        return None;
-    }
-    match &data.payload {
-        SubtreePayload::ExternalInline { length, data } => Some(&data[..*length as usize]),
-        SubtreePayload::ExternalHeap(data) => Some(data),
-        _ => None,
+    if data.has_external_tokens
+        && data.children.is_empty()
+        && let SubtreePayload::External(state) = &data.payload
+    {
+        Some(state)
+    } else {
+        None
     }
 }
 
@@ -1356,9 +1266,9 @@ pub(crate) fn ts_subtree_external_scanner_state_eq(tree: &Subtree, other: &Subtr
     }
     // None represents C's static, zero-length scanner state.
     let left =
-        ts_subtree_external_scanner_state(tree).unwrap_or(&[]);
+        ts_subtree_external_scanner_state(tree).map_or(&[][..], ts_external_scanner_state_data);
     let right =
-        ts_subtree_external_scanner_state(other).unwrap_or(&[]);
+        ts_subtree_external_scanner_state(other).map_or(&[][..], ts_external_scanner_state_data);
     left == right
 }
 
@@ -1668,7 +1578,7 @@ mod layout_tests {
                 let mut observers = Vec::new();
                 for _ in 0..20_000 {
                     let data = Arc::new(SubtreeHeapData {
-                        children: vec![tree].into(),
+                        children: vec![tree],
                         payload: SubtreePayload::Branch(BranchData::default()),
                         ..SubtreeHeapData::default()
                     });
@@ -1876,19 +1786,25 @@ mod construction_tests {
         let state = ts_external_scanner_state_init(&[42; 25]);
         let child = Subtree::Heap(Arc::new(SubtreeHeapData {
             has_external_tokens: true,
-            payload: state.into(),
-            children: SubtreeChildren::Empty,
+            payload: SubtreePayload::External(state),
+            children: Vec::new(),
             ..SubtreeHeapData::default()
         }));
         let copied_child = ts_subtree_clone(&child);
         assert!(!copied_child.ptr_eq(&child));
+        let SubtreePayload::External(original) = &child.heap().unwrap().payload else {
+            unreachable!()
+        };
+        let SubtreePayload::External(copied) = &copied_child.heap().unwrap().payload else {
+            unreachable!()
+        };
         assert_eq!(
-            ts_subtree_external_scanner_state(&child),
-            ts_subtree_external_scanner_state(&copied_child)
+            ts_external_scanner_state_data(original),
+            ts_external_scanner_state_data(copied)
         );
 
         let parent = Subtree::Heap(Arc::new(SubtreeHeapData {
-            children: vec![child].into(),
+            children: vec![child],
             payload: SubtreePayload::Branch(BranchData::default()),
             ..SubtreeHeapData::default()
         }));
@@ -1916,7 +1832,7 @@ mod construction_tests {
         let tree = Subtree::Heap(Arc::new(SubtreeHeapData {
             symbol: 73,
             parse_state: 12,
-            children: SubtreeChildren::Empty,
+            children: Vec::new(),
             payload: SubtreePayload::Branch(BranchData {
                 production_id: 4,
                 dynamic_precedence: 10,
@@ -2066,7 +1982,7 @@ mod subtree_2_tests {
         let mut external = branch(3, Vec::new());
         let data = external.heap_mut().unwrap();
         data.has_external_tokens = true;
-        data.payload = ExternalScannerState::default().into();
+        data.payload = SubtreePayload::External(ExternalScannerState::default());
         let mut internal = branch(2, vec![external.clone(), leaf(4, 1)]);
         internal.heap_mut().unwrap().has_external_tokens = true;
         let mut root = branch(1, vec![external.clone(), internal.clone(), leaf(5, 1)]);
@@ -2084,8 +2000,8 @@ mod subtree_2_tests {
         let external = |bytes: &[u8]| {
             Subtree::Heap(Arc::new(SubtreeHeapData {
                 has_external_tokens: true,
-                payload: ts_external_scanner_state_init(bytes).into(),
-                children: SubtreeChildren::Empty,
+                payload: SubtreePayload::External(ts_external_scanner_state_init(bytes)),
+                children: Vec::new(),
                 ..SubtreeHeapData::default()
             }))
         };
@@ -2179,8 +2095,8 @@ mod summary_tests {
             has_external_tokens: true,
             has_external_scanner_state_change: true,
             depends_on_column: true,
-            children: Vec::new().into(),
-            payload: ExternalScannerState::default().into(),
+            children: Vec::new(),
+            payload: SubtreePayload::External(ExternalScannerState::default()),
             ..SubtreeHeapData::default()
         }));
         let hidden = Subtree::Heap(Arc::new(SubtreeHeapData {
@@ -2195,7 +2111,7 @@ mod summary_tests {
             },
             lookahead_bytes: 1,
             error_cost: 7,
-            children: vec![missing.clone()].into(),
+            children: vec![missing.clone()],
             payload: SubtreePayload::Branch(BranchData {
                 visible_child_count: 2,
                 named_child_count: 1,
@@ -2214,7 +2130,7 @@ mod summary_tests {
                 extent: Point { row: 0, column: 1 },
             },
             error_cost: 11,
-            children: Vec::new().into(),
+            children: Vec::new(),
             payload: SubtreePayload::Error(0),
             ..SubtreeHeapData::default()
         }));
@@ -2263,7 +2179,7 @@ mod summary_tests {
             symbol: 2,
             parse_state: 23,
             depends_on_column: true,
-            children: Vec::new().into(),
+            children: Vec::new(),
             payload: SubtreePayload::Branch(BranchData {
                 dynamic_precedence: 99,
                 ..BranchData::default()
@@ -2280,7 +2196,7 @@ mod summary_tests {
             fragile_left: true,
             has_external_tokens: true,
             has_external_scanner_state_change: true,
-            children: vec![child].into(),
+            children: vec![child],
             payload: SubtreePayload::Branch(BranchData::default()),
             ..SubtreeHeapData::default()
         };

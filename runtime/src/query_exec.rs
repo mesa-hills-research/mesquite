@@ -557,9 +557,9 @@ mod tests {
                 symbol,
                 payload: SubtreePayload::Leaf,
                 children: if repetition {
-                    vec![Subtree::Inline(InlineLeaf::default())].into()
+                    vec![Subtree::Inline(InlineLeaf::default())]
                 } else {
-                    Vec::new().into()
+                    Vec::new()
                 },
                 ..SubtreeHeapData::default()
             }))),

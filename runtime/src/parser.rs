@@ -430,7 +430,7 @@ pub(crate) fn ts_parser__external_scanner_deserialize(
     external_token: &Subtree,
 ) {
     let data = ts_subtree_external_scanner_state(external_token)
-        .unwrap_or(&[]);
+        .map_or(&[][..], ts_external_scanner_state_data);
     scanner.deserialize(data);
 }
 
@@ -547,7 +547,7 @@ pub(crate) fn ts_parser__lex(
                         version,
                     ))
                         .map_or(bytes.is_empty(), |state| {
-                            state == bytes
+                            ts_external_scanner_state_eq(state, bytes)
                         });
                 // Empty external tokens are allowed only if they change scanner state,
                 // or can advance parsing outside error recovery without being extras.
@@ -683,9 +683,9 @@ pub(crate) fn ts_parser__lex(
             let data = result
                 .heap_mut()
                 .expect("external tokens are heap subtrees");
-            data.payload = ts_external_scanner_state_init(
+            data.payload = SubtreePayload::External(ts_external_scanner_state_init(
                 &parser.scanner_buffer[..external_scanner_state_len as usize],
-            ).into();
+            ));
             data.has_external_scanner_state_change = external_scanner_state_changed;
         }
         result
@@ -987,7 +987,7 @@ pub(crate) fn ts_parser__select_children(
     let result = ts_parser__select_tree(parser, left, &scratch_tree);
     // C builds a non-owning header at the end of its scratch array. Rust owns
     // these temporary child handles, then recovers the Vec allocation for reuse.
-    parser.scratch_trees = std::mem::take(&mut scratch_tree.heap_mut().unwrap().children).into_vec();
+    parser.scratch_trees = std::mem::take(&mut scratch_tree.heap_mut().unwrap().children);
     parser.scratch_trees.clear();
     result
 }
@@ -1108,25 +1108,6 @@ fn ts_parser__reduce_general(
     end_of_non_terminal_extra: bool,
 ) -> StackVersion {
     let language = parser.language.unwrap();
-    if replace_version && count == 1 && !is_fragile
-        && let Some(child) = ts_stack_pop_one_in_place(&mut parser.stack)
-    {
-        let state = ts_stack_state(&parser.stack, version);
-        let next_state = parser.parse_table_cache.next_state(&language, state, symbol);
-        let parent = ts_subtree_new_node_with(
-            symbol, SubtreeChildren::One([child]), production_id as u32, &language,
-            |data| {
-                data.parse_state = state;
-                data.extra = end_of_non_terminal_extra && next_state == state;
-                let SubtreePayload::Branch(branch) = &mut data.payload else {
-                    unreachable!("a reduced node has branch data");
-                };
-                branch.dynamic_precedence += dynamic_precedence;
-            },
-        );
-        ts_stack_push(&mut parser.stack, &mut parser.tree_pool, version, parent, false, next_state);
-        return version;
-    }
     let initial_version_count = ts_stack_version_count(&parser.stack);
     let mut slices = ts_stack_pop_count(&mut parser.stack, &mut parser.tree_pool, version, count);
     let pop_size = slices.len();
@@ -2587,7 +2568,7 @@ impl<'tree> BalanceCursor<'tree> {
         matches!(tree, Subtree::Heap(data) if !data.children.is_empty() && Arc::strong_count(data) == 1)
     }
 
-    fn children_mut(tree: &mut Subtree) -> &mut [Subtree] {
+    fn children_mut(tree: &mut Subtree) -> &mut Vec<Subtree> {
         let Subtree::Heap(data) = tree else {
             unreachable!("only heap branches are balanced");
         };
@@ -2681,7 +2662,7 @@ mod parser3_tests {
     fn branch(symbol: Symbol, children: Vec<Subtree>) -> Subtree {
         Subtree::Heap(Arc::new(SubtreeHeapData {
             symbol,
-            children: children.into(),
+            children,
             payload: SubtreePayload::Branch(BranchData::default()),
             ..SubtreeHeapData::default()
         }))

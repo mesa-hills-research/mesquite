@@ -71,7 +71,7 @@ fn leaf(symbol: u8, size: u8, padding: u8, flags: u8) -> Subtree {
 
 fn branch(children: Vec<Subtree>) -> Subtree {
     Subtree::Heap(Arc::new(SubtreeHeapData {
-        children: children.into(),
+        children,
         payload: SubtreePayload::Branch(BranchData::default()),
         ..SubtreeHeapData::default()
     }))
@@ -117,7 +117,7 @@ fn child_iterator_tracks_padding_extents_and_structural_aliases() {
         padding: length(2, 1, 1),
         size: length(4, 1, 2),
         extra: true,
-        children: vec![].into(),
+        children: vec![],
         payload: SubtreePayload::Leaf,
         ..SubtreeHeapData::default()
     }));
@@ -175,7 +175,7 @@ fn relevance_and_cached_child_counts() {
     }
 
     let tree = tree(Subtree::Heap(Arc::new(SubtreeHeapData {
-        children: vec![leaf(1, 1, 0, VISIBLE)].into(),
+        children: vec![leaf(1, 1, 0, VISIBLE)],
         payload: SubtreePayload::Branch(BranchData {
             visible_child_count: 9,
             named_child_count: 4,

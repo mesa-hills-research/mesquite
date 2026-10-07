@@ -11,9 +11,30 @@ const DEFAULT_RANGE: Range = Range {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct ColumnData {
-    pub value: u32,
+    // The scalar column minus current_position.bytes. Ordinary one-byte
+    // advances change both by one, so this offset needs no per-byte updates.
+    offset: u32,
     pub valid: bool,
 }
+// A bounded copy of the provider's current chunk avoids a virtual `chunk()`
+// call for each ASCII byte without retaining references across input reads.
+// Non-ASCII bytes (including the 0x80 used for invalid slots) use the original
+// full-chunk decoder. Only bytes inside the current included range are cached.
+#[derive(Debug)]
+struct AsciiWindow {
+    bytes: [u8; 128],
+    start: u32,
+}
+
+impl Default for AsciiWindow {
+    fn default() -> Self {
+        Self {
+            bytes: [0x80; 128],
+            start: 0,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct LexerState {
     pub lookahead: i32,
@@ -33,6 +54,7 @@ pub(crate) struct LexerState {
     pub did_get_column: bool,
     pub column_data: ColumnData,
     pub debug_buffer: String,
+    ascii_window: AsciiWindow,
 }
 /// The generated lexers see this transient adapter. No client callback or chunk
 /// reference is ever stored in the persistent parser.
@@ -73,18 +95,29 @@ impl ts_port_tables::Lexer for Lexer<'_> {
 
 pub(crate) fn ts_lexer__set_column_data(lexer: &mut LexerState, value: u32) {
     lexer.column_data.valid = true;
-    lexer.column_data.value = value;
+    lexer.column_data.offset = value.wrapping_sub(lexer.current_position.bytes);
 }
 
 pub(crate) fn ts_lexer__increment_column_data(lexer: &mut LexerState) {
     if lexer.column_data.valid {
-        lexer.column_data.value = lexer.column_data.value.wrapping_add(1);
+        lexer.column_data.offset = lexer.column_data.offset.wrapping_add(1);
     }
 }
 
 pub(crate) fn ts_lexer__invalidate_column_data(lexer: &mut LexerState) {
     lexer.column_data.valid = false;
-    lexer.column_data.value = 0;
+    lexer.column_data.offset = 0;
+}
+
+fn column_value(lexer: &LexerState) -> u32 {
+    if lexer.column_data.valid {
+        lexer
+            .current_position
+            .bytes
+            .wrapping_add(lexer.column_data.offset)
+    } else {
+        0
+    }
 }
 
 pub(crate) fn ts_lexer__eof(lexer: &LexerState) -> bool {
@@ -96,10 +129,12 @@ pub(crate) fn ts_lexer__clear_chunk(lexer: &mut LexerState) {
     // ownership of its old chunk, but no lexer operation uses it until read.
     lexer.chunk_size = 0;
     lexer.chunk_start = 0;
+    lexer.ascii_window.bytes.fill(0x80);
 }
 
 #[inline(never)]
 pub(crate) fn ts_lexer__get_chunk(lexer: &mut Lexer<'_>) {
+    lexer.state.ascii_window.bytes.fill(0x80);
     lexer.state.chunk_start = lexer.state.current_position.bytes;
     lexer.input.read(
         lexer.state.current_position.bytes,
@@ -114,6 +149,23 @@ pub(crate) fn ts_lexer__get_chunk(lexer: &mut Lexer<'_>) {
 
 #[inline(always)]
 pub(crate) fn ts_lexer__get_lookahead(lexer: &mut Lexer<'_>) {
+    let offset = lexer
+        .state
+        .current_position
+        .bytes
+        .wrapping_sub(lexer.state.ascii_window.start);
+    if let Some(&byte) = lexer.state.ascii_window.bytes.get(offset as usize)
+        && byte.is_ascii()
+    {
+        lexer.state.lookahead_size = 1;
+        lexer.state.lookahead = i32::from(byte);
+        return;
+    }
+    get_lookahead_uncached(lexer);
+}
+
+#[inline(never)]
+fn get_lookahead_uncached(lexer: &mut Lexer<'_>) {
     let position_in_chunk = lexer
         .state
         .current_position
@@ -126,9 +178,18 @@ pub(crate) fn ts_lexer__get_lookahead(lexer: &mut Lexer<'_>) {
         return;
     }
 
-    let chunk =
-        &lexer.input.chunk()[position_in_chunk as usize..lexer.state.chunk_size as usize];
+    let chunk = &lexer.input.chunk()[position_in_chunk as usize..lexer.state.chunk_size as usize];
     if lexer.state.encoding == InputEncoding::Utf8 && chunk[0].is_ascii() {
+        let window = &mut lexer.state.ascii_window;
+        window.start = lexer.state.current_position.bytes;
+        // Only cache bytes in the current range. A cache hit in advance can
+        // then bypass both chunk-boundary and included-range checks.
+        let len = chunk
+            .len()
+            .min(window.bytes.len())
+            .min(lexer.state.current_range_end.saturating_sub(window.start) as usize);
+        window.bytes[..len].copy_from_slice(&chunk[..len]);
+        window.bytes[len..].fill(0x80);
         lexer.state.lookahead_size = 1;
         lexer.state.lookahead = i32::from(chunk[0]);
         return;
@@ -173,6 +234,7 @@ pub(crate) fn ts_lexer_goto(lexer: &mut LexerState, position: Length) {
     if position.bytes != lexer.current_position.bytes {
         ts_lexer__invalidate_column_data(lexer);
     }
+    let column = column_value(lexer);
     lexer.current_position = position;
 
     let mut found_included_range = false;
@@ -185,7 +247,10 @@ pub(crate) fn ts_lexer_goto(lexer: &mut LexerState, position: Length) {
                 };
             }
             lexer.current_included_range_index = i as u32;
-            lexer.current_range_end = range.end_byte;
+            if lexer.current_range_end != range.end_byte {
+                lexer.ascii_window.bytes.fill(0x80);
+                lexer.current_range_end = range.end_byte;
+            }
             found_included_range = true;
             break;
         }
@@ -217,20 +282,66 @@ pub(crate) fn ts_lexer_goto(lexer: &mut LexerState, position: Length) {
         lexer.lookahead_size = 1;
         lexer.lookahead = 0;
     }
+    if lexer.column_data.valid {
+        ts_lexer__set_column_data(lexer, column);
+    }
 }
 
 #[inline(always)]
 pub(crate) fn ts_lexer__do_advance(lexer: &mut Lexer<'_>, skip: bool) {
     let state = &mut *lexer.state;
+    if state.lookahead_size != 1 {
+        advance_complex(lexer, skip);
+        return;
+    }
+    state.current_position.bytes = state.current_position.bytes.wrapping_add(1);
+    if state.lookahead == i32::from(b'\n') {
+        state.current_position.extent.row = state.current_position.extent.row.wrapping_add(1);
+        state.current_position.extent.column = 0;
+        ts_lexer__set_column_data(state, 0);
+    } else {
+        state.current_position.extent.column = state.current_position.extent.column.wrapping_add(1);
+    }
+
+    let offset = state
+        .current_position
+        .bytes
+        .wrapping_sub(state.ascii_window.start);
+    if let Some(&byte) = state.ascii_window.bytes.get(offset as usize)
+        && byte.is_ascii()
+    {
+        if skip {
+            state.token_start_position = state.current_position;
+        }
+        state.lookahead = i32::from(byte);
+        return;
+    }
+
+    finish_advance(lexer, skip);
+}
+
+// Multibyte characters and initial zero-width lookahead take the
+// general position update; the ordinary byte path does not need those tests.
+#[inline(never)]
+fn advance_complex(lexer: &mut Lexer<'_>, skip: bool) {
+    let state = &mut *lexer.state;
     if state.lookahead_size != 0 {
+        let old_byte = state.current_position.bytes;
+        state.current_position.bytes = old_byte.wrapping_add(state.lookahead_size);
         if state.lookahead == i32::from(b'\n') {
             state.current_position.extent.row = state.current_position.extent.row.wrapping_add(1);
             state.current_position.extent.column = 0;
             ts_lexer__set_column_data(state, 0);
         } else {
-            let is_bom = state.current_position.bytes == 0 && state.lookahead == BYTE_ORDER_MARK;
-            if !is_bom {
-                ts_lexer__increment_column_data(state);
+            // Only multibyte code points (and the initial BOM) change the
+            // difference between the scalar column and the byte position.
+            if state.lookahead_size != 1 {
+                let is_bom = old_byte == 0 && state.lookahead == BYTE_ORDER_MARK;
+                state.column_data.offset = state
+                    .column_data
+                    .offset
+                    .wrapping_add(u32::from(!is_bom))
+                    .wrapping_sub(state.lookahead_size);
             }
             state.current_position.extent.column = state
                 .current_position
@@ -238,12 +349,13 @@ pub(crate) fn ts_lexer__do_advance(lexer: &mut Lexer<'_>, skip: bool) {
                 .column
                 .wrapping_add(state.lookahead_size);
         }
-        state.current_position.bytes = state
-            .current_position
-            .bytes
-            .wrapping_add(state.lookahead_size);
     }
+    finish_advance(lexer, skip);
+}
 
+#[inline(never)]
+fn finish_advance(lexer: &mut Lexer<'_>, skip: bool) {
+    let state = &mut *lexer.state;
     if state.current_position.bytes >= state.current_range_end && !advance_range(state) {
         if skip {
             state.token_start_position = state.current_position;
@@ -269,12 +381,16 @@ pub(crate) fn ts_lexer__do_advance(lexer: &mut Lexer<'_>, skip: bool) {
 // C loop (including empty ranges and their end positions) on this slow path.
 #[inline(never)]
 fn advance_range(state: &mut LexerState) -> bool {
+    let column = column_value(state);
     while let Some(range) = state
         .included_ranges
         .get(state.current_included_range_index as usize)
     {
         if state.current_position.bytes < range.end_byte && range.end_byte != range.start_byte {
             state.current_range_end = range.end_byte;
+            if state.column_data.valid {
+                ts_lexer__set_column_data(state, column);
+            }
             return true;
         }
         state.current_included_range_index += 1;
@@ -289,6 +405,9 @@ fn advance_range(state: &mut LexerState) -> bool {
         }
     }
     state.current_range_end = 0;
+    if state.column_data.valid {
+        ts_lexer__set_column_data(state, column);
+    }
     false
 }
 
@@ -298,8 +417,18 @@ pub(crate) fn ts_lexer__advance(lexer: &mut Lexer<'_>, skip: bool) {
         return;
     }
     if lexer.logger.is_some() {
-        log_advance(lexer, skip);
+        advance_with_logging(lexer, skip);
+    } else {
+        ts_lexer__do_advance(lexer, skip);
     }
+}
+
+// Do not rejoin the hot path after logging: making the complete logged advance
+// out of line also avoids saving registers for the logger on every character.
+#[cold]
+#[inline(never)]
+fn advance_with_logging(lexer: &mut Lexer<'_>, skip: bool) {
+    log_advance(lexer, skip);
     ts_lexer__do_advance(lexer, skip);
 }
 
@@ -361,7 +490,7 @@ pub(crate) fn ts_lexer__get_column(lexer: &mut Lexer<'_>) -> u32 {
             }
         }
     }
-    lexer.state.column_data.value
+    column_value(lexer.state)
 }
 
 pub(crate) fn ts_lexer__is_at_included_range_start(lexer: &LexerState) -> bool {
@@ -414,6 +543,7 @@ pub(crate) fn ts_lexer_reset(lexer: &mut LexerState, position: Length) {
     }
 }
 
+#[inline]
 pub(crate) fn ts_lexer_start(lexer: &mut Lexer<'_>) {
     lexer.state.token_start_position = lexer.state.current_position;
     lexer.state.token_end_position = LENGTH_UNDEFINED;
@@ -855,10 +985,10 @@ mod tests {
         let mut state = ts_lexer_init();
         ts_lexer__increment_column_data(&mut state);
         assert!(!state.column_data.valid);
-        assert_eq!(state.column_data.value, 0);
+        assert_eq!(column_value(&state), 0);
         ts_lexer__set_column_data(&mut state, u32::MAX);
         ts_lexer__increment_column_data(&mut state);
-        assert_eq!(state.column_data.value, 0);
+        assert_eq!(column_value(&state), 0);
         ts_lexer__invalidate_column_data(&mut state);
         assert!(!state.column_data.valid);
         state.current_position = LENGTH_MAX;
@@ -948,6 +1078,93 @@ mod tests {
                 ]
             );
         }
+    }
+
+    #[test]
+    fn cached_ascii_runs_cross_windows_chunks_newlines_and_unicode() {
+        let text = format!(
+            "{}\n\0é{}😀{}",
+            "a".repeat(127),
+            "b".repeat(123),
+            "c".repeat(130)
+        );
+        for chunk_sizes in [&[][..], &[129, 127, 5, 131][..]] {
+            let mut state = ts_lexer_init();
+            let mut input = RecordingInput::new(text.as_bytes(), chunk_sizes);
+            let mut lexer = Lexer {
+                state: &mut state,
+                input: &mut input,
+                logger: None,
+            };
+            ts_lexer_start(&mut lexer);
+            let mut expected = length_zero();
+            let mut scalar_column = 0;
+            for (byte, character) in text.char_indices() {
+                assert_eq!(lexer.state.current_position, expected);
+                assert_eq!(lexer.state.current_position.bytes, byte as u32);
+                assert_eq!(lexer.lookahead(), character as i32);
+                assert_eq!(lexer.get_column(), scalar_column);
+                assert!(!lexer.eof()); // The embedded NUL is a character.
+                let width = character.len_utf8() as u32;
+                expected.bytes += width;
+                if character == '\n' {
+                    expected.extent.row += 1;
+                    expected.extent.column = 0;
+                    scalar_column = 0;
+                } else {
+                    expected.extent.column += width;
+                    scalar_column += 1;
+                }
+                let skip = byte % 3 == 0;
+                lexer.advance(skip);
+                if skip {
+                    assert_eq!(lexer.state.token_start_position, expected);
+                }
+            }
+            assert_eq!(lexer.state.current_position, expected);
+            assert_eq!(lexer.get_column(), scalar_column);
+            assert!(lexer.eof());
+        }
+    }
+
+    #[test]
+    fn shrinking_ranges_invalidates_cached_bytes_and_preserves_scalar_columns() {
+        let mut state = ts_lexer_init();
+        let mut input = RecordingInput::new(b"abcdefgh", &[]);
+        let mut lexer = Lexer {
+            state: &mut state,
+            input: &mut input,
+            logger: None,
+        };
+        ts_lexer_start(&mut lexer);
+        lexer.advance(false);
+        assert_eq!(lexer.get_column(), 1);
+        // The old window spans bytes that are now excluded. Changing ranges at
+        // the current byte must discard it, even though the input is unchanged.
+        assert!(ts_lexer_set_included_ranges(
+            lexer.state,
+            &[range(0, 2, 0), range(4, 8, 1)]
+        ));
+        ts_lexer_start(&mut lexer);
+        lexer.advance(true);
+        assert_eq!(lexer.state.current_position, position(4, 1, 0));
+        assert_eq!(lexer.state.token_start_position, position(4, 1, 0));
+        assert_eq!(lexer.lookahead(), i32::from(b'e'));
+        assert_eq!(lexer.get_column(), 2);
+        // goto's same-byte case can itself relocate into a newly included
+        // range without invalidating the scalar column, just as in C.
+        assert!(ts_lexer_set_included_ranges(lexer.state, &[range(6, 8, 2)]));
+        ts_lexer_start(&mut lexer);
+        assert_eq!(lexer.state.current_position, position(6, 2, 0));
+        assert_eq!(lexer.get_column(), 2);
+        ts_lexer__set_column_data(lexer.state, u32::MAX);
+        lexer.advance(false);
+        assert_eq!(lexer.get_column(), 0);
+        assert_eq!(lexer.lookahead(), i32::from(b'h'));
+        lexer.advance(false);
+        assert!(lexer.eof());
+        assert_eq!(lexer.get_column(), 1);
+        assert_eq!(input.reads, [(0, point_new(0, 0))]);
     }
 
     #[test]

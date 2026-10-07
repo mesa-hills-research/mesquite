@@ -722,30 +722,6 @@ pub(crate) fn ts_stack_pop_count(
     )
 }
 
-/// Transfer a unary reduction's child without constructing a temporary array.
-/// All guards precede mutation so extras and shared paths use ordinary popping.
-pub(crate) fn ts_stack_pop_one_in_place(stack: &mut Stack) -> Option<Subtree> {
-    if stack.heads.len() != 1 || stack.heads[0].status != StackStatus::Active {
-        return None;
-    }
-    let top = stack.heads[0].node;
-    let node = stack.arena.node_mut(top);
-    if node.ref_count != 1 || node.link_count != 1 {
-        return None;
-    }
-    let link = node.links[0].as_ref()?;
-    if link.subtree.is_null() || ts_subtree_extra(&link.subtree) {
-        return None;
-    }
-    let link = node.links[0].take().unwrap();
-    stack.arena.nodes[top.0] = None;
-    stack.arena.free.push(top);
-    stack.heads[0].node = link.node;
-    stack.slices.clear();
-    stack.iterators.clear();
-    Some(link.subtree)
-}
-
 /// Fuse a single-path pop with removal of its original version. The caller must
 /// be committed to replacing that version (no alternative reduction/shift).
 /// Refuse shared or branching prefixes without changing anything, so the full
@@ -1167,7 +1143,7 @@ pub(crate) fn ts_stack_print_dot_graph(
             let state = ts_subtree_external_scanner_state(&head.last_external_token)
                 .expect("last external token must have scanner state");
             write!(output, "\nexternal_scanner_state:")?;
-            for &byte in state {
+            for &byte in ts_external_scanner_state_data(state) {
                 // C promotes each signed char to int before formatting as %X.
                 write!(output, " {:2X}", byte as i8 as i32 as u32)?;
             }
@@ -1391,7 +1367,7 @@ mod stack2_tests {
     fn error_callback_pops_only_the_first_error_path() {
         let error = Subtree::Heap(Arc::new(SubtreeHeapData {
             symbol: ts_port_tables::BUILTIN_SYM_ERROR,
-            children: Vec::new().into(),
+            children: Vec::new(),
             payload: SubtreePayload::Leaf,
             ..SubtreeHeapData::default()
         }));
@@ -1619,7 +1595,7 @@ mod stack_1_tests {
         let heap = |symbol| {
             let data = Arc::new(SubtreeHeapData {
                 symbol,
-                children: Vec::new().into(),
+                children: Vec::new(),
                 payload: SubtreePayload::Leaf,
                 ..SubtreeHeapData::default()
             });
@@ -1711,7 +1687,7 @@ mod stack_1_tests {
                 extent: Point { row: 2, column: 2 },
             },
             error_cost: 23,
-            children: vec![leaf(2, VISIBLE)].into(),
+            children: vec![leaf(2, VISIBLE)],
             payload: SubtreePayload::Branch(BranchData {
                 visible_descendant_count: 3,
                 dynamic_precedence: -7,
@@ -1750,7 +1726,7 @@ mod stack_1_tests {
         let error = Subtree::Heap(Arc::new(SubtreeHeapData {
             symbol: 9,
             error_cost: 1,
-            children: Vec::new().into(),
+            children: Vec::new(),
             payload: SubtreePayload::Leaf,
             ..SubtreeHeapData::default()
         }));
@@ -2022,7 +1998,7 @@ mod stack_1_tests {
         let heap = Subtree::Heap(Arc::new(SubtreeHeapData {
             symbol: 3,
             visible: true,
-            children: Vec::new().into(),
+            children: Vec::new(),
             payload: SubtreePayload::Leaf,
             size: Length {
                 bytes: 3,
