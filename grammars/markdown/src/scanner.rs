@@ -207,6 +207,20 @@ const COLUMN: usize = 3;
 const FENCE_LENGTH: usize = 4;
 const HEADER_SIZE: usize = 5;
 const INLINE_BLOCKS: usize = 4;
+const CONTENT_LINE: u8 = 1;
+const CONTENT_SOFT: u8 = 1 << 1;
+const CONTENT_EOF: u8 = 1 << 2;
+const CONTENT_BACKTICK: u8 = 1 << 3;
+const CONTENT_TILDE: u8 = 1 << 4;
+const CONTENT_TABLE: u8 = 1 << 5;
+const CONTENT_BLANK: u8 = 1 << 6;
+const SCAN_TEXT: u8 = CONTENT_LINE | CONTENT_SOFT | CONTENT_EOF;
+const SCAN_CODE: u8 = CONTENT_LINE | CONTENT_BACKTICK;
+const SCAN_BLOCK_LINE: u8 = CONTENT_LINE;
+const SCAN_TABLE_LINE: u8 = CONTENT_LINE | CONTENT_TABLE | CONTENT_EOF;
+// Classification sentinel only; dynamic scans clear scan_context instead.
+const SCAN_DYNAMIC: u8 = 1 << 7;
+const SIMULATING: u8 = 1 << 7;
 
 pub(crate) struct Scanner {
     // A header and four native-endian blocks: all snapshots small enough for
@@ -215,7 +229,9 @@ pub(crate) struct Scanner {
     spilled_blocks: Vec<[u8; 4]>,
     // 0..=4 is the inline block count; 5 means use spilled_blocks.len().
     inline_count: u8,
-    simulate: bool,
+    // Transient content flags in bits 0..7; C's simulation flag in bit 7.
+    // Neither is serialized. An external scan selects flags and clears simulation.
+    scan_context: u8,
     modes: &'static ModeSymbols,
     // The hottest row is held directly to avoid a dependent modes-table load
     // on every text scan. The complete scanner still fits in 64 bytes.
@@ -228,7 +244,7 @@ impl Default for Scanner {
             snapshot: [0; HEADER_SIZE + 4 * INLINE_BLOCKS],
             spilled_blocks: Vec::new(),
             inline_count: 0,
-            simulate: false,
+            scan_context: 0,
             modes: &DEFAULT_MODES,
             text_mode: &TEXT_FLAGS,
         }
@@ -261,14 +277,15 @@ fn is_punctuation(c: i32) -> bool {
     matches!(c as u8, b'!'..=b'/' | b':'..=b'@' | b'['..=b'`' | b'{'..=b'~')
 }
 
-// All 47 real flags fit below this sentinel. Common text, fenced-code and
-// block-line states, plus fixed paragraph-interruption lookahead, each get a
-// specialized dispatcher. Other token sets share the dynamic implementation.
+// All 47 real flags fit below this sentinel. Content-only token sets share
+// a small dispatcher; paragraph-interruption lookahead and closing fences use
+// compile-time flags. The complete block scanner handles the remaining sets.
 const DYNAMIC_SYMBOLS: u64 = u64::MAX;
 const TEXT_SYMBOLS: u64 = (1 << LINE_ENDING) | (1 << SOFT_LINE_ENDING) | (1 << TOKEN_EOF);
 const CODE_SYMBOLS: u64 = (1 << LINE_ENDING) | (1 << BLOCK_CLOSE)
     | (1 << FENCED_CODE_BLOCK_END_BACKTICK);
 const BLOCK_LINE_SYMBOLS: u64 = (1 << LINE_ENDING) | (1 << BLOCK_CLOSE);
+const TABLE_LINE_SYMBOLS: u64 = (1 << LINE_ENDING) | (1 << TOKEN_EOF) | (1 << PIPE_TABLE_LINE_ENDING);
 
 const fn flags_for(mask: u64) -> [bool; 47] {
     let mut flags = [false; 47];
@@ -283,29 +300,28 @@ const fn flags_for(mask: u64) -> [bool; 47] {
 static TEXT_FLAGS: [bool; 47] = flags_for(TEXT_SYMBOLS);
 static CODE_FLAGS: [bool; 47] = flags_for(CODE_SYMBOLS);
 static BLOCK_LINE_FLAGS: [bool; 47] = flags_for(BLOCK_LINE_SYMBOLS);
+static TABLE_LINE_FLAGS: [bool; 47] = flags_for(TABLE_LINE_SYMBOLS);
 
 struct ModeSymbols {
     text: &'static [bool; 47],
     code: &'static [bool; 47],
     block_line: &'static [bool; 47],
+    table_line: &'static [bool; 47],
 }
 
 static DEFAULT_MODES: ModeSymbols = ModeSymbols {
     text: &TEXT_FLAGS,
     code: &CODE_FLAGS,
     block_line: &BLOCK_LINE_FLAGS,
+    table_line: &TABLE_LINE_FLAGS,
 };
 static GRAMMAR_MODES: OnceLock<ModeSymbols> = OnceLock::new();
 
 impl ModeSymbols {
     fn new() -> Self {
-        let rows = crate::language()
-            .external_scanner
-            .as_ref()
-            .unwrap()
-            .states
-            .as_chunks::<47>()
-            .0;
+        let flags = crate::language()
+            .external_scanner.as_ref().unwrap().states.as_slice();
+        let rows = flags.as_chunks::<47>().0;
         let find = |flags: &'static [bool; 47]| {
             rows.iter().find(|row| *row == flags).unwrap_or(flags)
         };
@@ -313,6 +329,7 @@ impl ModeSymbols {
             text: find(&TEXT_FLAGS),
             code: find(&CODE_FLAGS),
             block_line: find(&BLOCK_LINE_FLAGS),
+            table_line: find(&TABLE_LINE_FLAGS),
         }
     }
 }
@@ -327,43 +344,97 @@ const PARAGRAPH_SYMBOLS: u64 = {
     flags
 };
 
-/// Fixed modes retain the same control flow while exposing token validity as
-/// compile-time constants. The dynamic mode reads the caller's actual flags.
-#[derive(Clone, Copy)]
-struct Symbols<'a, const FLAGS: u64>(&'a [bool; 47]);
+// Gather eight 0/1 bytes into one byte with no carries between their bits.
+// Explicit little-endian conversion makes the multiplication portable, without
+// reinterpreting bool storage. Six groups cover the 47 validity flags.
+fn pack_flags(flags: &[bool; 47]) -> u64 {
+    fn eight(flags: &[bool; 8]) -> u64 {
+        let bytes = u64::from_le_bytes(flags.map(u8::from));
+        bytes.wrapping_mul(0x0102_0408_1020_4080) >> 56
+    }
+    let chunks = flags.as_chunks::<8>().0;
+    let mut mask = 0;
+    for (i, chunk) in chunks.iter().enumerate() {
+        mask |= eight(chunk) << (8 * i);
+    }
+    // The last eight flags overlap the last complete group by one entry.
+    mask | ((eight(flags.last_chunk::<8>().unwrap()) >> 1) << 40)
+}
 
-impl<const FLAGS: u64> Symbols<'_, FLAGS> {
+#[derive(Clone, Copy)]
+struct EncodedSymbols {
+    mask: u64,
+    content: u8,
+}
+
+impl EncodedSymbols {
+    // Keep fallback packing/classification out of the hot immutable-row entry.
+    #[inline(never)]
+    fn new(flags: &[bool; 47]) -> Self {
+        let mask = pack_flags(flags);
+        // None of these validity flags is read in a content-only scan.
+        // NO_INDENTED_CHUNK matters only with INDENTED_CHUNK_START, which
+        // makes the classification dynamic. The other three are never read.
+        let ignored = (1 << BLOCK_CLOSE) | (1 << BLOCK_CONTINUATION)
+            | (1 << ERROR) | (1 << NO_INDENTED_CHUNK);
+        let tokens = [
+            LINE_ENDING, SOFT_LINE_ENDING, TOKEN_EOF,
+            FENCED_CODE_BLOCK_END_BACKTICK, FENCED_CODE_BLOCK_END_TILDE,
+            PIPE_TABLE_LINE_ENDING, BLANK_LINE_START,
+        ];
+        let mut content = 0;
+        let mut covered = ignored;
+        for (i, token) in tokens.into_iter().enumerate() {
+            covered |= 1 << token;
+            content |= (((mask >> token) & 1) as u8) << i;
+        }
+        if mask & !covered != 0 {
+            content = SCAN_DYNAMIC;
+        }
+        Self { mask, content }
+    }
+}
+
+/// Fixed helpers expose token validity as compile-time constants. The dynamic
+/// helpers read a packed copy of the caller's actual flags.
+#[derive(Clone, Copy)]
+struct Symbols<const FLAGS: u64>(u64);
+
+impl<const FLAGS: u64> Symbols<FLAGS> {
+    fn new(flags: &[bool; 47]) -> Self {
+        Self(if FLAGS == DYNAMIC_SYMBOLS { pack_flags(flags) } else { FLAGS })
+    }
+
     #[inline]
     fn contains(self, symbol: usize) -> bool {
-        if FLAGS == DYNAMIC_SYMBOLS {
-            self.0[symbol]
-        } else {
-            FLAGS & (1 << symbol) != 0
-        }
+        let mask = if FLAGS == DYNAMIC_SYMBOLS { self.0 } else { FLAGS };
+        mask & (1 << symbol) != 0
     }
 }
 
 impl ExternalScanner for Scanner {
     fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
-        self.simulate = false;
-        // C's token array has exactly 47 entries. Validate that prefix once so
-        // the dynamic helpers also avoid carrying a slice length and checking
-        // each constant token index. Short caller-provided slices are invalid.
         let Some(valid_symbols) = valid_symbols.first_chunk::<47>() else {
+            self.set_simulating(false);
             return false;
         };
-        // Specialize the common line-oriented states, rather than skipping
-        // invalid handlers: stars, underscores and fences still perform their
-        // original advances and marks even when no token can be returned.
-        if std::ptr::eq(self.text_mode, valid_symbols) {
-            self.scan_content::<TEXT_SYMBOLS>(lexer)
+        self.scan_context = if std::ptr::eq(self.text_mode, valid_symbols) {
+            SCAN_TEXT
         } else if std::ptr::eq(self.modes.code, valid_symbols) {
-            self.scan_mode::<CODE_SYMBOLS>(lexer, Symbols(valid_symbols))
+            SCAN_CODE
         } else if std::ptr::eq(self.modes.block_line, valid_symbols) {
-            self.scan_mode::<BLOCK_LINE_SYMBOLS>(lexer, Symbols(valid_symbols))
+            SCAN_BLOCK_LINE
+        } else if std::ptr::eq(self.modes.table_line, valid_symbols) {
+            SCAN_TABLE_LINE
         } else {
-            self.scan_mode::<DYNAMIC_SYMBOLS>(lexer, Symbols(valid_symbols))
-        }
+            let encoded = EncodedSymbols::new(valid_symbols);
+            if encoded.content == SCAN_DYNAMIC {
+                self.scan_context = 0;
+                return self.scan_mode::<DYNAMIC_SYMBOLS>(lexer, Symbols(encoded.mask));
+            }
+            encoded.content
+        };
+        self.scan_content(lexer)
     }
 
     fn serialize(&mut self, buffer: &mut [u8]) -> usize {
@@ -431,7 +502,7 @@ impl ExternalScanner for Scanner {
 pub(crate) fn create() -> Box<dyn ExternalScanner> {
     // These references come from the grammar's immutable static table, so
     // pointer equality proves each token set without caching arbitrary data.
-    // Other rows (including duplicates) safely use dynamic dispatch.
+    // Other rows (including duplicates) are classified by their actual flags.
     let modes = GRAMMAR_MODES.get_or_init(ModeSymbols::new);
     Box::new(Scanner {
         modes,
@@ -495,6 +566,21 @@ const TEXT_ACTIVE: u64 = {
     mask
 };
 
+// After consuming indentation, NUL/EOF must reject rather than taking the
+// initial EOF branch. Other filter hits still compare the full code point.
+const CONTENT_AFTER_SPACE: [u8; 128] = {
+    let mut active = [0; 128];
+    active[b'\t' as usize] = 1;
+    active[b'\n' as usize] = 1;
+    active[b'\r' as usize] = 1;
+    active[b' ' as usize] = 1;
+    active[b'*' as usize] = 1;
+    active[b'_' as usize] = 1;
+    active[b'`' as usize] = 1;
+    active[b'~' as usize] = 1;
+    active
+};
+
 // Use seven bits for header runs: ASCII letters must not interrupt this hot
 // loop. Unicode aliases may end a run, but the outer loop compares full code
 // points, consumes each alias normally, and resumes the run.
@@ -510,47 +596,147 @@ const TABLE_HEADER_BOUNDARY: [bool; 128] = {
 };
 
 impl Scanner {
+    #[inline]
+    fn simulating(&self) -> bool {
+        self.scan_context & SIMULATING != 0
+    }
+
+    #[inline]
+    fn set_simulating(&mut self, simulate: bool) {
+        self.scan_context = (self.scan_context & !SIMULATING) | if simulate { SIMULATING } else { 0 };
+    }
+
     // Keep ordinary text rejection in the external entry: it needs no cached
     // lexer on the stack, validity slice, or delimiter-dispatch frame. C's star,
     // underscore and fence attempts still advance even when their tokens are
     // invalid, so those characters must always reach the full scanner.
     #[inline(always)]
-    fn scan_content<const FLAGS: u64>(&mut self, lexer: &mut dyn Lexer) -> bool {
+    fn scan_content(&mut self, lexer: &mut dyn Lexer) -> bool {
         let mut lookahead = lexer.lookahead();
-        if self.snapshot[STATE] & STATE_MATCHING == 0 && lookahead != 0 {
-            if lookahead == i32::from(b' ') {
-                self.snapshot[COLUMN] = self.snapshot[COLUMN].wrapping_add(1) % 4;
-                self.snapshot[INDENTATION] = self.snapshot[INDENTATION].wrapping_add(1);
-                lexer.advance(false);
-                lookahead = lexer.lookahead();
-                // C checks EOF only before indentation. After a space, both
-                // actual EOF and an embedded NUL take ordinary text rejection.
-                if lookahead == 0 {
-                    return false;
-                }
-            }
-            if TEXT_ACTIVE & 1u64.wrapping_shl(lookahead as u32) == 0 {
+        let matching = self.snapshot[STATE] & STATE_MATCHING;
+        let active = (TEXT_ACTIVE.wrapping_shr(lookahead as u32) as u8) & 1;
+        if active | matching == 0 {
+            return false;
+        }
+        if lookahead == i32::from(b' ') && matching == 0 {
+            self.snapshot[COLUMN] = self.snapshot[COLUMN].wrapping_add(1) % 4;
+            self.snapshot[INDENTATION] = self.snapshot[INDENTATION].wrapping_add(1);
+            lexer.advance(false);
+            lookahead = lexer.lookahead();
+            // EOF is only recognized before indentation; this filter excludes
+            // NUL as well as ordinary content after the initial space.
+            if CONTENT_AFTER_SPACE[lookahead as usize & 127] == 0 {
                 return false;
             }
         }
-        self.scan_content_slow::<FLAGS>(lexer, lookahead)
+        self.scan_content_slow(lexer, lookahead)
     }
 
+    // All content-only flag combinations share their invalid block-start
+    // attempts. Retain those advances/marks even when returning false.
     #[inline(never)]
-    fn scan_content_slow<const FLAGS: u64>(&mut self, lexer: &mut dyn Lexer, lookahead: i32) -> bool {
-        self.scan_inner::<FLAGS>(
-            &mut ScanLexer { inner: lexer, lookahead },
-            Symbols(&flags_for(FLAGS)),
-        )
+    fn scan_content_slow(&mut self, lexer: &mut dyn Lexer, lookahead: i32) -> bool {
+        let mut lexer = ScanLexer { inner: lexer, lookahead };
+        // Only the external entry calls this helper, with simulation cleared.
+        if lexer.eof() {
+            if self.scan_context & CONTENT_EOF != 0 {
+                lexer.set_result_symbol(TOKEN_EOF as u16);
+                return true;
+            }
+            if self.inline_count != 0 {
+                lexer.set_result_symbol(BLOCK_CLOSE as u16);
+                self.pop_block();
+                return true;
+            }
+            return false;
+        }
+        if self.snapshot[STATE] & STATE_MATCHING == 0 {
+            self.consume_indentation(&mut lexer);
+            match lexer.lookahead() {
+                0x60 if self.scan_context & CONTENT_BACKTICK != 0 => {
+                    return self.parse_fenced_code_block::<CODE_SYMBOLS>(
+                        b'`', &mut lexer, Symbols::new(&CODE_FLAGS),
+                    );
+                }
+                0x7e if self.scan_context & CONTENT_TILDE != 0 => {
+                    const TILDE: u64 = 1 << FENCED_CODE_BLOCK_END_TILDE;
+                    return self.parse_fenced_code_block::<TILDE>(
+                        b'~', &mut lexer, Symbols::new(&flags_for(TILDE)),
+                    );
+                }
+                0x60 | 0x7e => {
+                    self.consume_invalid_fence(&mut lexer);
+                    return false;
+                }
+                0x2a | 0x5f => {
+                    self.consume_invalid_thematic_break(&mut lexer);
+                    return false;
+                }
+                0x0a | 0x0d => {
+                    if self.scan_context & CONTENT_BLANK != 0 {
+                        lexer.set_result_symbol(BLANK_LINE_START as u16);
+                        return true;
+                    }
+                }
+                _ => return false,
+            }
+        } else if self.match_continuation(&mut lexer) {
+            return true;
+        }
+        if !is_line_end(lexer.lookahead()) {
+            return false;
+        }
+        // LINE and SOFT deliberately use the same bits as their token indices.
+        let flags = u64::from(self.scan_context & (CONTENT_LINE | CONTENT_SOFT))
+            | (u64::from(self.scan_context & CONTENT_TABLE != 0) << PIPE_TABLE_LINE_ENDING);
+        if flags != 0 {
+            self.parse_line_ending::<DYNAMIC_SYMBOLS>(&mut lexer, Symbols(flags))
+        } else {
+            false
+        }
     }
 
-    // Choose the other modes before calling the lexer. Their fixed entries
-    // need not keep a dynamic validity slice live across lexer calls.
+    fn consume_invalid_fence(&mut self, lexer: &mut ScanLexer<'_>) {
+        let delimiter = lexer.lookahead;
+        let mut column = self.snapshot[COLUMN];
+        loop {
+            column = column.wrapping_add(1);
+            lexer.inner.advance(false);
+            let c = lexer.inner.lookahead();
+            if c != delimiter {
+                lexer.lookahead = c;
+                break;
+            }
+        }
+        self.snapshot[COLUMN] = column % 4;
+        self.mark_end(lexer);
+    }
+
+    fn consume_invalid_thematic_break(&mut self, lexer: &mut ScanLexer<'_>) {
+        let delimiter = lexer.lookahead;
+        self.advance(lexer);
+        self.mark_end(lexer);
+        let mut c = lexer.lookahead;
+        let mut column = self.snapshot[COLUMN];
+        while c == delimiter || is_space(c) {
+            column = if c == i32::from(b'\t') {
+                0
+            } else {
+                column.wrapping_add(1) % 4
+            };
+            lexer.inner.advance(false);
+            c = lexer.inner.lookahead();
+        }
+        self.snapshot[COLUMN] = column;
+        lexer.lookahead = c;
+    }
+
+    // Only general block scans need the full dispatcher and its stack frame.
     #[inline(never)]
     fn scan_mode<const FLAGS: u64>(
         &mut self,
         lexer: &mut dyn Lexer,
-        valid_symbols: Symbols<'_, FLAGS>,
+        valid_symbols: Symbols<FLAGS>,
     ) -> bool {
         self.scan_inner(&mut ScanLexer::new(lexer), valid_symbols)
     }
@@ -642,7 +828,7 @@ impl Scanner {
     }
 
     fn mark_end(&self, lexer: &mut ScanLexer<'_>) {
-        if !self.simulate {
+        if !self.simulating() {
             lexer.mark_end();
         }
     }
@@ -748,7 +934,7 @@ impl Scanner {
         &mut self,
         delimiter: u8,
         lexer: &mut ScanLexer<'_>,
-        valid_symbols: Symbols<'_, FLAGS>,
+        valid_symbols: Symbols<FLAGS>,
     ) -> bool {
         let mut level = 0u8;
         while lexer.lookahead() == i32::from(delimiter) {
@@ -790,7 +976,7 @@ impl Scanner {
             }
             if !info_string_has_backtick {
                 lexer.set_result_symbol(start as u16);
-                if !self.simulate {
+                if !self.simulating() {
                     self.push_block(Block::FENCED_CODE);
                 }
                 self.snapshot[FENCE_LENGTH] = level;
@@ -818,7 +1004,7 @@ impl Scanner {
     fn parse_star<const FLAGS: u64>(
         &mut self,
         lexer: &mut ScanLexer<'_>,
-        valid_symbols: Symbols<'_, FLAGS>,
+        valid_symbols: Symbols<FLAGS>,
     ) -> bool {
         self.advance(lexer);
         self.mark_end(lexer);
@@ -865,7 +1051,7 @@ impl Scanner {
                 self.mark_end(lexer);
             }
             extra_indentation = self.list_extra_indentation(extra_indentation);
-            if !self.simulate {
+            if !self.simulating() {
                 self.push_block(Block::list_item(usize::from(extra_indentation)));
             }
             lexer.set_result_symbol(symbol as u16);
@@ -878,7 +1064,7 @@ impl Scanner {
     fn parse_thematic_break_underscore<const FLAGS: u64>(
         &mut self,
         lexer: &mut ScanLexer<'_>,
-        valid_symbols: Symbols<'_, FLAGS>,
+        valid_symbols: Symbols<FLAGS>,
     ) -> bool {
         self.advance(lexer);
         self.mark_end(lexer);
@@ -906,7 +1092,7 @@ impl Scanner {
     fn parse_block_quote<const FLAGS: u64>(
         &mut self,
         lexer: &mut ScanLexer<'_>,
-        valid_symbols: Symbols<'_, FLAGS>,
+        valid_symbols: Symbols<FLAGS>,
     ) -> bool {
         if valid_symbols.contains(BLOCK_QUOTE_START) {
             self.advance(lexer);
@@ -916,7 +1102,7 @@ impl Scanner {
                     self.snapshot[INDENTATION].wrapping_add(self.advance(lexer) - 1);
             }
             lexer.set_result_symbol(BLOCK_QUOTE_START as u16);
-            if !self.simulate {
+            if !self.simulating() {
                 self.push_block(Block::QUOTE);
             }
             return true;
@@ -927,7 +1113,7 @@ impl Scanner {
     fn parse_atx_heading<const FLAGS: u64>(
         &mut self,
         lexer: &mut ScanLexer<'_>,
-        valid_symbols: Symbols<'_, FLAGS>,
+        valid_symbols: Symbols<FLAGS>,
     ) -> bool {
         if valid_symbols.contains(ATX_H1_MARKER) && self.snapshot[INDENTATION] <= 3 {
             self.mark_end(lexer);
@@ -949,7 +1135,7 @@ impl Scanner {
     fn parse_setext_underline<const FLAGS: u64>(
         &mut self,
         lexer: &mut ScanLexer<'_>,
-        valid_symbols: Symbols<'_, FLAGS>,
+        valid_symbols: Symbols<FLAGS>,
     ) -> bool {
         if valid_symbols.contains(SETEXT_H1_UNDERLINE)
             && usize::from(self.snapshot[MATCHED]) == self.block_count()
@@ -1009,7 +1195,7 @@ impl Scanner {
     fn parse_plus<const FLAGS: u64>(
         &mut self,
         lexer: &mut ScanLexer<'_>,
-        valid_symbols: Symbols<'_, FLAGS>,
+        valid_symbols: Symbols<FLAGS>,
     ) -> bool {
         if self.snapshot[INDENTATION] <= 3
             && (valid_symbols.contains(LIST_MARKER_PLUS)
@@ -1050,7 +1236,7 @@ impl Scanner {
                 if extra_indentation >= 1 && valid_symbols.contains(symbol) {
                     lexer.set_result_symbol(symbol as u16);
                     extra_indentation = self.list_extra_indentation(extra_indentation);
-                    if !self.simulate {
+                    if !self.simulating() {
                         self.push_block(Block::list_item(usize::from(extra_indentation)));
                     }
                     return true;
@@ -1063,7 +1249,7 @@ impl Scanner {
     fn parse_ordered_list_marker<const FLAGS: u64>(
         &mut self,
         lexer: &mut ScanLexer<'_>,
-        valid_symbols: Symbols<'_, FLAGS>,
+        valid_symbols: Symbols<FLAGS>,
     ) -> bool {
         if self.snapshot[INDENTATION] <= 3
             && (valid_symbols.contains(LIST_MARKER_PARENTHESIS)
@@ -1121,7 +1307,7 @@ impl Scanner {
                             LIST_MARKER_PARENTHESIS
                         } as u16);
                         extra_indentation = self.list_extra_indentation(extra_indentation);
-                        if !self.simulate {
+                        if !self.simulating() {
                             self.push_block(Block::list_item(
                                 usize::from(extra_indentation) + digits,
                             ));
@@ -1137,7 +1323,7 @@ impl Scanner {
     fn parse_minus<const FLAGS: u64>(
         &mut self,
         lexer: &mut ScanLexer<'_>,
-        valid_symbols: Symbols<'_, FLAGS>,
+        valid_symbols: Symbols<FLAGS>,
     ) -> bool {
         if self.snapshot[INDENTATION] <= 3
             && (valid_symbols.contains(LIST_MARKER_MINUS)
@@ -1205,7 +1391,7 @@ impl Scanner {
                     self.mark_end(lexer);
                 }
                 extra_indentation = self.list_extra_indentation(extra_indentation);
-                if !self.simulate {
+                if !self.simulating() {
                     self.push_block(Block::list_item(usize::from(extra_indentation)));
                 }
                 lexer.set_result_symbol(symbol as u16);
@@ -1229,7 +1415,7 @@ impl Scanner {
     fn parse_html_block<const FLAGS: u64>(
         &mut self,
         lexer: &mut ScanLexer<'_>,
-        valid_symbols: Symbols<'_, FLAGS>,
+        valid_symbols: Symbols<FLAGS>,
     ) -> bool {
         if !(valid_symbols.contains(HTML_BLOCK_1_START)
             || valid_symbols.contains(HTML_BLOCK_1_END)
@@ -1246,7 +1432,7 @@ impl Scanner {
         if lexer.lookahead() == i32::from(b'?') && valid_symbols.contains(HTML_BLOCK_3_START) {
             self.advance(lexer);
             lexer.set_result_symbol(HTML_BLOCK_3_START as u16);
-            if !self.simulate {
+            if !self.simulating() {
                 self.push_block(Block::ANONYMOUS);
             }
             return true;
@@ -1258,7 +1444,7 @@ impl Scanner {
                 if lexer.lookahead() == i32::from(b'-') && valid_symbols.contains(HTML_BLOCK_2_START) {
                     self.advance(lexer);
                     lexer.set_result_symbol(HTML_BLOCK_2_START as u16);
-                    if !self.simulate {
+                    if !self.simulating() {
                         self.push_block(Block::ANONYMOUS);
                     }
                     return true;
@@ -1268,7 +1454,7 @@ impl Scanner {
             {
                 self.advance(lexer);
                 lexer.set_result_symbol(HTML_BLOCK_4_START as u16);
-                if !self.simulate {
+                if !self.simulating() {
                     self.push_block(Block::ANONYMOUS);
                 }
                 return true;
@@ -1288,7 +1474,7 @@ impl Scanner {
                 {
                     self.advance(lexer);
                     lexer.set_result_symbol(HTML_BLOCK_5_START as u16);
-                    if !self.simulate {
+                    if !self.simulating() {
                         self.push_block(Block::ANONYMOUS);
                     }
                     return true;
@@ -1329,7 +1515,7 @@ impl Scanner {
                             }
                         } else if valid_symbols.contains(HTML_BLOCK_1_START) {
                             lexer.set_result_symbol(HTML_BLOCK_1_START as u16);
-                            if !self.simulate {
+                            if !self.simulating() {
                                 self.push_block(Block::ANONYMOUS);
                             }
                             return true;
@@ -1348,7 +1534,7 @@ impl Scanner {
                 for tag in HTML_TAG_NAMES_RULE_7 {
                     if name == tag && valid_symbols.contains(HTML_BLOCK_6_START) {
                         lexer.set_result_symbol(HTML_BLOCK_6_START as u16);
-                        if !self.simulate {
+                        if !self.simulating() {
                             self.push_block(Block::ANONYMOUS);
                         }
                         return true;
@@ -1450,7 +1636,7 @@ impl Scanner {
         }
         if is_line_end(lexer.lookahead()) {
             lexer.set_result_symbol(HTML_BLOCK_7_START as u16);
-            if !self.simulate {
+            if !self.simulating() {
                 self.push_block(Block::ANONYMOUS);
             }
             return true;
@@ -1537,7 +1723,7 @@ impl Scanner {
         self.snapshot[INDENTATION] = 0;
         self.snapshot[COLUMN] = 0;
         self.consume_indentation(lexer);
-        self.simulate = true;
+        self.set_simulating(true);
         let mut matched_temp = 0u8;
         while matched_temp < self.block_count() as u8 {
             if self.match_block(lexer, self.block_at(usize::from(matched_temp))) {
@@ -1605,7 +1791,7 @@ impl Scanner {
     fn scan_inner<const FLAGS: u64>(
         &mut self,
         lexer: &mut ScanLexer<'_>,
-        valid_symbols: Symbols<'_, FLAGS>,
+        valid_symbols: Symbols<FLAGS>,
     ) -> bool {
         if valid_symbols.contains(TRIGGER_ERROR) {
             lexer.set_result_symbol(ERROR as u16);
@@ -1623,7 +1809,7 @@ impl Scanner {
             }
             if self.inline_count != 0 {
                 lexer.set_result_symbol(BLOCK_CLOSE as u16);
-                if !self.simulate {
+                if !self.simulating() {
                     self.pop_block();
                 }
                 return true;
@@ -1646,7 +1832,7 @@ impl Scanner {
                 && !is_line_end(lexer.lookahead())
             {
                 lexer.set_result_symbol(INDENTED_CHUNK_START as u16);
-                if !self.simulate {
+                if !self.simulating() {
                     self.push_block(Block::INDENTED_CODE);
                 }
                 self.snapshot[INDENTATION] -= 4;
@@ -1734,7 +1920,7 @@ impl Scanner {
     fn parse_line_ending<const FLAGS: u64>(
         &mut self,
         lexer: &mut ScanLexer<'_>,
-        valid_symbols: Symbols<'_, FLAGS>,
+        valid_symbols: Symbols<FLAGS>,
     ) -> bool {
         self.consume_newline(lexer);
         self.snapshot[INDENTATION] = 0;
@@ -1745,7 +1931,7 @@ impl Scanner {
             // Unlike the helper, C calls mark_end even during simulation.
             lexer.mark_end();
             self.consume_indentation(lexer);
-            self.simulate = true;
+            self.set_simulating(true);
             let matched_temp = self.snapshot[MATCHED];
             self.snapshot[MATCHED] = 0;
             let mut one_will_be_matched = false;
@@ -1758,7 +1944,7 @@ impl Scanner {
                 }
             }
             let all_will_be_matched = usize::from(self.snapshot[MATCHED]) == self.block_count();
-            if !lexer.eof() && !self.scan_inner::<PARAGRAPH_SYMBOLS>(lexer, Symbols(&PARAGRAPH_INTERRUPT_SYMBOLS)) {
+            if !lexer.eof() && !self.scan_inner::<PARAGRAPH_SYMBOLS>(lexer, Symbols::new(&PARAGRAPH_INTERRUPT_SYMBOLS)) {
                 // C restores matched_temp here, then immediately resets it.
                 self.snapshot[MATCHED] = 0;
                 self.snapshot[INDENTATION] = 0;
@@ -1966,7 +2152,7 @@ mod tests {
         let mut expected = TestLexer::new("word");
         assert_eq!(
             scanner.scan(&mut actual, interior),
-            dynamic.scan_inner::<DYNAMIC_SYMBOLS>(&mut ScanLexer::new(&mut expected), Symbols(interior)),
+            dynamic.scan_inner::<DYNAMIC_SYMBOLS>(&mut ScanLexer::new(&mut expected), Symbols::new(interior)),
         );
         assert_eq!(actual.events, expected.events);
         assert_eq!(serialized(&mut scanner), serialized(&mut dynamic));
@@ -2013,24 +2199,158 @@ mod tests {
                 let snapshot = serialized(&mut fixture);
                 // The final rows have the exact identities selected by Default,
                 // so this exercises fixed entries as well as foreign slices.
-                for symbols in symbol_sets.iter().chain([&TEXT_FLAGS, &CODE_FLAGS, &BLOCK_LINE_FLAGS]) {
+                for symbols in symbol_sets.iter().chain([&TEXT_FLAGS, &CODE_FLAGS, &BLOCK_LINE_FLAGS, &TABLE_LINE_FLAGS]) {
                     let mut fast = Scanner::default();
                     fast.deserialize(&snapshot);
-                    fast.simulate = true; // scan must clear this even on rejection
+                    fast.set_simulating(true); // scan must clear this even on rejection
                     let mut slow = Scanner::default();
                     slow.deserialize(&snapshot);
                     let mut fast_lexer = TestLexer::new(&input);
                     let mut slow_lexer = TestLexer::new(&input);
                     let result = fast.scan(&mut fast_lexer, symbols);
                     let expected = slow.scan_inner::<DYNAMIC_SYMBOLS>(
-                        &mut ScanLexer::new(&mut slow_lexer), Symbols(symbols),
+                        &mut ScanLexer::new(&mut slow_lexer), Symbols::new(symbols),
                     );
                     assert_eq!(result, expected, "{input:?}, {snapshot:?}");
                     assert_eq!(fast_lexer.events, slow_lexer.events, "{input:?}");
                     assert_eq!(serialized(&mut fast), serialized(&mut slow), "{input:?}");
-                    assert_eq!(fast.simulate, slow.simulate, "{input:?}");
+                    assert_eq!(fast.simulating(), slow.simulating(), "{input:?}");
                     assert_eq!(fast_lexer.lookahead_calls, slow_lexer.lookahead_calls);
                     assert_eq!(fast_lexer.eof_calls, slow_lexer.eof_calls);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn packed_flags_match_independent_scalar_encoding() {
+        fn check(flags: &[bool; 47]) {
+            let expected = flags.iter().enumerate().fold(0, |mask, (i, &valid)| {
+                mask | (u64::from(valid) << i)
+            });
+            assert_eq!(pack_flags(flags), expected, "{flags:?}");
+        }
+        check(&[false; 47]);
+        check(&[true; 47]);
+        // Exhaust the byte groups, especially the overlapping tail group.
+        for start in [0, 8, 16, 24, 32, 39, 40] {
+            for pattern in 0u16..256 {
+                let flags = std::array::from_fn(|i| {
+                    i >= start && i - start < 8 && pattern & (1 << (i - start)) != 0
+                });
+                check(&flags);
+                check(&flags.map(|flag| !flag));
+            }
+        }
+        let mut seed = 0x3141_5926_5358_9793u64;
+        for _ in 0..1024 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            check(&std::array::from_fn(|i| seed & (1 << i) != 0));
+        }
+    }
+
+    #[test]
+    fn content_classification_covers_exactly_the_supported_flags() {
+        let content_tokens = [
+            LINE_ENDING, SOFT_LINE_ENDING, TOKEN_EOF,
+            FENCED_CODE_BLOCK_END_BACKTICK, FENCED_CODE_BLOCK_END_TILDE,
+            PIPE_TABLE_LINE_ENDING, BLANK_LINE_START,
+        ];
+        let ignored = [BLOCK_CLOSE, BLOCK_CONTINUATION, ERROR, NO_INDENTED_CHUNK];
+        assert_eq!(CONTENT_LINE, 1 << LINE_ENDING);
+        assert_eq!(CONTENT_SOFT, 1 << SOFT_LINE_ENDING);
+        for content in 0..128 {
+            for unused in 0..16 {
+                let mut flags = [false; 47];
+                for (i, &token) in content_tokens.iter().enumerate() {
+                    flags[token] = content & (1 << i) != 0;
+                }
+                for (i, &token) in ignored.iter().enumerate() {
+                    flags[token] = unused & (1 << i) != 0;
+                }
+                assert_eq!(EncodedSymbols::new(&flags).content, content);
+                for token in 0..47 {
+                    if !content_tokens.contains(&token) && !ignored.contains(&token) {
+                        flags[token] = true;
+                        assert_eq!(EncodedSymbols::new(&flags).content, SCAN_DYNAMIC);
+                        flags[token] = false;
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn all_content_modes_preserve_scanner_state_and_speculative_events() {
+        let content_tokens = [
+            LINE_ENDING, SOFT_LINE_ENDING, TOKEN_EOF,
+            FENCED_CODE_BLOCK_END_BACKTICK, FENCED_CODE_BLOCK_END_TILDE,
+            PIPE_TABLE_LINE_ENDING, BLANK_LINE_START,
+        ];
+        let mut inputs: Vec<String> = [
+            "", "\0", " ", " \0", "\t", " \t", "  \0", " \t\0",
+            "\n", "\r\n", " \r\n", "\ncontinued text\n", "\r\n> quote\n",
+            "\n~~~ info\n", "\n* list\n", "a|b\n-| -\n", "\n\0",
+            "*  ** text\n", "_ _ _\r\n", "`", "~", "```\n", "~~~\r\n",
+            "````info`\n", "~~~ info\n", " text\n", " \ttext\n",
+            "> quote\n", "- item\n", "123. item\n", "<script>\n", "# Heading\n",
+        ].map(String::from).into();
+        for delimiter in ['*', '_', '`', '~'] {
+            for length in [255, 256, 257, 260] {
+                inputs.push(format!("{} \t\r\n", delimiter.to_string().repeat(length)));
+            }
+        }
+        let block_sets = [
+            &[][..], &[Block::FENCED_CODE][..],
+            &[Block::QUOTE, Block::list_item(0), Block::INDENTED_CODE][..],
+        ];
+        let mut snapshots = Vec::new();
+        for blocks in block_sets {
+            for state in [0, STATE_WAS_SOFT_LINE_BREAK, STATE_MATCHING,
+                STATE_MATCHING | STATE_WAS_SOFT_LINE_BREAK,
+                STATE_MATCHING | STATE_CLOSE_BLOCK,
+                STATE_MATCHING | STATE_WAS_SOFT_LINE_BREAK | STATE_CLOSE_BLOCK,
+            ] {
+                for (indentation, column, matched, fence) in [(0, 0, 0, 3), (255, 3, 1, 255)] {
+                    let mut fixture = Scanner::with_blocks(blocks.iter().copied());
+                    fixture.snapshot[..HEADER_SIZE].copy_from_slice(&[
+                        state, matched.min(blocks.len() as u8), indentation, column, fence,
+                    ]);
+                    snapshots.push(serialized(&mut fixture));
+                }
+            }
+        }
+        for content in 0..128 {
+            let mut flags = [false; 47];
+            for (i, &token) in content_tokens.iter().enumerate() {
+                flags[token] = content & (1 << i) != 0;
+            }
+            for unused in [false, true] {
+                for token in [BLOCK_CLOSE, BLOCK_CONTINUATION, ERROR, NO_INDENTED_CHUNK] {
+                    flags[token] = unused;
+                }
+                for snapshot in &snapshots {
+                    for input in &inputs {
+                        let mut fast = Scanner::default();
+                        fast.deserialize(snapshot);
+                        fast.set_simulating(true); // every external scan clears this
+                        let mut reference = Scanner::default();
+                        reference.deserialize(snapshot);
+                        let mut actual = TestLexer::new(input);
+                        let mut expected = TestLexer::new(input);
+                        let result = fast.scan(&mut actual, &flags);
+                        let reference_result = reference.scan_inner::<DYNAMIC_SYMBOLS>(
+                            &mut ScanLexer::new(&mut expected), Symbols::new(&flags),
+                        );
+                        assert_eq!(result, reference_result, "{content}, {snapshot:?}, {input:?}");
+                        assert_eq!(actual.events, expected.events, "{content}, {snapshot:?}, {input:?}");
+                        assert_eq!(actual.position, expected.position);
+                        assert_eq!(actual.end, expected.end);
+                        assert_eq!(actual.lookahead_calls, expected.lookahead_calls);
+                        assert_eq!(actual.eof_calls, expected.eof_calls);
+                        assert_eq!(serialized(&mut fast), serialized(&mut reference));
+                        assert_eq!(fast.simulating(), reference.simulating());
+                    }
                 }
             }
         }
@@ -2041,25 +2361,25 @@ mod tests {
         fn check<const FLAGS: u64>(input: &str, snapshot: &[u8], simulate: bool) {
             let mut fixed = Scanner::default();
             fixed.deserialize(snapshot);
-            fixed.simulate = simulate;
+            fixed.set_simulating(simulate);
             let mut dynamic = Scanner::default();
             dynamic.deserialize(snapshot);
-            dynamic.simulate = simulate;
+            dynamic.set_simulating(simulate);
             let mut fixed_lexer = TestLexer::new(input);
             let mut dynamic_lexer = TestLexer::new(input);
             let flags: [bool; 47] = std::array::from_fn(|i| FLAGS & (1 << i) != 0);
             let actual = fixed.scan_inner::<FLAGS>(
-                &mut ScanLexer::new(&mut fixed_lexer), Symbols(&flags),
+                &mut ScanLexer::new(&mut fixed_lexer), Symbols::new(&flags),
             );
             let expected = dynamic.scan_inner::<DYNAMIC_SYMBOLS>(
-                &mut ScanLexer::new(&mut dynamic_lexer), Symbols(&flags),
+                &mut ScanLexer::new(&mut dynamic_lexer), Symbols::new(&flags),
             );
             assert_eq!(actual, expected, "{input:?}, {snapshot:?}");
             assert_eq!(fixed_lexer.events, dynamic_lexer.events, "{input:?}");
             assert_eq!(fixed_lexer.lookahead_calls, dynamic_lexer.lookahead_calls);
             assert_eq!(fixed_lexer.eof_calls, dynamic_lexer.eof_calls);
             assert_eq!(serialized(&mut fixed), serialized(&mut dynamic), "{input:?}");
-            assert_eq!(fixed.simulate, dynamic.simulate, "{input:?}");
+            assert_eq!(fixed.simulating(), dynamic.simulating(), "{input:?}");
         }
         let wrapped_fence = format!("{} \n", "`".repeat(260));
         for input in [
@@ -2090,12 +2410,12 @@ mod tests {
     fn symbol_array_prefix_is_checked_once_at_the_external_boundary() {
         let mut scanner = Scanner::default();
         for length in 0..47 {
-            scanner.simulate = true;
+            scanner.set_simulating(true);
             let mut lexer = TestLexer::new("text");
             assert!(!scanner.scan(&mut lexer, &TEXT_FLAGS[..length]));
             assert!(lexer.events.is_empty());
             assert_eq!(lexer.lookahead_calls.get(), 0);
-            assert!(!scanner.simulate);
+            assert!(!scanner.simulating());
         }
         // Flags past the external-token array do not affect the scanner.
         let mut extended = [true; 48];
@@ -2115,14 +2435,14 @@ mod tests {
             let snapshot = serialized(&mut fixture);
             let mut fast = Scanner::default();
             fast.deserialize(&snapshot);
-            fast.simulate = true; // the external entry must clear this
+            fast.set_simulating(true); // the external entry must clear this
             let mut dynamic = Scanner::default();
             dynamic.deserialize(&snapshot);
             let mut actual = TestLexer::new(input);
             let mut expected = TestLexer::new(input);
             let result = fast.scan(&mut actual, &TEXT_FLAGS);
             let reference = dynamic.scan_inner::<DYNAMIC_SYMBOLS>(
-                &mut ScanLexer::new(&mut expected), Symbols(&TEXT_FLAGS),
+                &mut ScanLexer::new(&mut expected), Symbols::new(&TEXT_FLAGS),
             );
             assert_eq!(result, reference, "{input:?}");
             assert_eq!(actual.events, expected.events, "{input:?}");
@@ -2130,7 +2450,7 @@ mod tests {
             assert_eq!(actual.lookahead_calls, expected.lookahead_calls, "{input:?}");
             assert_eq!(actual.eof_calls, expected.eof_calls, "{input:?}");
             assert_eq!(serialized(&mut fast), serialized(&mut dynamic), "{input:?}");
-            assert_eq!(fast.simulate, dynamic.simulate, "{input:?}");
+            assert_eq!(fast.simulating(), dynamic.simulating(), "{input:?}");
         }
 
         // The filter uses only six bits, but dispatch and tab expansion must
@@ -2164,11 +2484,11 @@ mod tests {
             for i in 0..count {
                 expected.extend_from_slice(&(u32::MAX - i).to_ne_bytes());
             }
-            scanner.simulate = true;
+            scanner.set_simulating(true);
             scanner.deserialize(&expected);
             assert_eq!(scanner.block_count(), count as usize);
             assert_eq!(serialized(&mut scanner), expected);
-            assert!(scanner.simulate);
+            assert!(scanner.simulating());
             assert!(scanner.spilled_blocks.capacity() >= capacity);
             capacity = scanner.spilled_blocks.capacity();
 
@@ -2185,7 +2505,7 @@ mod tests {
             scanner.deserialize(&[]);
             assert_eq!(serialized(&mut scanner), [0; HEADER_SIZE]);
             assert_eq!(scanner.spilled_blocks.capacity(), capacity);
-            assert!(scanner.simulate);
+            assert!(scanner.simulating());
         }
     }
 
@@ -2234,7 +2554,7 @@ mod tests {
     fn serialization_has_five_state_bytes_and_native_u32_blocks() {
         let mut scanner = Scanner::with_blocks((0..=20).map(Block));
         scanner.snapshot[..5].copy_from_slice(&[STATE_MATCHING | STATE_CLOSE_BLOCK, 3, 255, 2, 4]);
-        scanner.simulate = true;
+        scanner.set_simulating(true);
         let mut expected = vec![17, 3, 255, 2, 4];
         for block in 0u32..=20 {
             expected.extend_from_slice(&block.to_ne_bytes());
@@ -2243,10 +2563,10 @@ mod tests {
         let mut restored = Scanner::default();
         restored.deserialize(&expected);
         assert_eq!(serialized(&mut restored), expected);
-        assert!(!restored.simulate);
+        assert!(!restored.simulating());
         scanner.deserialize(&[]);
         assert_eq!(serialized(&mut scanner), [0; 5]);
-        assert!(scanner.simulate);
+        assert!(scanner.simulating());
         assert_eq!(serialized(create().as_mut()), [0; 5]);
     }
 
@@ -2488,7 +2808,7 @@ mod tests {
                     assert_eq!(lexer.position, text.chars().count());
                     assert_eq!(lexer.end, Some(0));
                     assert_eq!(lexer.symbol, u16::MAX);
-                    assert!(!scanner.simulate);
+                    assert!(!scanner.simulating());
                     assert_eq!(lexer.events[0], Event::Mark(0));
                     assert_eq!(
                         lexer.events[1..],
@@ -2520,7 +2840,7 @@ mod tests {
             assert_eq!(lexer.end, Some(0));
             assert_eq!(lexer.position, input.chars().count() - 1);
             assert_eq!(usize::from(lexer.symbol), PIPE_TABLE_START);
-            assert!(scanner.simulate);
+            assert!(scanner.simulating());
             assert!(scanner.blocks().is_empty());
         }
         for input in ["a | b\n-\n", "text\n---\n", "a | b\n- | -"] {
