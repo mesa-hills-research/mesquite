@@ -124,10 +124,10 @@ No bucket work remains. The broader oracle was not rerun in this stop-time
 verification; the all-input results above belong to their stated earlier
 revisions. No deviations from C, unsafe code, or generated-file edits were made.
 
-## Current verification at `fd8d80a`
+## Current verification at `84d5f8c`
 
 Rechecked the reassigned bucket on the current merged baseline against the C
-scanner source, superseding the verification at `4bb9729`. The initialization/reset
+scanner source, superseding the verification at `fd8d80a`. The initialization/reset
 correction and regression tests are already present, so no further behavior
 change or duplicate test is needed. The current C implementation still uses
 `ts_calloc` and resets both `level` and `token` on invalid-length snapshots;
@@ -141,7 +141,7 @@ Rust matches both operations. All checks below were rerun on this checkout:
 - `cargo check --workspace --all-targets`: passes, with only the unchanged
   host-owned YAML unused-assignment warning described above.
 - `cargo test -p ts_port_cmake -p ts_port`: **212 runtime unit tests**,
-  **24 scanner unit tests**, and **21 integration tests** pass; doc tests pass
+  **24 scanner unit tests**, and **22 integration tests** pass; doc tests pass
   as well. This includes the three quoted-variable tests covering every bucket
   fixture, parser reuse, chunked input, and incremental repair/restore cycles.
 - `cargo clippy -p ts_port -p ts_port_cmake --all-targets -- -D warnings`: passes.
