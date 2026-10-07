@@ -36,6 +36,52 @@ const OPENING_PAREN: usize = 26;
 // ESAC = 27 is not used by the scanner.
 const ERROR_RECOVERY: usize = 28;
 
+/// `lookahead` is a field in C, but a virtual call through the Rust lexer.
+/// Keep a scan-local copy, refreshed only when the input position advances, so
+/// the many token/character checks at each position are plain integer reads.
+/// All position-changing operations go through this wrapper; token boundaries,
+/// columns, and EOF queries still use the original lexer callbacks.
+struct ScannerLexer<'a> {
+    inner: &'a mut dyn Lexer,
+    lookahead: i32,
+}
+
+impl<'a> ScannerLexer<'a> {
+    fn new(inner: &'a mut dyn Lexer) -> Self {
+        let lookahead = inner.lookahead();
+        Self { inner, lookahead }
+    }
+
+    fn lookahead(&self) -> i32 {
+        self.lookahead
+    }
+
+    fn advance(&mut self, skip: bool) {
+        self.inner.advance(skip);
+        self.lookahead = self.inner.lookahead();
+    }
+
+    fn mark_end(&mut self) {
+        self.inner.mark_end();
+    }
+
+    fn set_result_symbol(&mut self, symbol: u16) {
+        self.inner.set_result_symbol(symbol);
+    }
+
+    fn result_symbol(&self) -> u16 {
+        self.inner.result_symbol()
+    }
+
+    fn get_column(&mut self) -> u32 {
+        self.inner.get_column()
+    }
+
+    fn eof(&self) -> bool {
+        self.inner.eof()
+    }
+}
+
 // The reference uses the default C locale, not Unicode character classes.
 fn is_space(c: i32) -> bool {
     matches!(c, 0x09..=0x0d | 0x20)
@@ -53,11 +99,11 @@ fn is_alnum(c: i32) -> bool {
     is_alpha(c) || is_digit(c)
 }
 
-fn advance(lexer: &mut dyn Lexer) {
+fn advance(lexer: &mut ScannerLexer<'_>) {
     lexer.advance(false);
 }
 
-fn skip(lexer: &mut dyn Lexer) {
+fn skip(lexer: &mut ScannerLexer<'_>) {
     lexer.advance(true);
 }
 
@@ -79,7 +125,7 @@ impl Heredoc {
         // C leaves current_leading_word alone; the next identifier scan clears it.
     }
 
-    fn scan_start(&mut self, lexer: &mut dyn Lexer) -> bool {
+    fn scan_start(&mut self, lexer: &mut ScannerLexer<'_>) -> bool {
         while is_space(lexer.lookahead()) {
             skip(lexer);
         }
@@ -93,7 +139,7 @@ impl Heredoc {
         found_delimiter
     }
 
-    fn scan_end_identifier(&mut self, lexer: &mut dyn Lexer) -> bool {
+    fn scan_end_identifier(&mut self, lexer: &mut ScannerLexer<'_>) -> bool {
         self.current_leading_word.clear();
         let mut size = 0;
         if !self.delimiter.is_empty() {
@@ -117,7 +163,7 @@ impl Heredoc {
 }
 
 /// Consume a POSIX word, approximately, returning its unquoted bytes.
-fn advance_word(lexer: &mut dyn Lexer, unquoted_word: &mut Vec<u8>) -> bool {
+fn advance_word(lexer: &mut ScannerLexer<'_>, unquoted_word: &mut Vec<u8>) -> bool {
     let mut empty = true;
     let mut quote = 0;
     if matches!(lexer.lookahead(), 0x27 | 0x22) {
@@ -148,7 +194,7 @@ fn advance_word(lexer: &mut dyn Lexer, unquoted_word: &mut Vec<u8>) -> bool {
     !empty
 }
 
-fn scan_bare_dollar(lexer: &mut dyn Lexer) -> bool {
+fn scan_bare_dollar(lexer: &mut ScannerLexer<'_>) -> bool {
     while is_space(lexer.lookahead()) && lexer.lookahead() != i32::from(b'\n') && !lexer.eof() {
         skip(lexer);
     }
@@ -172,7 +218,7 @@ pub(crate) struct Scanner {
 impl Scanner {
     fn scan_heredoc_content(
         &mut self,
-        lexer: &mut dyn Lexer,
+        lexer: &mut ScannerLexer<'_>,
         middle_type: usize,
         end_type: usize,
     ) -> bool {
@@ -274,6 +320,7 @@ impl Scanner {
 
 impl ExternalScanner for Scanner {
     fn scan(&mut self, lexer: &mut dyn Lexer, valid: &[bool]) -> bool {
+        let lexer = &mut ScannerLexer::new(lexer);
         if valid[CONCAT] && !valid[ERROR_RECOVERY] {
             if !(lexer.lookahead() == 0
                 || is_space(lexer.lookahead())
@@ -663,7 +710,7 @@ impl ExternalScanner for Scanner {
 impl Scanner {
     // The C labels regex, extglob_pattern, expansion_word and brace_start are
     // forward-only jumps. These helpers preserve both jumps and fallthrough.
-    fn scan_regex(&mut self, lexer: &mut dyn Lexer, valid: &[bool]) -> bool {
+    fn scan_regex(&mut self, lexer: &mut ScannerLexer<'_>, valid: &[bool]) -> bool {
         if (valid[REGEX] || valid[REGEX_NO_SLASH] || valid[REGEX_NO_SPACE])
             && !valid[ERROR_RECOVERY]
         {
@@ -832,7 +879,7 @@ impl Scanner {
         self.scan_extglob_pattern(lexer, valid)
     }
 
-    fn scan_extglob_pattern(&mut self, lexer: &mut dyn Lexer, valid: &[bool]) -> bool {
+    fn scan_extglob_pattern(&mut self, lexer: &mut ScannerLexer<'_>, valid: &[bool]) -> bool {
         if valid[EXTGLOB_PATTERN] && !valid[ERROR_RECOVERY] {
             while is_space(lexer.lookahead()) {
                 skip(lexer);
@@ -1042,7 +1089,7 @@ impl Scanner {
         self.scan_expansion_word(lexer, valid)
     }
 
-    fn scan_expansion_word(&mut self, lexer: &mut dyn Lexer, valid: &[bool]) -> bool {
+    fn scan_expansion_word(&mut self, lexer: &mut ScannerLexer<'_>, valid: &[bool]) -> bool {
         if valid[EXPANSION_WORD] {
             let mut advanced_once = false;
             let mut advance_once_space = false;
@@ -1113,7 +1160,7 @@ impl Scanner {
     }
 }
 
-fn scan_brace_start(lexer: &mut dyn Lexer, valid: &[bool]) -> bool {
+fn scan_brace_start(lexer: &mut ScannerLexer<'_>, valid: &[bool]) -> bool {
     if valid[BRACE_START] && !valid[ERROR_RECOVERY] {
         while is_space(lexer.lookahead()) {
             skip(lexer);
@@ -1153,6 +1200,7 @@ pub(crate) fn create() -> Box<dyn ExternalScanner> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     #[derive(Debug, PartialEq, Eq)]
     enum Event {
@@ -1168,6 +1216,7 @@ mod tests {
         end: Option<usize>,
         symbol: u16,
         events: Vec<Event>,
+        lookahead_calls: Cell<usize>,
     }
 
     impl TestLexer {
@@ -1178,6 +1227,7 @@ mod tests {
                 end: None,
                 symbol: u16::MAX,
                 events: Vec::new(),
+                lookahead_calls: Cell::new(0),
             }
         }
 
@@ -1188,6 +1238,7 @@ mod tests {
 
     impl Lexer for TestLexer {
         fn lookahead(&self) -> i32 {
+            self.lookahead_calls.set(self.lookahead_calls.get() + 1);
             self.input.get(self.position).copied().unwrap_or(0)
         }
 
@@ -1242,6 +1293,42 @@ mod tests {
         let mut buffer = [0; SERIALIZATION_BUFFER_SIZE];
         let size = scanner.serialize(&mut buffer);
         buffer[..size].to_vec()
+    }
+
+    #[test]
+    fn cached_lookahead_refreshes_and_keeps_nul_distinct_from_eof() {
+        let mut inner = TestLexer::new(" \0é?");
+        // The runtime also uses negative lookahead values for decoding errors.
+        inner.input[3] = -1;
+        {
+            let mut lexer = ScannerLexer::new(&mut inner);
+            assert_eq!(lexer.lookahead(), i32::from(b' '));
+            assert_eq!(lexer.lookahead(), i32::from(b' '));
+            skip(&mut lexer);
+            assert_eq!(lexer.lookahead(), 0);
+            assert!(!lexer.eof());
+            lexer.mark_end();
+            lexer.set_result_symbol(CONCAT as u16);
+            assert_eq!(lexer.result_symbol(), CONCAT as u16);
+            assert_eq!(lexer.get_column(), 1);
+            assert_eq!(lexer.lookahead(), 0);
+            advance(&mut lexer);
+            assert_eq!(lexer.lookahead(), 'é' as i32);
+            advance(&mut lexer);
+            assert_eq!(lexer.lookahead(), -1);
+            assert!(!lexer.eof());
+            advance(&mut lexer);
+            assert_eq!(lexer.lookahead(), 0);
+            assert!(lexer.eof());
+        }
+        assert_eq!(inner.lookahead_calls.get(), 5);
+        assert_eq!(inner.token_end(), 1);
+
+        // Each scan has a fresh cache, including after the runtime rewinds.
+        inner.position = 2;
+        let lexer = ScannerLexer::new(&mut inner);
+        assert_eq!(lexer.lookahead(), 'é' as i32);
+        assert_eq!(inner.lookahead_calls.get(), 6);
     }
 
     #[test]
@@ -1351,17 +1438,17 @@ mod tests {
     #[test]
     fn heredoc_words_truncate_codepoints_and_compare_as_signed_char() {
         let mut heredoc = Heredoc::default();
-        assert!(heredoc.scan_start(&mut TestLexer::new("é\n")));
+        assert!(heredoc.scan_start(&mut ScannerLexer::new(&mut TestLexer::new("é\n"))));
         assert_eq!(heredoc.delimiter, [0xe9, 0]);
         let mut lexer = TestLexer::new("é\n");
-        assert!(!heredoc.scan_end_identifier(&mut lexer));
+        assert!(!heredoc.scan_end_identifier(&mut ScannerLexer::new(&mut lexer)));
         assert_eq!(lexer.position, 0);
 
         // U+0141 truncates to ASCII A; the original C char buffer behaves this way.
         heredoc.delimiter.clear();
-        assert!(heredoc.scan_start(&mut TestLexer::new("Ł\n")));
+        assert!(heredoc.scan_start(&mut ScannerLexer::new(&mut TestLexer::new("Ł\n"))));
         assert_eq!(heredoc.delimiter, b"A\0");
-        assert!(heredoc.scan_end_identifier(&mut TestLexer::new("A\n")));
+        assert!(heredoc.scan_end_identifier(&mut ScannerLexer::new(&mut TestLexer::new("A\n"))));
     }
 
     #[test]
@@ -1449,6 +1536,15 @@ mod tests {
                 scanner.scan(&mut lexer, &valid(&tokens)),
                 accepted,
                 "{input:?}"
+            );
+            assert_eq!(
+                lexer.lookahead_calls.get(),
+                1 + lexer
+                    .events
+                    .iter()
+                    .filter(|event| matches!(event, Event::Advance(_)))
+                    .count(),
+                "one lookahead per advance, plus scan entry: {input:?}"
             );
             if accepted {
                 assert_eq!(lexer.symbol, symbol as u16, "{input:?}");

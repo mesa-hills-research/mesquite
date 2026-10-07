@@ -238,7 +238,7 @@ fn is_punctuation(c: i32) -> bool {
 impl ExternalScanner for Scanner {
     fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
         self.simulate = false;
-        self.scan_inner(lexer, valid_symbols)
+        self.scan_inner(&mut ScanLexer::new(lexer), valid_symbols)
     }
 
     fn serialize(&mut self, buffer: &mut [u8]) -> usize {
@@ -282,15 +282,55 @@ pub(crate) fn create() -> Box<dyn ExternalScanner> {
     Box::<Scanner>::default()
 }
 
+/// A scan-local copy of C's `TSLexer.lookahead` field. Only `advance` changes
+/// the input position, so all tests of the current character (including the
+/// column accounting and recursive paragraph lookahead) share one trait call.
+/// Keep this concrete in the helpers so cached reads do not use dynamic dispatch.
+struct ScanLexer<'a> {
+    inner: &'a mut dyn Lexer,
+    lookahead: i32,
+}
+
+impl<'a> ScanLexer<'a> {
+    fn new(inner: &'a mut dyn Lexer) -> Self {
+        Self {
+            lookahead: inner.lookahead(),
+            inner,
+        }
+    }
+
+    fn lookahead(&self) -> i32 {
+        self.lookahead
+    }
+
+    fn advance(&mut self, skip: bool) {
+        self.inner.advance(skip);
+        self.lookahead = self.inner.lookahead();
+    }
+
+    fn mark_end(&mut self) {
+        self.inner.mark_end();
+    }
+
+    fn set_result_symbol(&mut self, symbol: u16) {
+        self.inner.set_result_symbol(symbol);
+    }
+
+    fn eof(&self) -> bool {
+        // EOF always has zero lookahead, but an embedded NUL is not EOF.
+        self.lookahead == 0 && self.inner.eof()
+    }
+}
+
 impl Scanner {
-    fn mark_end(&self, lexer: &mut dyn Lexer) {
+    fn mark_end(&self, lexer: &mut ScanLexer<'_>) {
         if !self.simulate {
             lexer.mark_end();
         }
     }
 
     /// Advance while tracking a column modulo four for tab expansion.
-    fn advance(&mut self, lexer: &mut dyn Lexer) -> u8 {
+    fn advance(&mut self, lexer: &mut ScanLexer<'_>) -> u8 {
         let size = if lexer.lookahead() == i32::from(b'\t') {
             let size = 4 - self.column;
             self.column = 0;
@@ -303,13 +343,13 @@ impl Scanner {
         size
     }
 
-    fn consume_indentation(&mut self, lexer: &mut dyn Lexer) {
+    fn consume_indentation(&mut self, lexer: &mut ScanLexer<'_>) {
         while is_space(lexer.lookahead()) {
             self.indentation = self.indentation.wrapping_add(self.advance(lexer));
         }
     }
 
-    fn consume_newline(&mut self, lexer: &mut dyn Lexer) {
+    fn consume_newline(&mut self, lexer: &mut ScanLexer<'_>) {
         if lexer.lookahead() == i32::from(b'\r') {
             self.advance(lexer);
             if lexer.lookahead() == i32::from(b'\n') {
@@ -320,7 +360,7 @@ impl Scanner {
         }
     }
 
-    fn match_block(&mut self, lexer: &mut dyn Lexer, block: Block) -> bool {
+    fn match_block(&mut self, lexer: &mut ScanLexer<'_>, block: Block) -> bool {
         match block {
             Block::INDENTED_CODE => {
                 while self.indentation < 4 {
@@ -372,7 +412,7 @@ impl Scanner {
     fn parse_fenced_code_block(
         &mut self,
         delimiter: u8,
-        lexer: &mut dyn Lexer,
+        lexer: &mut ScanLexer<'_>,
         valid_symbols: &[bool],
     ) -> bool {
         let mut level = 0u8;
@@ -439,7 +479,7 @@ impl Scanner {
         extra
     }
 
-    fn parse_star(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
+    fn parse_star(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool]) -> bool {
         self.advance(lexer);
         self.mark_end(lexer);
         let mut star_count = 1usize;
@@ -497,7 +537,7 @@ impl Scanner {
 
     fn parse_thematic_break_underscore(
         &mut self,
-        lexer: &mut dyn Lexer,
+        lexer: &mut ScanLexer<'_>,
         valid_symbols: &[bool],
     ) -> bool {
         self.advance(lexer);
@@ -523,7 +563,7 @@ impl Scanner {
         false
     }
 
-    fn parse_block_quote(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
+    fn parse_block_quote(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool]) -> bool {
         if valid_symbols[BLOCK_QUOTE_START] {
             self.advance(lexer);
             self.indentation = 0;
@@ -539,7 +579,7 @@ impl Scanner {
         false
     }
 
-    fn parse_atx_heading(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
+    fn parse_atx_heading(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool]) -> bool {
         if valid_symbols[ATX_H1_MARKER] && self.indentation <= 3 {
             self.mark_end(lexer);
             let mut level = 0u16;
@@ -557,7 +597,7 @@ impl Scanner {
         false
     }
 
-    fn parse_setext_underline(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
+    fn parse_setext_underline(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool]) -> bool {
         if valid_symbols[SETEXT_H1_UNDERLINE] && usize::from(self.matched) == self.open_blocks.len()
         {
             self.mark_end(lexer);
@@ -578,7 +618,7 @@ impl Scanner {
 
     /// The metadata branches for `+++` and `---` have identical line scanning.
     /// Called at the newline after the opening marker (never at EOF).
-    fn parse_metadata_body(&mut self, lexer: &mut dyn Lexer, delimiter: u8, symbol: usize) -> bool {
+    fn parse_metadata_body(&mut self, lexer: &mut ScanLexer<'_>, delimiter: u8, symbol: usize) -> bool {
         loop {
             self.consume_newline(lexer);
             let mut count = 0usize;
@@ -607,7 +647,7 @@ impl Scanner {
         false
     }
 
-    fn parse_plus(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
+    fn parse_plus(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool]) -> bool {
         if self.indentation <= 3
             && (valid_symbols[LIST_MARKER_PLUS]
                 || valid_symbols[LIST_MARKER_PLUS_DONT_INTERRUPT]
@@ -658,7 +698,7 @@ impl Scanner {
         false
     }
 
-    fn parse_ordered_list_marker(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
+    fn parse_ordered_list_marker(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool]) -> bool {
         if self.indentation <= 3
             && (valid_symbols[LIST_MARKER_PARENTHESIS]
                 || valid_symbols[LIST_MARKER_DOT]
@@ -727,7 +767,7 @@ impl Scanner {
         false
     }
 
-    fn parse_minus(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
+    fn parse_minus(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool]) -> bool {
         if self.indentation <= 3
             && (valid_symbols[LIST_MARKER_MINUS]
                 || valid_symbols[LIST_MARKER_MINUS_DONT_INTERRUPT]
@@ -815,7 +855,7 @@ impl Scanner {
         false
     }
 
-    fn parse_html_block(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
+    fn parse_html_block(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool]) -> bool {
         if !(valid_symbols[HTML_BLOCK_1_START]
             || valid_symbols[HTML_BLOCK_1_END]
             || valid_symbols[HTML_BLOCK_2_START]
@@ -1043,7 +1083,7 @@ impl Scanner {
         false
     }
 
-    fn parse_pipe_table(&mut self, lexer: &mut dyn Lexer) -> bool {
+    fn parse_pipe_table(&mut self, lexer: &mut ScanLexer<'_>) -> bool {
         // The table-start token is zero width. All subsequent work is lookahead.
         self.mark_end(lexer);
         let mut cell_count = 0usize;
@@ -1157,7 +1197,7 @@ impl Scanner {
         true
     }
 
-    fn scan_inner(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
+    fn scan_inner(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool]) -> bool {
         if valid_symbols[TRIGGER_ERROR] {
             lexer.set_result_symbol(ERROR as u16);
             return true;
@@ -1329,6 +1369,7 @@ impl Scanner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     #[derive(Debug, PartialEq, Eq)]
     enum Event {
@@ -1343,6 +1384,8 @@ mod tests {
         end: Option<usize>,
         symbol: u16,
         events: Vec<Event>,
+        lookahead_calls: Cell<usize>,
+        eof_calls: Cell<usize>,
     }
 
     impl TestLexer {
@@ -1353,12 +1396,15 @@ mod tests {
                 end: None,
                 symbol: u16::MAX,
                 events: Vec::new(),
+                lookahead_calls: Cell::new(0),
+                eof_calls: Cell::new(0),
             }
         }
     }
 
     impl Lexer for TestLexer {
         fn lookahead(&self) -> i32 {
+            self.lookahead_calls.set(self.lookahead_calls.get() + 1);
             self.input.get(self.position).copied().unwrap_or(0)
         }
         fn result_symbol(&self) -> u16 {
@@ -1371,7 +1417,7 @@ mod tests {
         fn advance(&mut self, skip: bool) {
             assert!(!skip, "the Markdown scanner never skips input");
             self.events.push(Event::Advance(self.position));
-            if !self.eof() {
+            if self.position < self.input.len() {
                 self.position += 1;
             }
         }
@@ -1386,6 +1432,7 @@ mod tests {
             panic!("not used by this scanner")
         }
         fn eof(&self) -> bool {
+            self.eof_calls.set(self.eof_calls.get() + 1);
             self.position == self.input.len()
         }
     }
@@ -1402,6 +1449,55 @@ mod tests {
         let mut buffer = [0u8; ts_port_tables::SERIALIZATION_BUFFER_SIZE];
         let size = scanner.serialize(&mut buffer);
         buffer[..size].to_vec()
+    }
+
+    #[test]
+    fn scan_lexer_caches_each_position_but_distinguishes_nul_from_eof() {
+        let input = "x\t\0é\r\n";
+        let mut lexer = TestLexer::new(input);
+        {
+            let mut cached = ScanLexer::new(&mut lexer);
+            for c in input.chars() {
+                assert_eq!(cached.lookahead(), c as i32);
+                assert_eq!(cached.lookahead(), c as i32);
+                assert!(!cached.eof());
+                cached.mark_end();
+                cached.set_result_symbol(PIPE_TABLE_START as u16);
+                assert_eq!(cached.lookahead(), c as i32);
+                cached.advance(false);
+            }
+            assert_eq!(cached.lookahead(), 0);
+            assert!(cached.eof());
+        }
+        assert_eq!(lexer.lookahead_calls.get(), input.chars().count() + 1);
+        // Only embedded NUL and actual EOF need the dynamic EOF query.
+        assert_eq!(lexer.eof_calls.get(), 2);
+    }
+
+    #[test]
+    fn table_and_paragraph_lookahead_share_the_scan_cache() {
+        for (input, tokens, symbol) in [
+            (
+                "a\0b | c\r\n- | -\r\n",
+                valid(&[PIPE_TABLE_START]),
+                PIPE_TABLE_START,
+            ),
+            ("a\\ż | c\n- | -\n", valid(&[PIPE_TABLE_START]), PIPE_TABLE_START),
+            (
+                "\ncontinued text\n",
+                valid(&[LINE_ENDING, SOFT_LINE_ENDING]),
+                SOFT_LINE_ENDING,
+            ),
+        ] {
+            let mut scanner = Scanner::default();
+            let mut lexer = TestLexer::new(input);
+            assert!(scanner.scan(&mut lexer, &tokens), "{input:?}");
+            assert_eq!(usize::from(lexer.symbol), symbol);
+            // Includes the recursively simulated scan after a newline. Reading
+            // lookahead in the column tracker must not add another trait call.
+            assert_eq!(lexer.lookahead_calls.get(), lexer.position + 1);
+            assert_eq!(lexer.eof_calls.get(), usize::from(input.contains('\0')));
+        }
     }
 
     #[test]

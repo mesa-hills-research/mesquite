@@ -10,27 +10,46 @@ const BLOCK_STRING_START: usize = 3;
 const BLOCK_STRING_CONTENT: usize = 4;
 const BLOCK_STRING_END: usize = 5;
 
-fn consume_char(c: u8, lexer: &mut dyn Lexer) -> bool {
-    if lexer.lookahead() != i32::from(c) {
-        return false;
-    }
-    lexer.advance(false);
-    true
+/// Cache the current code point across token attempts. Unlike C's direct field
+/// access, `Lexer::lookahead` is a virtual call; only advancing changes its value.
+struct Cursor<'a> {
+    lexer: &'a mut dyn Lexer,
+    lookahead: i32,
 }
 
-fn consume_and_count_char(c: u8, lexer: &mut dyn Lexer) -> u8 {
-    let mut count = 0u8;
-    while lexer.lookahead() == i32::from(c) {
-        count = count.wrapping_add(1);
-        lexer.advance(false);
+impl<'a> Cursor<'a> {
+    fn new(lexer: &'a mut dyn Lexer) -> Self {
+        let lookahead = lexer.lookahead();
+        Self { lexer, lookahead }
     }
-    count
-}
 
-fn skip_whitespaces(lexer: &mut dyn Lexer) {
-    // `iswspace` in the reference's default C locale, including vertical tab.
-    while matches!(lexer.lookahead(), 0x09..=0x0d | 0x20) {
-        lexer.advance(true);
+    fn advance(&mut self, skip: bool) {
+        self.lexer.advance(skip);
+        self.lookahead = self.lexer.lookahead();
+    }
+
+    fn consume_char(&mut self, c: u8) -> bool {
+        if self.lookahead != i32::from(c) {
+            return false;
+        }
+        self.advance(false);
+        true
+    }
+
+    fn consume_and_count_char(&mut self, c: u8) -> u8 {
+        let mut count = 0u8;
+        while self.lookahead == i32::from(c) {
+            count = count.wrapping_add(1);
+            self.advance(false);
+        }
+        count
+    }
+
+    fn skip_whitespaces(&mut self) {
+        // `iswspace` in the reference's default C locale, including vertical tab.
+        while matches!(self.lookahead, 0x09..=0x0d | 0x20) {
+            self.advance(true);
+        }
     }
 }
 
@@ -47,10 +66,39 @@ impl Scanner {
         self.level_count = 0;
     }
 
-    fn scan_block_start(&mut self, lexer: &mut dyn Lexer) -> bool {
-        if consume_char(b'[', lexer) {
-            let level = consume_and_count_char(b'=', lexer);
-            if consume_char(b'[', lexer) {
+    // Ordinary Lua tokens only need the two start-token checks. Keep block
+    // content/end handling out of that much more frequent path.
+    #[inline(never)]
+    fn scan_continuation(&mut self, lexer: &mut Cursor<'_>, valid_symbols: &[bool]) -> bool {
+        // Failed attempts deliberately leave the lexer advanced for the next test.
+        if valid_symbols[BLOCK_STRING_END] && self.scan_block_end(lexer) {
+            self.reset_state();
+            lexer.lexer.set_result_symbol(BLOCK_STRING_END as u16);
+            return true;
+        }
+
+        if valid_symbols[BLOCK_STRING_CONTENT] && self.scan_block_content(lexer) {
+            lexer.lexer.set_result_symbol(BLOCK_STRING_CONTENT as u16);
+            return true;
+        }
+
+        if valid_symbols[BLOCK_COMMENT_END] && self.ending_char == 0 && self.scan_block_end(lexer) {
+            self.reset_state();
+            lexer.lexer.set_result_symbol(BLOCK_COMMENT_END as u16);
+            return true;
+        }
+
+        if valid_symbols[BLOCK_COMMENT_CONTENT] && self.scan_comment_content(lexer) {
+            return true;
+        }
+
+        false
+    }
+
+    fn scan_block_start(&mut self, lexer: &mut Cursor<'_>) -> bool {
+        if lexer.consume_char(b'[') {
+            let level = lexer.consume_and_count_char(b'=');
+            if lexer.consume_char(b'[') {
                 self.level_count = level;
                 return true;
             }
@@ -58,20 +106,20 @@ impl Scanner {
         false
     }
 
-    fn scan_block_end(&self, lexer: &mut dyn Lexer) -> bool {
-        if consume_char(b']', lexer) {
-            let level = consume_and_count_char(b'=', lexer);
-            if self.level_count == level && consume_char(b']', lexer) {
+    fn scan_block_end(&self, lexer: &mut Cursor<'_>) -> bool {
+        if lexer.consume_char(b']') {
+            let level = lexer.consume_and_count_char(b'=');
+            if self.level_count == level && lexer.consume_char(b']') {
                 return true;
             }
         }
         false
     }
 
-    fn scan_block_content(&self, lexer: &mut dyn Lexer) -> bool {
-        while lexer.lookahead() != 0 {
-            if lexer.lookahead() == i32::from(b']') {
-                lexer.mark_end();
+    fn scan_block_content(&self, lexer: &mut Cursor<'_>) -> bool {
+        while lexer.lookahead != 0 {
+            if lexer.lookahead == i32::from(b']') {
+                lexer.lexer.mark_end();
                 if self.scan_block_end(lexer) {
                     return true;
                 }
@@ -82,31 +130,31 @@ impl Scanner {
         false
     }
 
-    fn scan_comment_start(&mut self, lexer: &mut dyn Lexer) -> bool {
-        if consume_char(b'-', lexer) && consume_char(b'-', lexer) {
-            lexer.mark_end();
+    fn scan_comment_start(&mut self, lexer: &mut Cursor<'_>) -> bool {
+        if lexer.consume_char(b'-') && lexer.consume_char(b'-') {
+            lexer.lexer.mark_end();
             if self.scan_block_start(lexer) {
-                lexer.mark_end();
-                lexer.set_result_symbol(BLOCK_COMMENT_START as u16);
+                lexer.lexer.mark_end();
+                lexer.lexer.set_result_symbol(BLOCK_COMMENT_START as u16);
                 return true;
             }
         }
         false
     }
 
-    fn scan_comment_content(&mut self, lexer: &mut dyn Lexer) -> bool {
+    fn scan_comment_content(&mut self, lexer: &mut Cursor<'_>) -> bool {
         if self.ending_char == 0 {
             if self.scan_block_content(lexer) {
-                lexer.set_result_symbol(BLOCK_COMMENT_CONTENT as u16);
+                lexer.lexer.set_result_symbol(BLOCK_COMMENT_CONTENT as u16);
                 return true;
             }
             return false;
         }
 
-        while lexer.lookahead() != 0 {
-            if lexer.lookahead() == i32::from(self.ending_char) {
+        while lexer.lookahead != 0 {
+            if lexer.lookahead == i32::from(self.ending_char) {
                 self.reset_state();
-                lexer.set_result_symbol(BLOCK_COMMENT_CONTENT as u16);
+                lexer.lexer.set_result_symbol(BLOCK_COMMENT_CONTENT as u16);
                 return true;
             }
             lexer.advance(false);
@@ -117,32 +165,20 @@ impl Scanner {
 
 impl ExternalScanner for Scanner {
     fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
-        // Failed attempts deliberately leave the lexer advanced for the next test.
-        if valid_symbols[BLOCK_STRING_END] && self.scan_block_end(lexer) {
-            self.reset_state();
-            lexer.set_result_symbol(BLOCK_STRING_END as u16);
+        let lexer = &mut Cursor::new(lexer);
+        if (valid_symbols[BLOCK_STRING_END]
+            | valid_symbols[BLOCK_STRING_CONTENT]
+            | valid_symbols[BLOCK_COMMENT_END]
+            | valid_symbols[BLOCK_COMMENT_CONTENT])
+            && self.scan_continuation(lexer, valid_symbols)
+        {
             return true;
         }
 
-        if valid_symbols[BLOCK_STRING_CONTENT] && self.scan_block_content(lexer) {
-            lexer.set_result_symbol(BLOCK_STRING_CONTENT as u16);
-            return true;
-        }
-
-        if valid_symbols[BLOCK_COMMENT_END] && self.ending_char == 0 && self.scan_block_end(lexer) {
-            self.reset_state();
-            lexer.set_result_symbol(BLOCK_COMMENT_END as u16);
-            return true;
-        }
-
-        if valid_symbols[BLOCK_COMMENT_CONTENT] && self.scan_comment_content(lexer) {
-            return true;
-        }
-
-        skip_whitespaces(lexer);
+        lexer.skip_whitespaces();
 
         if valid_symbols[BLOCK_STRING_START] && self.scan_block_start(lexer) {
-            lexer.set_result_symbol(BLOCK_STRING_START as u16);
+            lexer.lexer.set_result_symbol(BLOCK_STRING_START as u16);
             return true;
         }
 
@@ -179,6 +215,7 @@ pub(crate) fn create() -> Box<dyn ExternalScanner> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     #[derive(Debug, PartialEq, Eq)]
     enum Event {
@@ -192,6 +229,7 @@ mod tests {
         position: usize,
         symbol: u16,
         events: Vec<Event>,
+        lookahead_calls: Cell<usize>,
     }
 
     impl TestLexer {
@@ -201,6 +239,7 @@ mod tests {
                 position: 0,
                 symbol: u16::MAX,
                 events: Vec::new(),
+                lookahead_calls: Cell::new(0),
             }
         }
 
@@ -217,6 +256,7 @@ mod tests {
 
     impl Lexer for TestLexer {
         fn lookahead(&self) -> i32 {
+            self.lookahead_calls.set(self.lookahead_calls.get() + 1);
             self.input.get(self.position).copied().unwrap_or(0)
         }
 
@@ -265,6 +305,95 @@ mod tests {
         assert_eq!(scanner.serialize(&mut bytes), 2);
         assert_eq!(bytes[2], 0);
         [bytes[0], bytes[1]]
+    }
+
+    #[test]
+    fn lookahead_is_read_once_per_position_for_every_symbol_mask() {
+        for mask in 0u8..64 {
+            let valid_symbols = std::array::from_fn::<_, 6, _>(|i| mask & (1 << i) != 0);
+            for saved_state in [[0, 0], [0, 1], [b'\n', 3], [0xff, 0xff]] {
+                for input in [
+                    "",
+                    "name",
+                    " \tname",
+                    "--line",
+                    "[[text]]",
+                    "--[=[text]=]",
+                    "a]==]b]=]tail",
+                    "]==[=[tail",
+                    "[=--[==[tail",
+                    " \nbody]]",
+                    "body\0]]",
+                    "é\né]]",
+                ] {
+                    let mut scanner = Scanner::default();
+                    scanner.deserialize(&saved_state);
+                    let mut lexer = TestLexer::new(input);
+                    scanner.scan(&mut lexer, &valid_symbols);
+                    assert_eq!(
+                        lexer.lookahead_calls.get(),
+                        lexer.position + 1,
+                        "input {input:?}, valid {valid_symbols:?}, state {saved_state:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn failed_continuation_keeps_current_position_for_start_tokens() {
+        let mut scanner = Scanner::default();
+        scanner.deserialize(&[0, 1]);
+        let mut lexer = TestLexer::new("]==[=[tail");
+        assert!(scanner.scan(
+            &mut lexer,
+            &valid(&[BLOCK_STRING_END, BLOCK_COMMENT_END, BLOCK_STRING_START])
+        ));
+        // The failed string end consumes ]==; the comment end consumes nothing.
+        // The string start must use the new '[' position, not the original ']'.
+        assert_eq!(lexer.position, 6);
+        assert_eq!(lexer.symbol, BLOCK_STRING_START as u16);
+        assert!(lexer.marks().is_empty());
+        assert_eq!(state(&mut scanner), [0, 1]);
+    }
+
+    #[test]
+    fn failed_string_start_can_expose_comment_start() {
+        let mut scanner = Scanner::default();
+        let mut lexer = TestLexer::new("[=--[==[tail");
+        assert!(scanner.scan(
+            &mut lexer,
+            &valid(&[BLOCK_STRING_START, BLOCK_COMMENT_START])
+        ));
+        assert_eq!(lexer.position, 8);
+        assert_eq!(lexer.symbol, BLOCK_COMMENT_START as u16);
+        assert_eq!(lexer.marks(), [4, 8]);
+        assert_eq!(state(&mut scanner), [0, 2]);
+    }
+
+    #[test]
+    fn failed_string_end_can_expose_comment_end() {
+        let mut scanner = Scanner::default();
+        scanner.deserialize(&[0, 1]);
+        let mut lexer = TestLexer::new("]==]=]tail");
+        assert!(scanner.scan(&mut lexer, &valid(&[BLOCK_STRING_END, BLOCK_COMMENT_END])));
+        assert_eq!(lexer.position, 6);
+        assert_eq!(lexer.symbol, BLOCK_COMMENT_END as u16);
+        assert!(lexer.marks().is_empty());
+        assert_eq!(state(&mut scanner), [0, 0]);
+    }
+
+    #[test]
+    fn content_whitespace_is_not_skipped() {
+        for token in [BLOCK_STRING_CONTENT, BLOCK_COMMENT_CONTENT] {
+            let mut scanner = Scanner::default();
+            let mut lexer = TestLexer::new(" \nbody]]");
+            assert!(scanner.scan(&mut lexer, &valid(&[token, BLOCK_STRING_START])));
+            assert_eq!(lexer.position, 8);
+            assert_eq!(lexer.symbol, token as u16);
+            assert_eq!(lexer.marks(), [6]);
+            assert!(!lexer.events.contains(&Event::Advance(true)));
+        }
     }
 
     #[test]
