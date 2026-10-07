@@ -254,32 +254,242 @@ pub(crate) fn ts_subtree_new_missing_leaf(
 }
 
 pub(crate) fn ts_subtree_retain(tree: &Subtree) -> Subtree {
-    todo!("subtree-2: ts_subtree_retain")
+    tree.clone()
 }
 
 pub(crate) fn ts_subtree_release(pool: &mut SubtreePool, tree: Subtree) {
-    todo!("subtree-2: ts_subtree_release")
+    if matches!(tree, Subtree::Inline(_) | Subtree::Null) {
+        return;
+    }
+    pool.tree_stack.clear();
+    subtree_queue_release(&mut pool.tree_stack, tree);
+    while let Some(Subtree::Heap(mut data)) = pool.tree_stack.pop() {
+        let header = Arc::get_mut(&mut data).expect("release worklist owns each heap uniquely");
+        if header.children.is_empty() {
+            if header.has_external_tokens {
+                // Drop scanner snapshots before the leaf allocation enters the pool.
+                header.payload = SubtreePayload::Leaf;
+            }
+            ts_subtree_pool_free(pool, data);
+        } else {
+            for child in std::mem::take(&mut header.children) {
+                subtree_queue_release(&mut pool.tree_stack, child);
+            }
+            // C frees branch allocations, and only pools leaf allocations.
+        }
+    }
+}
+
+/// Drop shared references immediately, in child order, just as C decrements each
+/// refcount before pushing the newly unreferenced heaps on its LIFO worklist.
+fn subtree_queue_release(stack: &mut Vec<Subtree>, tree: Subtree) {
+    if let Subtree::Heap(mut data) = tree
+        && Arc::get_mut(&mut data).is_some()
+    {
+        stack.push(Subtree::Heap(data));
+    }
 }
 
 pub(crate) fn ts_subtree_compare(left: &Subtree, right: &Subtree, pool: &mut SubtreePool) -> i32 {
-    todo!("subtree-2: ts_subtree_compare")
+    pool.tree_stack.push(left.clone());
+    pool.tree_stack.push(right.clone());
+    while let Some(right) = pool.tree_stack.pop() {
+        let left = pool
+            .tree_stack
+            .pop()
+            .expect("comparison worklist contains pairs");
+        let order = ts_subtree_symbol(&left)
+            .cmp(&ts_subtree_symbol(&right))
+            .then_with(|| ts_subtree_child_count(&left).cmp(&ts_subtree_child_count(&right)));
+        if !order.is_eq() {
+            pool.tree_stack.clear();
+            return if order.is_lt() { -1 } else { 1 };
+        }
+        for (left, right) in ts_subtree_children(&left)
+            .iter()
+            .zip(ts_subtree_children(&right))
+            .rev()
+        {
+            pool.tree_stack.push(left.clone());
+            pool.tree_stack.push(right.clone());
+        }
+    }
+    0
 }
 
 pub(crate) fn ts_subtree_set_has_changes(tree: &mut Subtree) {
-    todo!("subtree-2: ts_subtree_set_has_changes")
+    match tree {
+        Subtree::Inline(data) => data.flags |= HAS_CHANGES,
+        Subtree::Heap(data) => Arc::make_mut(data).has_changes = true,
+        Subtree::Null => panic!("cannot mark a null subtree as changed"),
+    }
 }
 
-pub(crate) fn ts_subtree_edit(tree: Subtree, edit: &InputEdit, pool: &mut SubtreePool) -> Subtree {
-    todo!("subtree-2: ts_subtree_edit")
+pub(crate) fn ts_subtree_edit(
+    mut tree: Subtree,
+    edit: &InputEdit,
+    pool: &mut SubtreePool,
+) -> Subtree {
+    let edit = Edit {
+        start: Length {
+            bytes: edit.start_byte,
+            extent: edit.start_point,
+        },
+        old_end: Length {
+            bytes: edit.old_end_byte,
+            extent: edit.old_end_point,
+        },
+        new_end: Length {
+            bytes: edit.new_end_byte,
+            extent: edit.new_end_point,
+        },
+    };
+    // Each entry borrows a disjoint child slot. No ancestors are borrowed once
+    // their children have been queued, and all mutation is shallow copy-on-write.
+    let mut stack = vec![(&mut tree, edit)];
+    while let Some((tree, mut edit)) = stack.pop() {
+        let is_noop =
+            edit.old_end.bytes == edit.start.bytes && edit.new_end.bytes == edit.start.bytes;
+        let is_pure_insertion = edit.old_end.bytes == edit.start.bytes;
+        let parent_depends_on_column = ts_subtree_depends_on_column(tree);
+        let column_shifted = edit.new_end.extent.column != edit.old_end.extent.column;
+        let mut size = ts_subtree_size(tree);
+        let mut padding = ts_subtree_padding(tree);
+        let total_size = length_add(padding, size);
+        let lookahead_bytes = ts_subtree_lookahead_bytes(tree);
+        let end_byte = total_size.bytes.wrapping_add(lookahead_bytes);
+        if edit.start.bytes > end_byte || (is_noop && edit.start.bytes == end_byte) {
+            continue;
+        }
+
+        if edit.old_end.bytes <= padding.bytes {
+            padding = length_add(edit.new_end, length_sub(padding, edit.old_end));
+        } else if edit.start.bytes < padding.bytes {
+            size = length_saturating_sub(size, length_sub(edit.old_end, padding));
+            padding = edit.new_end;
+        } else if edit.start.bytes < total_size.bytes
+            || (edit.start.bytes == total_size.bytes && is_pure_insertion)
+        {
+            size = length_add(
+                length_sub(edit.new_end, padding),
+                length_saturating_sub(total_size, edit.old_end),
+            );
+        }
+
+        *tree = ts_subtree_make_mut(pool, std::mem::take(tree));
+        match tree {
+            Subtree::Inline(data) => {
+                if ts_subtree_can_inline(padding, size, lookahead_bytes) {
+                    data.padding_bytes = padding.bytes as u8;
+                    data.padding_columns = padding.extent.column as u8;
+                    data.padding_rows_and_lookahead =
+                        (data.padding_rows_and_lookahead & 0xf0) | padding.extent.row as u8;
+                    data.size_bytes = size.bytes as u8;
+                } else {
+                    let mut heap = ts_subtree_pool_allocate(pool);
+                    *Arc::get_mut(&mut heap).expect("pooled heaps are unique") = SubtreeHeapData {
+                        padding,
+                        size,
+                        lookahead_bytes,
+                        symbol: data.symbol as Symbol,
+                        parse_state: data.parse_state,
+                        visible: data.flags & VISIBLE != 0,
+                        named: data.flags & NAMED != 0,
+                        extra: data.flags & EXTRA != 0,
+                        is_missing: data.flags & MISSING != 0,
+                        is_keyword: data.flags & KEYWORD != 0,
+                        children: Vec::new(),
+                        payload: SubtreePayload::Leaf,
+                        ..SubtreeHeapData::default()
+                    };
+                    *tree = Subtree::Heap(heap);
+                }
+            }
+            Subtree::Heap(data) => {
+                let data = Arc::make_mut(data);
+                data.padding = padding;
+                data.size = size;
+            }
+            Subtree::Null => panic!("cannot edit a null subtree"),
+        }
+        ts_subtree_set_has_changes(tree);
+
+        let mut child_right = length_zero();
+        if let Some(data) = tree.heap_mut() {
+            for (i, child) in data.children.iter_mut().enumerate() {
+                let child_size = ts_subtree_total_size(child);
+                let child_left = child_right;
+                child_right = length_add(child_left, child_size);
+                if child_right
+                    .bytes
+                    .wrapping_add(ts_subtree_lookahead_bytes(child))
+                    < edit.start.bytes
+                {
+                    continue;
+                }
+                if (child_left.bytes > edit.old_end.bytes
+                    || (child_left.bytes == edit.old_end.bytes && child_size.bytes > 0 && i > 0))
+                    && (!parent_depends_on_column || child_left.extent.row > padding.extent.row)
+                    && (!ts_subtree_depends_on_column(child)
+                        || !column_shifted
+                        || child_left.extent.row > edit.old_end.extent.row)
+                {
+                    break;
+                }
+                let mut child_edit = Edit {
+                    start: length_saturating_sub(edit.start, child_left),
+                    old_end: length_saturating_sub(edit.old_end, child_left),
+                    new_end: length_saturating_sub(edit.new_end, child_left),
+                };
+                // Only the first child touching the edit receives inserted text.
+                if child_right.bytes > edit.start.bytes
+                    || (child_right.bytes == edit.start.bytes && is_pure_insertion)
+                {
+                    edit.new_end = edit.start;
+                } else {
+                    child_edit.old_end = child_edit.start;
+                    child_edit.new_end = child_edit.start;
+                }
+                stack.push((child, child_edit));
+            }
+        }
+    }
+    tree
 }
 
-pub(crate) fn ts_subtree_last_external_token(tree: &Subtree) -> Subtree {
-    todo!("subtree-2: ts_subtree_last_external_token")
+pub(crate) fn ts_subtree_last_external_token(mut tree: &Subtree) -> Subtree {
+    if !ts_subtree_has_external_tokens(tree) {
+        return Subtree::Null;
+    }
+    while !ts_subtree_children(tree).is_empty() {
+        tree = ts_subtree_children(tree)
+            .iter()
+            .rev()
+            .find(|child| ts_subtree_has_external_tokens(child))
+            .expect("a branch with external tokens has an external-token child");
+    }
+    tree.clone()
 }
 
 pub(crate) fn ts_subtree__write_char_to_string(output: &mut String, character: i32) {
-    todo!("subtree-2: ts_subtree__write_char_to_string")
+    use std::fmt::Write;
+    match character {
+        -1 => output.push_str("INVALID"),
+        0 => output.push_str("'\\0'"),
+        10 => output.push_str("'\\n'"),
+        9 => output.push_str("'\\t'"),
+        13 => output.push_str("'\\r'"),
+        32..=126 => {
+            output.push('\'');
+            output.push(character as u8 as char);
+            output.push('\'');
+        }
+        _ => write!(output, "{character}").unwrap(),
+    }
 }
+
+// As in C, identity (not the field's spelling) marks the root call.
+static ROOT_FIELD: &str = "__ROOT__";
 
 pub(crate) fn ts_subtree__write_to_string(
     tree: &Subtree,
@@ -290,7 +500,128 @@ pub(crate) fn ts_subtree__write_to_string(
     alias_is_named: bool,
     field_name: Option<&str>,
 ) {
-    todo!("subtree-2: ts_subtree__write_to_string")
+    use crate::language::{
+        ts_language_alias_sequence, ts_language_field_map, ts_language_field_name_for_id,
+        ts_language_symbol_metadata, ts_language_symbol_name,
+    };
+    enum Entry<'a> {
+        Node(&'a Subtree, Symbol, bool, Option<&'a str>),
+        Close,
+    }
+    let mut stack = vec![Entry::Node(tree, alias_symbol, alias_is_named, field_name)];
+    while let Some(entry) = stack.pop() {
+        let Entry::Node(tree, alias_symbol, alias_is_named, field_name) = entry else {
+            output.push(')');
+            continue;
+        };
+        if tree.is_null() {
+            output.push_str("(NULL)");
+            continue;
+        }
+        let is_root = field_name.is_some_and(|name| std::ptr::eq(name, ROOT_FIELD));
+        let is_visible = include_all
+            || ts_subtree_missing(tree)
+            || if alias_symbol != 0 {
+                alias_is_named
+            } else {
+                ts_subtree_visible(tree) && ts_subtree_named(tree)
+            };
+        if is_visible {
+            if !is_root {
+                output.push(' ');
+                if let Some(name) = field_name {
+                    output.push_str(name);
+                    output.push_str(": ");
+                }
+            }
+            if ts_subtree_is_error(tree)
+                && ts_subtree_child_count(tree) == 0
+                && ts_subtree_size(tree).bytes > 0
+            {
+                output.push_str("(UNEXPECTED ");
+                let Some(SubtreePayload::Error(character)) = tree.heap().map(|d| &d.payload) else {
+                    panic!("an error leaf stores its lookahead character");
+                };
+                ts_subtree__write_char_to_string(output, *character);
+            } else {
+                let symbol = if alias_symbol != 0 {
+                    alias_symbol
+                } else {
+                    ts_subtree_symbol(tree)
+                };
+                let name = ts_language_symbol_name(language, symbol).expect("valid subtree symbol");
+                if ts_subtree_missing(tree) {
+                    output.push_str("(MISSING ");
+                    let named = alias_is_named || ts_subtree_named(tree);
+                    if !named {
+                        output.push('"');
+                    }
+                    output.push_str(name);
+                    if !named {
+                        output.push('"');
+                    }
+                } else {
+                    output.push('(');
+                    output.push_str(name);
+                }
+            }
+        } else if is_root {
+            let symbol = if alias_symbol != 0 {
+                alias_symbol
+            } else {
+                ts_subtree_symbol(tree)
+            };
+            let name = ts_language_symbol_name(language, symbol).expect("valid subtree symbol");
+            output.push('(');
+            if ts_subtree_child_count(tree) > 0 {
+                output.push_str(name);
+            } else {
+                let named = ts_subtree_named(tree);
+                if !named {
+                    output.push('"');
+                }
+                output.push_str(name);
+                if !named {
+                    output.push('"');
+                }
+                output.push(')');
+            }
+        }
+        if is_visible {
+            stack.push(Entry::Close);
+        }
+        if ts_subtree_child_count(tree) > 0 {
+            let production = ts_subtree_production_id(tree) as u32;
+            let aliases = ts_language_alias_sequence(language, production);
+            let fields = ts_language_field_map(language, production);
+            let mut structural_index = 0;
+            let children_start = stack.len();
+            for child in ts_subtree_children(tree) {
+                if ts_subtree_extra(child) {
+                    stack.push(Entry::Node(child, 0, false, None));
+                } else {
+                    let alias = if aliases.is_empty() {
+                        0
+                    } else {
+                        aliases[structural_index]
+                    };
+                    let named = alias != 0 && ts_language_symbol_metadata(language, alias).named;
+                    let mut child_field = if is_visible { None } else { field_name };
+                    for field in fields {
+                        if !field.inherited && field.child_index as usize == structural_index {
+                            child_field = ts_language_field_name_for_id(language, field.field_id);
+                            break;
+                        }
+                    }
+                    stack.push(Entry::Node(child, alias, named, child_field));
+                    structural_index += 1;
+                }
+            }
+            // The C writer recurses left to right; use a worklist to avoid a
+            // call-stack overflow when rendering deeply nested trees.
+            stack[children_start..].reverse();
+        }
+    }
 }
 
 pub(crate) fn ts_subtree_string(
@@ -300,7 +631,17 @@ pub(crate) fn ts_subtree_string(
     language: &Language,
     include_all: bool,
 ) -> String {
-    todo!("subtree-2: ts_subtree_string")
+    let mut output = String::new();
+    ts_subtree__write_to_string(
+        tree,
+        &mut output,
+        language,
+        include_all,
+        alias_symbol,
+        alias_is_named,
+        Some(ROOT_FIELD),
+    );
+    output
 }
 
 pub(crate) fn ts_subtree__print_dot_graph(
@@ -310,7 +651,85 @@ pub(crate) fn ts_subtree__print_dot_graph(
     alias_symbol: Symbol,
     output: &mut dyn std::io::Write,
 ) -> std::io::Result<()> {
-    todo!("subtree-2: ts_subtree__print_dot_graph")
+    use crate::language::ts_language_write_symbol_as_dot_string;
+    enum Entry<'a> {
+        Node(&'a Subtree, u32, Symbol),
+        Edge(&'a Subtree, &'a Subtree, usize),
+    }
+    let mut stack = vec![Entry::Node(tree, start_offset, alias_symbol)];
+    while let Some(entry) = stack.pop() {
+        let (tree, start_offset, alias_symbol) = match entry {
+            Entry::Node(tree, offset, alias) => (tree, offset, alias),
+            Entry::Edge(parent, child, index) => {
+                writeln!(
+                    output,
+                    "tree_{parent:p} -> tree_{child:p} [tooltip={index}]"
+                )?;
+                continue;
+            }
+        };
+        let symbol = if alias_symbol != 0 {
+            alias_symbol
+        } else {
+            ts_subtree_symbol(tree)
+        };
+        let end_offset = start_offset.wrapping_add(ts_subtree_total_bytes(tree));
+        write!(output, "tree_{tree:p} [label=\"")?;
+        ts_language_write_symbol_as_dot_string(language, output, symbol)?;
+        write!(output, "\"")?;
+        if ts_subtree_child_count(tree) == 0 {
+            write!(output, ", shape=plaintext")?;
+        }
+        if ts_subtree_extra(tree) {
+            write!(output, ", fontcolor=gray")?;
+        }
+        if ts_subtree_has_changes(tree) {
+            write!(output, ", color=green, penwidth=2")?;
+        }
+        write!(
+            output,
+            concat!(
+                ", tooltip=\"range: {} - {}\nstate: {}\nerror-cost: {}\nhas-changes: {}",
+                "\ndepends-on-column: {}\ndescendant-count: {}\nrepeat-depth: {}\nlookahead-bytes: {}"
+            ),
+            start_offset,
+            end_offset,
+            ts_subtree_parse_state(tree),
+            ts_subtree_error_cost(tree),
+            u8::from(ts_subtree_has_changes(tree)),
+            u8::from(ts_subtree_depends_on_column(tree)),
+            ts_subtree_visible_descendant_count(tree),
+            ts_subtree_repeat_depth(tree),
+            ts_subtree_lookahead_bytes(tree),
+        )?;
+        if ts_subtree_is_error(tree)
+            && ts_subtree_child_count(tree) == 0
+            && let Some(SubtreePayload::Error(character)) = tree.heap().map(|d| &d.payload)
+            && *character != 0
+        {
+            write!(output, "\ncharacter: '")?;
+            // fprintf's %c writes the low byte, not a UTF-8 encoding.
+            output.write_all(&[*character as u8])?;
+            write!(output, "'")?;
+        }
+        writeln!(output, "\"]")?;
+        let mut child_start_offset = start_offset;
+        let mut child_info_offset = u32::from(language.tables.max_alias_sequence_length)
+            .wrapping_mul(u32::from(ts_subtree_production_id(tree)));
+        let children_start = stack.len();
+        for (i, child) in ts_subtree_children(tree).iter().enumerate() {
+            let mut alias = 0;
+            if !ts_subtree_extra(child) && child_info_offset != 0 {
+                alias = language.tables.alias_sequences[child_info_offset as usize];
+                child_info_offset = child_info_offset.wrapping_add(1);
+            }
+            stack.push(Entry::Node(child, child_start_offset, alias));
+            stack.push(Entry::Edge(tree, child, i));
+            child_start_offset = child_start_offset.wrapping_add(ts_subtree_total_bytes(child));
+        }
+        stack[children_start..].reverse();
+    }
+    Ok(())
 }
 
 pub(crate) fn ts_subtree_print_dot_graph(
@@ -318,15 +737,31 @@ pub(crate) fn ts_subtree_print_dot_graph(
     language: &Language,
     output: &mut dyn std::io::Write,
 ) -> std::io::Result<()> {
-    todo!("subtree-2: ts_subtree_print_dot_graph")
+    writeln!(output, "digraph tree {{")?;
+    writeln!(output, "edge [arrowhead=none]")?;
+    ts_subtree__print_dot_graph(tree, 0, language, 0, output)?;
+    writeln!(output, "}}")
 }
 
 pub(crate) fn ts_subtree_external_scanner_state(tree: &Subtree) -> Option<&ExternalScannerState> {
-    todo!("subtree-2: ts_subtree_external_scanner_state")
+    let data = tree.heap()?;
+    if data.has_external_tokens
+        && data.children.is_empty()
+        && let SubtreePayload::External(state) = &data.payload
+    {
+        Some(state)
+    } else {
+        None
+    }
 }
 
 pub(crate) fn ts_subtree_external_scanner_state_eq(tree: &Subtree, other: &Subtree) -> bool {
-    todo!("subtree-2: ts_subtree_external_scanner_state_eq")
+    // None represents C's static, zero-length scanner state.
+    let left =
+        ts_subtree_external_scanner_state(tree).map_or(&[][..], ts_external_scanner_state_data);
+    let right =
+        ts_subtree_external_scanner_state(other).map_or(&[][..], ts_external_scanner_state_data);
+    left == right
 }
 
 pub(crate) const TS_TREE_STATE_NONE: StateId = StateId::MAX;
@@ -647,4 +1082,175 @@ pub(crate) struct Edit {
     pub start: Length,
     pub old_end: Length,
     pub new_end: Length,
+}
+
+#[cfg(test)]
+mod subtree_2_tests {
+    use super::*;
+
+    fn leaf(symbol: u8, size: u8) -> Subtree {
+        Subtree::Inline(InlineLeaf {
+            symbol,
+            size_bytes: size,
+            flags: VISIBLE | NAMED,
+            ..InlineLeaf::default()
+        })
+    }
+
+    fn branch(symbol: Symbol, children: Vec<Subtree>) -> Subtree {
+        let size = children.iter().fold(length_zero(), |size, child| {
+            length_add(size, ts_subtree_total_size(child))
+        });
+        Subtree::Heap(Arc::new(SubtreeHeapData {
+            symbol,
+            size,
+            children,
+            visible: true,
+            named: true,
+            payload: SubtreePayload::Branch(BranchData::default()),
+            ..SubtreeHeapData::default()
+        }))
+    }
+
+    #[test]
+    fn retain_and_change_flags_use_shallow_copy_on_write() {
+        let original = branch(2, vec![branch(3, vec![leaf(4, 1)])]);
+        let mut retained = ts_subtree_retain(&original);
+        assert!(original.ptr_eq(&retained));
+        ts_subtree_set_has_changes(&mut retained);
+        assert!(!original.ptr_eq(&retained));
+        assert!(!ts_subtree_has_changes(&original));
+        assert!(ts_subtree_has_changes(&retained));
+        assert!(ts_subtree_children(&original)[0].ptr_eq(&ts_subtree_children(&retained)[0]));
+        let mut inline = leaf(1, 2);
+        ts_subtree_set_has_changes(&mut inline);
+        assert!(ts_subtree_has_changes(&inline));
+        assert!(ts_subtree_visible(&inline));
+        assert!(ts_subtree_named(&inline));
+    }
+
+    #[test]
+    fn compare_orders_symbols_then_counts_then_children_left_to_right() {
+        let mut pool = SubtreePool::default();
+        let left = branch(1, vec![leaf(2, 4), leaf(4, 1)]);
+        let right = branch(1, vec![leaf(3, 2), leaf(1, 1)]);
+        assert_eq!(ts_subtree_compare(&left, &right, &mut pool), -1);
+        assert_eq!(ts_subtree_compare(&right, &left, &mut pool), 1);
+        assert!(pool.tree_stack.is_empty());
+        assert_eq!(ts_subtree_compare(&left, &left, &mut pool), 0);
+        assert_eq!(ts_subtree_compare(&leaf(1, 1), &left, &mut pool), -1);
+        assert_eq!(ts_subtree_compare(&leaf(1, 2), &leaf(1, 30), &mut pool), 0);
+        assert_eq!(
+            Arc::strong_count(match &left {
+                Subtree::Heap(d) => d,
+                _ => unreachable!(),
+            }),
+            1
+        );
+    }
+
+    #[test]
+    fn releasing_branches_preserves_shared_descendants() {
+        let child = branch(2, vec![leaf(3, 1)]);
+        let parent = branch(1, vec![child.clone(), child.clone()]);
+        let mut pool = SubtreePool::default();
+        ts_subtree_release(&mut pool, parent);
+        assert_eq!(
+            Arc::strong_count(match &child {
+                Subtree::Heap(d) => d,
+                _ => unreachable!(),
+            }),
+            1
+        );
+        assert_eq!(ts_subtree_child_count(&child), 1);
+        ts_subtree_release(&mut pool, child);
+        assert!(pool.tree_stack.is_empty());
+        assert!(pool.free_trees.is_empty());
+    }
+
+    #[test]
+    fn comparison_and_release_do_not_recurse() {
+        std::thread::Builder::new()
+            .stack_size(128 * 1024)
+            .spawn(|| {
+                let mut left = leaf(1, 1);
+                let mut right = leaf(1, 2);
+                for _ in 0..20_000 {
+                    left = branch(2, vec![left]);
+                    right = branch(2, vec![right]);
+                }
+                let mut pool = SubtreePool::default();
+                assert_eq!(ts_subtree_compare(&left, &right, &mut pool), 0);
+                ts_subtree_release(&mut pool, left);
+                ts_subtree_release(&mut pool, right);
+                assert!(pool.tree_stack.is_empty());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn edits_beyond_lookahead_or_noops_at_its_end_leave_identity_unchanged() {
+        let mut original = branch(1, vec![leaf(2, 10)]);
+        original.heap_mut().unwrap().lookahead_bytes = 4;
+        let mut pool = SubtreePool::default();
+        let edit = InputEdit {
+            start_byte: 15,
+            old_end_byte: 15,
+            new_end_byte: 20,
+            ..InputEdit::default()
+        };
+        let result = ts_subtree_edit(original.clone(), &edit, &mut pool);
+        assert!(result.ptr_eq(&original));
+        let edit = InputEdit {
+            start_byte: 14,
+            old_end_byte: 14,
+            new_end_byte: 14,
+            ..InputEdit::default()
+        };
+        let result = ts_subtree_edit(original.clone(), &edit, &mut pool);
+        assert!(result.ptr_eq(&original));
+        assert!(!ts_subtree_has_changes(&result));
+    }
+
+    #[test]
+    fn last_external_token_uses_rightmost_external_descendant() {
+        let mut external = branch(3, Vec::new());
+        let data = external.heap_mut().unwrap();
+        data.has_external_tokens = true;
+        data.payload = SubtreePayload::External(ExternalScannerState::default());
+        let mut internal = branch(2, vec![external.clone(), leaf(4, 1)]);
+        internal.heap_mut().unwrap().has_external_tokens = true;
+        let mut root = branch(1, vec![external.clone(), internal.clone(), leaf(5, 1)]);
+        root.heap_mut().unwrap().has_external_tokens = true;
+        let last = ts_subtree_last_external_token(&root);
+        assert!(last.ptr_eq(&external));
+        assert!(ts_subtree_last_external_token(&leaf(1, 1)).is_null());
+        assert!(ts_subtree_external_scanner_state(&root).is_none());
+        assert!(ts_subtree_external_scanner_state(&last).is_some());
+        assert!(ts_subtree_external_scanner_state_eq(&root, &Subtree::Null));
+    }
+
+    #[test]
+    fn unexpected_characters_match_c_escaping_and_ascii_printability() {
+        for (character, expected) in [
+            (-1, "INVALID"),
+            (0, "'\\0'"),
+            (10, "'\\n'"),
+            (9, "'\\t'"),
+            (13, "'\\r'"),
+            (32, "' '"),
+            (39, "'''"),
+            (92, "'\\'"),
+            (126, "'~'"),
+            (127, "127"),
+            (233, "233"),
+            (11, "11"),
+        ] {
+            let mut output = String::new();
+            ts_subtree__write_char_to_string(&mut output, character);
+            assert_eq!(output, expected);
+        }
+    }
 }
