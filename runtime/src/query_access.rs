@@ -300,6 +300,7 @@ pub(crate) fn ts_query_cursor_exec<'query, 'tree: 'query>(
 ) -> QueryExecution<'query, 'tree> {
     cursor.states.clear();
     cursor.finished_states.clear();
+    let tree_cursor = ts_tree_cursor_new(node);
     cursor.did_exceed_match_limit = false;
 
     // Keep pool slot ids/count across executions without retaining borrowed
@@ -324,7 +325,7 @@ pub(crate) fn ts_query_cursor_exec<'query, 'tree: 'query>(
     QueryExecution {
         config: cursor,
         query,
-        cursor: ts_tree_cursor_new(node),
+        cursor: tree_cursor,
         capture_list_pool,
         depth: 0,
         next_state_id: 0,
