@@ -636,3 +636,7 @@ pub(crate) fn ts_query__parse_pattern(
     capture_quantifiers_mul(capture_quantifiers, quantifier);
     QueryErrorCode::None
 }
+
+#[cfg(test)]
+#[path = "query_parse/tests.rs"]
+mod tests;
