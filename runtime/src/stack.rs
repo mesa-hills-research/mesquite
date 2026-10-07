@@ -736,6 +736,34 @@ pub(crate) fn ts_stack_pop_count_in_place(
     if stack.heads.len() != 1 || stack.heads[0].status != StackStatus::Active {
         return None;
     }
+    // A one-child reduction with no leading extras can transfer its edge
+    // immediately: there is no prefix to preflight or child order to reverse.
+    // Keep this small path inlineable independently of the two-pass traversal.
+    if count == 1 {
+        let top = stack.heads[0].node;
+        let data = stack.arena.node(top);
+        if data.ref_count == 1 && data.link_count == 1 {
+            let link = data.links.first.as_ref().expect("initialized stack link");
+            if link.subtree.is_null() || !ts_subtree_extra(&link.subtree) {
+                let data = stack.arena.nodes[top.0].take().expect("live stack node");
+                let link = data.links.first.expect("initialized stack link");
+                stack.heads[0].node = link.node;
+                stack.arena.free.push(top);
+                let subtrees = if link.subtree.is_null() {
+                    Vec::new()
+                } else {
+                    vec![link.subtree]
+                };
+                stack.slices.clear();
+                stack.iterators.clear();
+                return Some(subtrees);
+            }
+        }
+    }
+    pop_count_in_place_general(stack, count)
+}
+
+fn pop_count_in_place_general(stack: &mut Stack, count: u32) -> Option<Vec<Subtree>> {
     let top = stack.heads[0].node;
     // A one-symbol reduction with no leading extras can transfer its sole edge
     // immediately. There is no longer prefix whose ownership needs preflight.
@@ -2111,6 +2139,71 @@ mod stack_1_tests {
             }
             ts_stack_delete(&mut optimized, &mut pool);
             ts_stack_delete(&mut ordinary, &mut pool);
+        }
+    }
+
+    #[test]
+    fn single_child_pop_moves_null_inline_and_heap_links() {
+        let heap = Subtree::Heap(Arc::new(SubtreeHeapData {
+            symbol: 3,
+            visible: true,
+            children: Vec::new(),
+            payload: SubtreePayload::Leaf,
+            ..SubtreeHeapData::default()
+        }));
+        for tree in [Subtree::Null, leaf(2, VISIBLE), heap.clone()] {
+            for pending in [false, true] {
+                let build = || {
+                    let mut stack = ts_stack_new();
+                    let mut pool = SubtreePool::default();
+                    ts_stack_push(&mut stack, &mut pool, 0, tree.clone(), pending, 4);
+                    stack.heads[0].summary = Some(vec![StackSummaryEntry {
+                        position: length_zero(),
+                        depth: 0,
+                        state: 5,
+                    }]);
+                    stack.heads[0].node_count_at_last_error = 17;
+                    ts_stack_set_last_external_token(&mut stack, &mut pool, 0, heap.clone());
+                    stack
+                };
+                let mut ordinary = build();
+                let mut optimized = build();
+                let mut pool = SubtreePool::default();
+                let references = Arc::strong_count(match &heap {
+                    Subtree::Heap(data) => data,
+                    _ => unreachable!(),
+                });
+                let fast = ts_stack_pop_count_in_place(&mut optimized, 1).unwrap();
+                assert_eq!(
+                    Arc::strong_count(match &heap {
+                        Subtree::Heap(data) => data,
+                        _ => unreachable!(),
+                    }),
+                    references,
+                );
+                let mut slow = ts_stack_pop_count(&mut ordinary, &mut pool, 0, 1);
+                assert_eq!(slow.len(), 1);
+                let slow = slow.pop().unwrap();
+                ts_stack_renumber_version(&mut ordinary, &mut pool, slow.version, 0);
+                assert_eq!(fast.len(), usize::from(!tree.is_null()));
+                assert_eq!(fast.len(), slow.subtrees.len());
+                for (fast, slow) in fast.iter().zip(&slow.subtrees) {
+                    assert!(fast.ptr_eq(slow));
+                }
+                assert_eq!(optimized.heads[0].node, ordinary.heads[0].node);
+                assert_eq!(optimized.arena.free, ordinary.arena.free);
+                assert_eq!(optimized.heads[0].node_count_at_last_error, 17);
+                assert_eq!(optimized.heads[0].summary.as_ref().unwrap()[0].state, 5);
+                assert!(ts_stack_last_external_token(&optimized, 0).ptr_eq(&heap));
+                assert_eq!(
+                    optimized.arena.node(optimized.base_node).ref_count,
+                    ordinary.arena.node(ordinary.base_node).ref_count,
+                );
+                assert!(optimized.slices.is_empty());
+                assert!(optimized.iterators.is_empty());
+                ts_stack_delete(&mut optimized, &mut pool);
+                ts_stack_delete(&mut ordinary, &mut pool);
+            }
         }
     }
 
