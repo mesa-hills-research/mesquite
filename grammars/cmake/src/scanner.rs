@@ -358,18 +358,22 @@ mod tests {
         for input in [
             "message(\"${var\twith\ttab}\")\n",
             "message(\"${var with space}\")\n",
+            // Reduced Registry-query.cmake (bucket 4d6cc948): recovery also
+            // consumes a second variable reference after the malformed one.
+            "message(\"${CMAKE_ CURRENT_SOURCE_DIR}/${FILE_DIR}\")\n",
         ] {
+            let start = input.find([' ', '\t']).unwrap();
             let mut scanner = create();
             for _ in 0..2 {
                 let mut lexer = TestLexer::new(input);
-                lexer.position = 14;
+                lexer.position = start;
                 assert!(scanner.scan(&mut lexer, &[true; 7]));
                 assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
                 assert_eq!(lexer.position, input.len());
                 assert_eq!(lexer.end, Some(input.len()));
 
-                let mut expected = vec![Event::Advance(14, true)];
-                for position in 15..input.len() {
+                let mut expected = vec![Event::Advance(start, true)];
+                for position in start + 1..input.len() {
                     expected.push(Event::Advance(position, false));
                     expected.push(Event::MarkEnd(position + 1));
                 }
