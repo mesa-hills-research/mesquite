@@ -255,6 +255,10 @@ struct TagStack {
     depth: usize,
     // Names that require truncation or strncpy's NUL padding on serialization.
     noncanonical_names: usize,
+    // Name/implicit-end scans repeatedly inspect the same parent. Cache its
+    // type so those reads do not decode the packed tail and custom index again.
+    // Push knows the type; pop and restore refresh it after changing the stack.
+    top_kind: Option<TagType>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -279,23 +283,34 @@ impl TagStack {
         self.custom.clear();
         self.depth = 0;
         self.noncanonical_names = 0;
+        self.top_kind = None;
+    }
+
+    fn refresh_top_kind(&mut self) {
+        self.top_kind = if self.is_empty() {
+            None
+        } else if self
+            .custom
+            .last()
+            .is_some_and(|tag| tag.depth + 1 == self.depth)
+        {
+            Some(TagType::Custom)
+        } else {
+            Some(TagType::from_byte(*self.bytes.last().unwrap()))
+        };
     }
 
     fn last(&self) -> Option<Tag<'_>> {
-        if self.is_empty() {
-            return None;
-        }
-        if let Some(custom) = self.custom.last().filter(|tag| tag.depth + 1 == self.depth) {
-            Some(Tag {
-                kind: TagType::Custom,
-                custom_tag_name: &self.bytes[custom.start + 2..],
-            })
+        let kind = self.top_kind?;
+        let custom_tag_name = if kind == TagType::Custom {
+            &self.bytes[self.custom.last().unwrap().start + 2..]
         } else {
-            Some(Tag {
-                kind: TagType::from_byte(*self.bytes.last().unwrap()),
-                custom_tag_name: &[],
-            })
-        }
+            &[]
+        };
+        Some(Tag {
+            kind,
+            custom_tag_name,
+        })
     }
 
     fn last_matches_name(&self, name: &[u8]) -> bool {
@@ -330,6 +345,7 @@ impl TagStack {
             self.bytes.push(tag.kind as u8);
         }
         self.depth += 1;
+        self.top_kind = Some(tag.kind);
     }
 
     fn pop(&mut self) {
@@ -348,6 +364,7 @@ impl TagStack {
         } else {
             self.bytes.pop();
         }
+        self.refresh_top_kind();
     }
 
     fn iter(&self) -> impl Iterator<Item = Tag<'_>> {
@@ -908,6 +925,7 @@ impl Scanner {
             TagType::End as u8,
         );
         self.tags.depth = tag_count;
+        self.tags.refresh_top_kind();
     }
 }
 
@@ -1647,6 +1665,82 @@ mod tests {
                     assert_eq!(actual.tags, expected.tags, "{input:?}");
                     assert_eq!(lexer.position, reference.position, "{input:?}");
                     assert_eq!(lexer.calls, reference.calls, "{input:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn streamed_implicit_closes_preserve_recovery_and_callbacks() {
+        // C's closing-tag branch, collecting the entire name before deciding
+        // whether it matches the parent or triggers type-based recovery.
+        fn reference(scanner: &mut Scanner, lexer: &mut TestLexer) -> bool {
+            lexer.advance(false); // '/'
+            let c = lexer.lookahead();
+            let mut short = [0; 16];
+            let name = scan_tag_name(lexer, &mut scanner.long_tag_name, &mut short, c);
+            if name.is_empty() && !lexer.eof() {
+                return false;
+            }
+            let next = Tag::for_name(name);
+            if scanner.tags.last() == Some(next) {
+                return false;
+            }
+            if scanner.tags.contains_kind(next.kind) {
+                scanner.tags.pop();
+                lexer.set_result_symbol(IMPLICIT_END_TAG as u16);
+                return true;
+            }
+            false
+        }
+
+        let mut parents: Vec<_> = TAG_TYPES_BY_TAG_NAME
+            .iter()
+            .map(|&(name, _)| Tag::for_name(name))
+            .collect();
+        parents.extend([
+            Tag::default(),
+            Tag {
+                kind: TagType::EndOfVoidTags,
+                custom_tag_name: &[],
+            },
+            Tag {
+                kind: TagType::Custom,
+                custom_tag_name: b"DIV",
+            },
+            Tag::for_name(b"X-CUSTOM"),
+        ]);
+        let long_tail = "-long".repeat(60);
+        for parent in parents {
+            let spelling = if parent.kind == TagType::Custom {
+                parent.custom_tag_name
+            } else {
+                parent.kind.name()
+            };
+            let spelling = std::str::from_utf8(spelling).unwrap();
+            for length in 0..=spelling.len() {
+                let prefix = spelling[..length].to_ascii_lowercase();
+                for suffix in ["", ">", "X>", "é>", "\0>", "\u{11}>", &long_tail] {
+                    let input = format!("/{prefix}{suffix}");
+                    let make_scanner = || Scanner {
+                        tags: [Tag::for_name(b"X-ROOT"), Tag::for_name(b"DIV"), parent]
+                            .into_iter()
+                            .collect(),
+                        ..Scanner::default()
+                    };
+                    let mut expected = make_scanner();
+                    let mut reference_lexer = TestLexer::new(&input);
+                    let accepted = reference(&mut expected, &mut reference_lexer);
+                    let mut actual = make_scanner();
+                    let mut lexer = TestLexer::new(&input);
+                    assert_eq!(
+                        actual.scan_implicit_end_tag(&mut lexer, i32::from(b'/')),
+                        accepted,
+                        "parent={parent:?}, input={input:?}",
+                    );
+                    assert_eq!(actual.tags, expected.tags, "{input:?}");
+                    assert_eq!(lexer.position, reference_lexer.position, "{input:?}");
+                    assert_eq!(lexer.calls, reference_lexer.calls, "{input:?}");
                 }
             }
         }
