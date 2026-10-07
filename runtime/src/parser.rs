@@ -1046,6 +1046,8 @@ pub(crate) fn ts_parser__reduce(
     replace_version: bool,
 ) -> StackVersion {
     let version_count = ts_stack_version_count(&parser.stack);
+    // C would assign this count to the temporary reduction version. Enforce
+    // the same limit even though the fused path does not create that head.
     let allow_replacement = replace_version
         && (version_count <= MAX_VERSION_COUNT + MAX_VERSION_COUNT_OVERFLOW
             || version_count
@@ -1097,9 +1099,9 @@ pub(crate) fn ts_parser__reduce(
             );
         }
     }
-    // A committed reduction on the only active version needs neither a
-    // temporary version nor a slice worklist. Keep this path separate from the
-    // general reduction's grouping, selection, and version-merging machinery.
+    // A committed reduction with an owned prefix needs neither a temporary
+    // version nor a slice worklist. Its one replacement can merge directly;
+    // shared/branching paths retain the general grouping/selection algorithm.
     if allow_replacement {
         let language = parser.language.unwrap();
         if let Some(next_state) = ts_stack_reduce_many_for_version(
@@ -1175,6 +1177,8 @@ fn ts_parser__finish_committed_reduction(
     version_count: StackVersion,
     original_head: Option<StackHeadSnapshot>,
 ) -> StackVersion {
+    // The general path appends the replacement after every original version,
+    // so its merge scan includes later indices as well as earlier ones.
     for other in 0..version_count {
         if other != version
             && ts_stack_merge_contents(&mut parser.stack, &mut parser.tree_pool, other, version)

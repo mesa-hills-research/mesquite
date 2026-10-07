@@ -809,6 +809,8 @@ pub(crate) fn ts_stack_reduce_unary(
     ts_stack_reduce_unary_for_version(stack, 0, build)
 }
 
+/// The owned prefix may belong to any active version. Other heads remain
+/// untouched; the caller handles fragile marking, version limits and merging.
 #[inline]
 pub(crate) fn ts_stack_reduce_unary_for_version(
     stack: &mut Stack,
@@ -892,6 +894,8 @@ pub(crate) fn ts_stack_reduce_many(
     ts_stack_reduce_many_for_version(stack, 0, count, build)
 }
 
+/// Version-aware counterpart of the unary replacement, with a complete
+/// ownership preflight before consuming any link in a longer prefix.
 pub(crate) fn ts_stack_reduce_many_for_version(
     stack: &mut Stack,
     version: StackVersion,
@@ -1291,6 +1295,8 @@ pub(crate) fn ts_stack_merge(
     }
 }
 
+/// Merge links in C's order, leaving disposal of the source head to the caller.
+/// A committed replacement must retain that version for advance's halt path.
 pub(crate) fn ts_stack_merge_contents(
     stack: &mut Stack,
     pool: &mut SubtreePool,
