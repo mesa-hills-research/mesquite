@@ -82,6 +82,31 @@ fn assert_empty_recovery_content(
         assert!(!content.has_error());
         // This is a scanner-produced empty token, not a missing-node insertion.
         assert!(!content.is_missing());
+
+        // Zero-width content is still a child, with a parent and predecessor,
+        // and cursor traversal must reach it even though its start equals EOF.
+        let previous = error.child(prefix.len() - 1).unwrap();
+        assert_eq!(content.parent(), Some(error));
+        assert_eq!(content.prev_sibling(), Some(previous));
+        // C's node next-sibling search skips children ending at or before
+        // the target's end. With no intervening whitespace it therefore does
+        // not find this empty token; cursor traversal below still must.
+        assert_eq!(
+            previous.next_sibling(),
+            (previous.end_byte() < content.end_byte()).then_some(content)
+        );
+        assert_eq!(content.prev_named_sibling(), error.named_child(0));
+        assert_eq!(content.next_sibling(), None);
+        assert_eq!(content.next_named_sibling(), None);
+
+        let mut cursor = error.walk();
+        assert!(cursor.goto_last_child());
+        assert_eq!(cursor.node(), content);
+        assert!(!cursor.goto_next_sibling());
+        assert!(cursor.goto_previous_sibling());
+        assert_eq!(cursor.node(), previous);
+        assert!(cursor.goto_next_sibling());
+        assert_eq!(cursor.node(), content);
     }
 }
 
