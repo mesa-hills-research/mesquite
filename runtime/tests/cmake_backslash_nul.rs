@@ -20,7 +20,9 @@ fn backslash_nul_recovers_as_one_bracket_content_token() {
     // fields. C's calloc and empty-state deserialization both restore token zero
     // (BRACKET_ARGUMENT_OPEN), enabling content without an opener in recovery.
     for preceding_source in [None, Some("message([[value]])"), Some("#[=[comment]=]")] {
-        for chunk_size in [source.len(), 1] {
+        // Also split immediately before/after the backslash, NUL, and newline:
+        // an exhausted input chunk is not EOF when recovery scans the suffix.
+        for chunk_size in [source.len(), 1, 54, 55, 56, 57] {
             if let Some(preceding_source) = preceding_source {
                 let tree = parser.parse(preceding_source, None).unwrap();
                 assert!(!tree.root_node().has_error());
@@ -45,6 +47,7 @@ fn backslash_nul_recovers_as_one_bracket_content_token() {
 
             let root = tree.root_node();
             assert_eq!(root.kind(), "source_file");
+            assert_eq!(root.kind_id(), 43);
             assert_eq!(root.byte_range(), 0..113);
             assert_eq!(root.start_position(), Point::new(0, 0));
             assert_eq!(root.end_position(), Point::new(2, 0));
@@ -54,6 +57,7 @@ fn backslash_nul_recovers_as_one_bracket_content_token() {
 
             let error = root.child(0).unwrap();
             assert!(error.is_error());
+            assert_eq!(error.kind_id(), u16::MAX);
             assert!(error.is_extra());
             assert!(error.is_named());
             assert!(!error.is_missing());
@@ -61,19 +65,21 @@ fn backslash_nul_recovers_as_one_bracket_content_token() {
             assert_eq!(error.child_count(), 3);
             assert_eq!(error.named_child_count(), 2);
 
-            for (index, kind, bytes, start, end, named) in [
+            for (index, kind, id, bytes, start, end, named) in [
                 (
                     0,
                     "identifier",
+                    35,
                     0..1,
                     Point::new(0, 0),
                     Point::new(0, 1),
                     true,
                 ),
-                (1, "(", 1..2, Point::new(0, 1), Point::new(0, 2), false),
+                (1, "(", 14, 1..2, Point::new(0, 1), Point::new(0, 2), false),
                 (
                     2,
                     "bracket_argument_content",
+                    37,
                     54..113,
                     Point::new(0, 54),
                     Point::new(2, 0),
@@ -82,6 +88,7 @@ fn backslash_nul_recovers_as_one_bracket_content_token() {
             ] {
                 let child = error.child(index).unwrap();
                 assert_eq!(child.kind(), kind);
+                assert_eq!(child.kind_id(), id);
                 assert_eq!(child.byte_range(), bytes);
                 assert_eq!(child.start_position(), start);
                 assert_eq!(child.end_position(), end);
