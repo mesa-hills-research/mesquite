@@ -58,6 +58,7 @@ version = "0.25.10"
 dependencies = [
  "regex",
  "streaming-iterator",
+ "ts_port_cmake",
  "ts_port_tables",
 ]
 

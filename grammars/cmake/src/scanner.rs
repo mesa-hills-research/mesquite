@@ -174,8 +174,8 @@ impl ExternalScanner for Scanner {
             self.token = u32::from_ne_bytes(buffer[4..STATE_SIZE].try_into().unwrap());
         } else {
             // C resets both fields when there is no complete saved state.
-            // Zero denotes BRACKET_ARGUMENT_OPEN, so a reset can enable content
-            // even without an opener when error recovery enables all symbols.
+            // Zero is BRACKET_ARGUMENT_OPEN, so a reset permits argument content
+            // when error recovery enables all symbols, even without an opener.
             *self = Self::default();
         }
     }
