@@ -290,6 +290,56 @@ mod tests {
     }
 
     #[test]
+    fn initial_character_dispatch_preserves_c_events_for_every_validity_mask() {
+        // Include decoder errors, non-ASCII spaces, and values whose low byte
+        // aliases a delimiter. Classification must not truncate code points.
+        for first in (0..=127).chain([-1, 0x85, 0xa0, 0x109, 0x122, 0x127, 0x2003, i32::MAX]) {
+            for mask in 0..32 {
+                let valid: [bool; 5] = std::array::from_fn(|i| mask & (1 << i) != 0);
+                let mut lexer = TestLexer::new(" x");
+                lexer.input[0] = first;
+                let accepted = Scanner.scan(&mut lexer, &valid);
+
+                let quote_content = match first {
+                    0x22 if valid[MULTILINE_BASIC_STRING_END as usize] => {
+                        Some(MULTILINE_BASIC_STRING_CONTENT)
+                    }
+                    0x27 if valid[MULTILINE_LITERAL_STRING_END as usize] => {
+                        Some(MULTILINE_LITERAL_STRING_CONTENT)
+                    }
+                    _ => None,
+                };
+                let (expected_accepted, expected_events) = if let Some(content) = quote_content {
+                    (
+                        true,
+                        vec![
+                            Event::Advance {
+                                position: 0,
+                                skip: false,
+                            },
+                            Event::MarkEnd(1),
+                            Event::Symbol(content),
+                        ],
+                    )
+                } else if valid[LINE_ENDING_OR_EOF as usize] {
+                    let mut events = vec![Event::Symbol(LINE_ENDING_OR_EOF)];
+                    if matches!(first, 0x09 | 0x0d | 0x20) {
+                        events.push(Event::Advance {
+                            position: 0,
+                            skip: true,
+                        });
+                    }
+                    (matches!(first, 0 | 0x0a), events)
+                } else {
+                    (false, vec![])
+                };
+                assert_eq!(accepted, expected_accepted, "first {first}, mask {mask}");
+                assert_eq!(lexer.events, expected_events, "first {first}, mask {mask}");
+            }
+        }
+    }
+
+    #[test]
     fn serialization_has_no_state_and_leaves_buffer_untouched() {
         let mut scanner = create();
         let mut buffer = [0xa5; 16];
