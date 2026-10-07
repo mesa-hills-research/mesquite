@@ -771,6 +771,28 @@ pub(crate) fn ts_parser__set_cached_token(
     parser.token_cache.byte_index = byte_index;
 }
 
+// A scanner snapshot normally survives many internal tokens. Replacing a cache
+// entry with that very same handle would clone and release it unnecessarily.
+#[inline]
+fn cache_token_for_version(
+    parser: &mut Parser,
+    version: StackVersion,
+    byte_index: u32,
+    token: Subtree,
+) {
+    let last_external = ts_stack_last_external_token(&parser.stack, version);
+    if parser.token_cache.last_external_token.ptr_eq(last_external) {
+        let old_token = std::mem::replace(&mut parser.token_cache.token, token);
+        if !old_token.is_null() {
+            ts_subtree_release(&mut parser.tree_pool, old_token);
+        }
+        parser.token_cache.byte_index = byte_index;
+    } else {
+        let last_external = last_external.clone();
+        ts_parser__set_cached_token(parser, byte_index, last_external, token);
+    }
+}
+
 pub(crate) fn ts_parser__has_included_range_difference(
     parser: &Parser,
     start_position: u32,
@@ -1828,12 +1850,7 @@ pub(crate) fn ts_parser__advance(
                 return false;
             }
             let symbol = if !lookahead.is_null() {
-                ts_parser__set_cached_token(
-                    parser,
-                    position,
-                    ts_stack_last_external_token(&parser.stack, version).clone(),
-                    lookahead.clone(),
-                );
+                cache_token_for_version(parser, version, position, lookahead.clone());
                 ts_subtree_symbol(&lookahead)
             } else {
                 // Null lookahead terminates a non-terminal extra; its fixed
