@@ -123,9 +123,12 @@ impl CursorChildIterator<'_> {
         let field_id = if extra {
             0
         } else {
-            self.field_map.iter().find(|map| {
-                !map.inherited && u32::from(map.child_index) == self.structural_child_index
-            }).map_or(self.inherited_field_id, |map| map.field_id)
+            self.field_map
+                .iter()
+                .find(|map| {
+                    !map.inherited && u32::from(map.child_index) == self.structural_child_index
+                })
+                .map_or(self.inherited_field_id, |map| map.field_id)
         };
         (alias, field_id, alias != 0 || ts_subtree_visible(child))
     }
@@ -232,7 +235,11 @@ pub(crate) fn ts_tree_cursor_init<'tree>(cursor: &mut TreeCursor<'tree>, node: N
     cursor.root_alias_symbol = node.alias;
     cursor.stack.clear();
     cursor.stack.push(TreeCursorEntry {
-        alias: if ts_subtree_extra(node.subtree) { 0 } else { node.alias },
+        alias: if ts_subtree_extra(node.subtree) {
+            0
+        } else {
+            node.alias
+        },
         field_id: 0,
         visible: true,
         subtree: node.subtree,
@@ -382,9 +389,11 @@ fn ts_tree_cursor_goto_sibling_internal<const REVERSE: bool>(
             // The current edge is already resolved. Advance over it without
             // looking up its alias and field map for a second time.
             iterator.child_index = entry.child_index.wrapping_add(1);
-            iterator.structural_child_index = entry.structural_child_index
+            iterator.structural_child_index = entry
+                .structural_child_index
                 .wrapping_add(u32::from(!ts_subtree_extra(entry.subtree)));
-            iterator.descendant_index = entry.descendant_index
+            iterator.descendant_index = entry
+                .descendant_index
                 .wrapping_add(ts_subtree_visible_descendant_count(entry.subtree))
                 .wrapping_add(u32::from(entry.visible));
             iterator.position = length_add(entry.position, ts_subtree_size(entry.subtree));
@@ -534,7 +543,12 @@ pub(crate) fn ts_tree_cursor_current_descendant_index(cursor: &TreeCursor<'_>) -
 #[inline]
 pub(crate) fn ts_tree_cursor_current_node<'tree>(cursor: &TreeCursor<'tree>) -> Node<'tree> {
     let entry = cursor.stack.last().expect("nonempty cursor");
-    ts_node_new(cursor.tree.expect("cursor has a tree"), entry.subtree, entry.position, entry.alias)
+    ts_node_new(
+        cursor.tree.expect("cursor has a tree"),
+        entry.subtree,
+        entry.position,
+        entry.alias,
+    )
 }
 
 pub(crate) fn ts_tree_cursor_current_status(cursor: &TreeCursor<'_>) -> CursorStatus {
@@ -875,9 +889,21 @@ mod tests {
         let mut iter = iterator(&parent, &[5, 0]);
         iter.inherited_field_id = 7;
         iter.field_map = &[
-            FieldMapEntry { field_id: 2, child_index: 0, inherited: true },
-            FieldMapEntry { field_id: 3, child_index: 0, inherited: false },
-            FieldMapEntry { field_id: 4, child_index: 0, inherited: false },
+            FieldMapEntry {
+                field_id: 2,
+                child_index: 0,
+                inherited: true,
+            },
+            FieldMapEntry {
+                field_id: 3,
+                child_index: 0,
+                inherited: false,
+            },
+            FieldMapEntry {
+                field_id: 4,
+                child_index: 0,
+                inherited: false,
+            },
         ];
         let (first, visible) = ts_tree_cursor_child_iterator_next(&mut iter).unwrap();
         assert_eq!(first.alias, 5);
@@ -891,6 +917,117 @@ mod tests {
         assert_eq!(last.alias, 0);
         assert_eq!(last.field_id, 7);
         assert!(visible && last.visible);
+    }
+
+    #[test]
+    fn cached_fields_follow_hidden_wrappers_but_stop_at_visible_and_extra_nodes() {
+        use std::sync::LazyLock;
+        use ts_port_tables::{FieldMapEntry, LanguageTables, MapSlice, SymbolMetadata};
+        // Reuse a decoded table fixture without lexing; replace only the edge
+        // metadata needed to make inheritance boundaries explicit in this tree.
+        static TABLES: LazyLock<LanguageTables> = LazyLock::new(|| {
+            let mut tables = LanguageTables::decode(
+                include_bytes!("../../grammars/c/src/tables.bin"),
+                |_, _| unreachable!("cursor fixture does not lex"),
+                Some(|_, _| unreachable!("cursor fixture does not lex keywords")),
+                None,
+            );
+            for (symbol, visible) in [(1, true), (2, false), (4, true)] {
+                tables.symbol_metadata[symbol] = SymbolMetadata {
+                    visible,
+                    named: visible,
+                    supertype: false,
+                };
+            }
+            tables.max_alias_sequence_length = 4;
+            tables.alias_sequences = vec![0; 12];
+            tables.alias_sequences[10] = 4; // production 2, structural child 2
+            tables.field_map_slices = vec![
+                MapSlice {
+                    index: 0,
+                    length: 0,
+                },
+                MapSlice {
+                    index: 0,
+                    length: 2,
+                },
+                MapSlice {
+                    index: 0,
+                    length: 0,
+                },
+            ];
+            tables.field_map_entries = vec![
+                FieldMapEntry {
+                    field_id: 5,
+                    child_index: 0,
+                    inherited: false,
+                },
+                FieldMapEntry {
+                    field_id: 6,
+                    child_index: 1,
+                    inherited: false,
+                },
+            ];
+            tables
+        });
+        let language = Language::from(&*TABLES);
+        let branch = |symbol, children, production| {
+            ts_subtree_new_node(symbol, children, production, &language)
+        };
+        let token = || leaf(1, 0, VISIBLE | NAMED);
+        let mut extra = branch(2, vec![token()], 0);
+        extra.heap_mut().unwrap().extra = true;
+        let wrapper = branch(
+            2,
+            vec![
+                branch(2, vec![token()], 0),
+                branch(1, vec![token()], 0),
+                extra,
+                branch(2, vec![token()], 0),
+            ],
+            2,
+        );
+        let tree = Tree {
+            root: Box::new(branch(1, vec![wrapper, token()], 1)),
+            language,
+            included_ranges: Vec::new(),
+        };
+        let root = ts_node_new(&tree, &tree.root, length_zero(), 0);
+        let mut cursor = ts_tree_cursor_new(root);
+        let expected = [0, 5, 5, 0, 0, 5, 0, 6];
+        let mut fields = Vec::new();
+        loop {
+            fields.push(ts_tree_cursor_current_field_id(&cursor));
+            if ts_tree_cursor_goto_first_child(&mut cursor) {
+                continue;
+            }
+            while !ts_tree_cursor_goto_next_sibling(&mut cursor) {
+                if !ts_tree_cursor_goto_parent(&mut cursor) {
+                    assert_eq!(fields, expected);
+                    break;
+                }
+            }
+            if cursor.stack.len() == 1 {
+                break;
+            }
+        }
+        // Descendant jumps and independent copies must carry the same fields.
+        for (index, field) in expected.into_iter().enumerate().rev() {
+            ts_tree_cursor_goto_descendant(&mut cursor, index as u32);
+            assert_eq!(ts_tree_cursor_current_field_id(&cursor), field);
+            assert_eq!(
+                ts_tree_cursor_current_field_id(&ts_tree_cursor_copy(&cursor)),
+                field
+            );
+        }
+        ts_tree_cursor_goto_descendant(&mut cursor, 5);
+        assert_eq!(ts_tree_cursor_current_node(&cursor).alias, 4);
+        let aliased_node = ts_tree_cursor_current_node(&cursor);
+        ts_tree_cursor_reset(&mut cursor, aliased_node);
+        assert_eq!(ts_tree_cursor_current_field_id(&cursor), 0);
+        assert_eq!(ts_tree_cursor_current_node(&cursor).alias, 4);
+        assert!(ts_tree_cursor_goto_first_child(&mut cursor));
+        assert_eq!(ts_tree_cursor_current_field_id(&cursor), 0);
     }
 
     #[test]
