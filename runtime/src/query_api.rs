@@ -1180,3 +1180,7 @@ mod tests {
         assert_eq!(error.to_string(), "version error");
     }
 }
+
+#[cfg(test)]
+#[path = "query_api_tests.rs"]
+mod predicate_tests;
