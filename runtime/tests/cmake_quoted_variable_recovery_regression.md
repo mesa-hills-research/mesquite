@@ -124,11 +124,15 @@ No bucket work remains. The broader oracle was not rerun in this stop-time
 verification; the all-input results above belong to their stated earlier
 revisions. No deviations from C, unsafe code, or generated-file edits were made.
 
-## Resumed verification at `0bdcd07`
+## Current verification at `2f442a8`
 
-After the operator restarted the run, completed the deferred broader CMake
-verification on the same runtime/scanner checkout:
+Rechecked the reassigned bucket on the current merged baseline against the C
+scanner source. The initialization/reset correction and regression tests are
+already present, so no further behavior change or duplicate test is needed.
+All checks below were rerun on this checkout:
 
+- `run_oracle(inputs = "bucket:1b5a6fb7")`: **4/4 inputs pass**, with query
+  checks enabled and incremental checks off.
 - `run_oracle(inputs = "all", languages = "cmake")`: **270/270 gate inputs**
   pass with incremental (`incremental=7`) and query checks; **9878/9878 fresh
   inputs** pass with query checks, including the four assigned bucket inputs.
