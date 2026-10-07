@@ -332,6 +332,7 @@ fn compare_error_statuses(a: ErrorStatus, b: ErrorStatus) -> ErrorComparison {
     }
 }
 
+#[inline]
 pub(crate) fn ts_parser__version_status(parser: &mut Parser, version: StackVersion) -> ErrorStatus {
     let mut cost = ts_stack_error_cost(&parser.stack, version);
     let is_paused = ts_stack_is_paused(&parser.stack, version);
@@ -1029,59 +1030,94 @@ pub(crate) fn ts_parser__reduce(
     end_of_non_terminal_extra: bool,
     replace_version: bool,
 ) -> StackVersion {
+    // The common unary case can keep its unique stack slot as well as the
+    // head. No extras can remain in the child list on this path.
+    if replace_version && count == 1 {
+        let language = parser.language.unwrap();
+        if ts_stack_reduce_unary(&mut parser.stack, |children, state| {
+            parser.trailing_extras.clear();
+            let next_state = parser
+                .parse_table_cache
+                .next_state(&language, state, symbol);
+            let parent = ts_subtree_new_node_with(
+                symbol,
+                children,
+                production_id as u32,
+                &language,
+                |data| {
+                    if end_of_non_terminal_extra && next_state == state {
+                        data.extra = true;
+                    }
+                    if is_fragile {
+                        data.fragile_left = true;
+                        data.fragile_right = true;
+                        data.parse_state = TS_TREE_STATE_NONE;
+                    } else {
+                        data.parse_state = state;
+                    }
+                    let SubtreePayload::Branch(branch) = &mut data.payload else {
+                        unreachable!("a reduced node has branch data");
+                    };
+                    branch.dynamic_precedence += dynamic_precedence;
+                },
+            );
+            (parent, next_state)
+        })
+        .is_some()
+        {
+            return version;
+        }
+    }
     // A committed reduction on the only active version needs neither a
     // temporary version nor a slice worklist. Keep this path separate from the
     // general reduction's grouping, selection, and version-merging machinery.
-    if replace_version
-        && let Some(mut children) = ts_stack_pop_count_in_place(&mut parser.stack, count)
-    {
+    if replace_version {
         let language = parser.language.unwrap();
-        ts_subtree_array_remove_trailing_extras(&mut children, &mut parser.trailing_extras);
-        let state = ts_stack_state(&parser.stack, version);
-        let next_state = parser.parse_table_cache.next_state(&language, state, symbol);
-        let parent = ts_subtree_new_node_with(
-            symbol,
-            children,
-            production_id as u32,
-            &language,
-            |data| {
-                if end_of_non_terminal_extra && next_state == state {
-                    data.extra = true;
-                }
-                if is_fragile {
-                    data.fragile_left = true;
-                    data.fragile_right = true;
-                    data.parse_state = TS_TREE_STATE_NONE;
-                } else {
-                    data.parse_state = state;
-                }
-                let SubtreePayload::Branch(branch) = &mut data.payload else {
-                    unreachable!("a reduced node has branch data");
-                };
-                branch.dynamic_precedence += dynamic_precedence;
-            },
-        );
-        ts_stack_push(
-            &mut parser.stack,
-            &mut parser.tree_pool,
-            version,
-            parent,
-            false,
-            next_state,
-        );
-        if !parser.trailing_extras.is_empty() {
-            for extra in parser.trailing_extras.drain(..) {
-                ts_stack_push(
-                    &mut parser.stack,
-                    &mut parser.tree_pool,
-                    version,
-                    extra,
-                    false,
-                    next_state,
+        if let Some(next_state) =
+            ts_stack_reduce_many(&mut parser.stack, count, |mut children, state| {
+                ts_subtree_array_remove_trailing_extras(&mut children, &mut parser.trailing_extras);
+                let next_state = parser
+                    .parse_table_cache
+                    .next_state(&language, state, symbol);
+                let parent = ts_subtree_new_node_with(
+                    symbol,
+                    children,
+                    production_id as u32,
+                    &language,
+                    |data| {
+                        if end_of_non_terminal_extra && next_state == state {
+                            data.extra = true;
+                        }
+                        if is_fragile {
+                            data.fragile_left = true;
+                            data.fragile_right = true;
+                            data.parse_state = TS_TREE_STATE_NONE;
+                        } else {
+                            data.parse_state = state;
+                        }
+                        let SubtreePayload::Branch(branch) = &mut data.payload else {
+                            unreachable!("a reduced node has branch data");
+                        };
+                        branch.dynamic_precedence += dynamic_precedence;
+                    },
                 );
+                (parent, next_state)
+            })
+        {
+            if !parser.trailing_extras.is_empty() {
+                for extra in parser.trailing_extras.drain(..) {
+                    ts_stack_push(
+                        &mut parser.stack,
+                        &mut parser.tree_pool,
+                        version,
+                        extra,
+                        false,
+                        next_state,
+                    );
+                }
             }
+            return version;
         }
-        return version;
     }
     ts_parser__reduce_general(
         parser,

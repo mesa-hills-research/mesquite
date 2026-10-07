@@ -174,6 +174,7 @@ pub(crate) fn ts_subtree_array_delete(pool: &mut SubtreePool, trees: &mut Vec<Su
     *trees = Vec::new();
 }
 
+#[inline]
 pub(crate) fn ts_subtree_array_remove_trailing_extras(
     trees: &mut Vec<Subtree>,
     destination: &mut Vec<Subtree>,
