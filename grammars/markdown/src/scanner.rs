@@ -246,7 +246,23 @@ fn is_punctuation(c: i32) -> bool {
 impl ExternalScanner for Scanner {
     fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
         self.simulate = false;
-        self.scan_inner(&mut ScanLexer::new(lexer), valid_symbols)
+        let mut lexer = ScanLexer::new(lexer);
+        // Most calls inside a paragraph reject ordinary text. ASCII letters
+        // consume no indentation and have no character-specific block parser.
+        // If neither an indented chunk nor a table can start, and no matching
+        // or control action takes precedence, C returns false without advancing
+        // or changing any serialized state. Avoid the full dispatch frame for
+        // that case; all punctuation, whitespace and non-ASCII use scan_inner.
+        if ((lexer.lookahead() | 0x20).wrapping_sub(i32::from(b'a')) as u32) < 26
+            && !((self.snapshot[STATE] & STATE_MATCHING != 0)
+                | valid_symbols[TRIGGER_ERROR]
+                | valid_symbols[CLOSE_BLOCK]
+                | valid_symbols[PIPE_TABLE_START]
+                | valid_symbols[INDENTED_CHUNK_START])
+        {
+            return false;
+        }
+        self.scan_inner(&mut lexer, valid_symbols)
     }
 
     fn serialize(&mut self, buffer: &mut [u8]) -> usize {
@@ -1674,6 +1690,66 @@ mod tests {
             // lookahead in the column tracker must not add another trait call.
             assert_eq!(lexer.lookahead_calls.get(), lexer.position + 1);
             assert_eq!(lexer.eof_calls.get(), usize::from(input.contains('\0')));
+        }
+    }
+
+    #[test]
+    fn ordinary_text_fast_rejection_matches_full_dispatch() {
+        // Exercise both the fast path and every guard that must fall back to
+        // the C dispatcher. Compare not only tokens but all state bytes and
+        // lexer advances/marks, including unsuccessful speculative scans.
+        let mut symbol_sets = vec![
+            [false; 47],
+            [true; 47],
+            PARAGRAPH_INTERRUPT_SYMBOLS,
+            valid(&[LINE_ENDING, SOFT_LINE_ENDING, TOKEN_EOF]),
+        ];
+        for symbol in 0..47 {
+            symbol_sets.push(valid(&[symbol]));
+            symbol_sets.push(valid(&[LINE_ENDING, SOFT_LINE_ENDING, symbol]));
+        }
+        for c in (0..=127).map(|c| char::from_u32(c).unwrap()).chain([
+            'é', '\u{141}', '\u{161}', '\u{17c}', '\u{10ffff}',
+        ]) {
+            let input = format!("{c}|b\n-|-\n");
+            for (state, indentation, column, blocks) in [
+                (0, 0, 0, &[][..]),
+                (STATE_WAS_SOFT_LINE_BREAK, 3, 2, &[][..]),
+                (0, 4, 3, &[][..]),
+                (0, 255, 1, &[][..]),
+                (0, 4, 0, &[Block::INDENTED_CODE][..]),
+                (STATE_MATCHING, 0, 2, &[Block::QUOTE][..]),
+                (STATE_MATCHING, 4, 3, &[Block::INDENTED_CODE][..]),
+                (
+                    STATE_MATCHING | STATE_WAS_SOFT_LINE_BREAK | STATE_CLOSE_BLOCK,
+                    2,
+                    1,
+                    &[Block::QUOTE, Block::FENCED_CODE][..],
+                ),
+            ] {
+                let mut fixture = Scanner::with_blocks(blocks.iter().copied());
+                fixture.snapshot[..HEADER_SIZE].copy_from_slice(&[
+                    state, 0, indentation, column, 3,
+                ]);
+                let snapshot = serialized(&mut fixture);
+                for symbols in &symbol_sets {
+                    let mut fast = Scanner::default();
+                    fast.deserialize(&snapshot);
+                    fast.simulate = true; // scan must clear this even on rejection
+                    let mut slow = Scanner::default();
+                    slow.deserialize(&snapshot);
+                    let mut fast_lexer = TestLexer::new(&input);
+                    let mut slow_lexer = TestLexer::new(&input);
+                    let result = fast.scan(&mut fast_lexer, symbols);
+                    let expected = slow.scan_inner(&mut ScanLexer::new(&mut slow_lexer), symbols);
+                    assert_eq!(result, expected, "{input:?}, {snapshot:?}");
+                    assert_eq!(fast_lexer.events, slow_lexer.events, "{input:?}");
+                    assert_eq!(serialized(&mut fast), serialized(&mut slow), "{input:?}");
+                    assert_eq!(fast.simulate, slow.simulate, "{input:?}");
+                    assert_eq!(fast_lexer.lookahead_calls, slow_lexer.lookahead_calls);
+                    assert_eq!(fast_lexer.eof_calls, slow_lexer.eof_calls);
+                }
+            }
         }
     }
 
