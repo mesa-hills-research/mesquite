@@ -1691,7 +1691,19 @@ pub(crate) fn ts_subtree_production_id(tree: &Subtree) -> u16 {
 }
 
 pub(crate) fn ts_subtree_repeat_depth(tree: &Subtree) -> u32 {
-    tree.branch().map_or(0, |d| d.repeat_depth as u32)
+    match tree.heap().map(|data| &data.payload) {
+        Some(SubtreePayload::Branch(data)) => u32::from(data.repeat_depth),
+        // C does not check child_count here: repeat_depth overlaps bytes 16..18
+        // of the external scanner state's inline buffer in SubtreeHeapData's
+        // union. Preserve that value because it affects repetition balancing
+        // (and its progress checkpoints), even though this is a leaf.
+        Some(SubtreePayload::External(ExternalScannerState::Inline { data, .. })) => {
+            u32::from(u16::from_ne_bytes([data[16], data[17]]))
+        }
+        // A long scanner state's pointer, and an error leaf's lookahead_char,
+        // do not overlap repeat_depth. The leaf constructor zeroes this region.
+        _ => 0,
+    }
 }
 
 pub(crate) fn ts_subtree_children(tree: &Subtree) -> &[Subtree] {
@@ -2348,6 +2360,85 @@ mod summary_tests {
             tables
         });
         Language::from(&*TABLES)
+    }
+
+    #[test]
+    fn external_leaf_repeat_depth_preserves_c_union_overlap() {
+        let language = language();
+        let mut pool = ts_subtree_pool_new(0);
+        let mut bytes = [0xff; 25];
+        bytes[16..18].copy_from_slice(&0x1234_u16.to_ne_bytes());
+        for length in [0, 16, 17, 18, 24, 25] {
+            let tree = ts_subtree_new_leaf_with(
+                &mut pool,
+                1,
+                length_zero(),
+                length_zero(),
+                0,
+                1,
+                true,
+                false,
+                false,
+                &language,
+                |data| {
+                    data.payload =
+                        SubtreePayload::External(ts_external_scanner_state_init(&bytes[..length]))
+                },
+            );
+            let expected = match length {
+                17 => u16::from_ne_bytes([bytes[16], 0]),
+                18 | 24 => 0x1234,
+                _ => 0,
+            };
+            assert_eq!(ts_subtree_child_count(&tree), 0);
+            assert_eq!(ts_subtree_repeat_depth(&tree), u32::from(expected));
+            assert_eq!(
+                ts_subtree_repeat_depth(&ts_subtree_clone(&tree)),
+                u32::from(expected)
+            );
+            // Other branch accessors do check child_count in C.
+            assert_eq!(ts_subtree_visible_descendant_count(&tree), 0);
+            assert_eq!(ts_subtree_dynamic_precedence(&tree), 0);
+            assert_eq!(ts_subtree_production_id(&tree), 0);
+        }
+    }
+
+    #[test]
+    fn repetition_summary_uses_external_leaf_repeat_depth() {
+        let language = language();
+        let mut pool = ts_subtree_pool_new(0);
+        for depth in [0_u16, 2, u16::MAX] {
+            let mut bytes = [0; 18];
+            bytes[16..18].copy_from_slice(&depth.to_ne_bytes());
+            let token = ts_subtree_new_leaf_with(
+                &mut pool,
+                1,
+                length_zero(),
+                length_zero(),
+                0,
+                1,
+                true,
+                false,
+                false,
+                &language,
+                |data| {
+                    data.payload = SubtreePayload::External(ts_external_scanner_state_init(&bytes))
+                },
+            );
+            // Symbol 2 is invisible and unnamed, so its left-recursive parent
+            // inherits the larger depth of its first and last children.
+            let left = ts_subtree_new_node(2, vec![token.clone()], 0, &language);
+            let mut parent = ts_subtree_new_node(2, vec![left, token], 0, &language);
+            assert_eq!(
+                ts_subtree_repeat_depth(&parent),
+                u32::from(depth.wrapping_add(1))
+            );
+            ts_subtree_summarize_children(&mut parent, &language);
+            assert_eq!(
+                ts_subtree_repeat_depth(&parent),
+                u32::from(depth.wrapping_add(1))
+            );
+        }
     }
 
     #[test]

@@ -118,6 +118,13 @@ Ownership rules for signatures:
 State comparison is byte equality with length checks, not allocation identity.
 Copying long immutable scanner snapshots shares bytes safely.
 
+C's `ts_subtree_repeat_depth` does not check child count: for external leaves it
+reads the native-endian u16 overlapping short scanner-state bytes 16..18. Preserve
+that overlap explicitly even with the Rust enum payload, because it affects
+repetition summaries, balancing work, and progress checkpoints. Leaf construction
+zeroes unused bytes; long snapshots leave this region zero (only the pointer
+occupies the start of C's union).
+
 Leaf construction keeps the inline case separate from the heap allocator. The
 `ts_subtree_new_leaf_with` initializer runs only for heap leaves, before sharing
 the header, to install serialized external-scanner state without an immediate
