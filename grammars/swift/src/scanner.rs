@@ -253,6 +253,7 @@ fn is_legal_custom_operator(char_idx: usize, first_char: i32, cur_char: i32) -> 
     }
 }
 
+#[cold]
 #[inline(never)]
 fn is_legal_non_ascii_operator(is_first_char: bool, cur_char: i32) -> bool {
     match cur_char {
@@ -887,6 +888,7 @@ impl Scanner {
         false
     }
 
+    #[cold]
     #[inline(never)]
     fn eat_raw_str_part(
         &mut self,
@@ -945,6 +947,16 @@ impl Scanner {
         }
         None
     }
+
+    #[cold]
+    #[inline(never)]
+    fn deserialize_signed_bytes(&mut self, buffer: &[u8]) {
+        // C casts signed `char` directly to uint32_t, sign-extending high bytes.
+        self.ongoing_raw_str_hash_count = ((buffer[0] as i8 as u32) << 24)
+            | ((buffer[1] as i8 as u32) << 16)
+            | ((buffer[2] as i8 as u32) << 8)
+            | (buffer[3] as i8 as u32);
+    }
 }
 
 impl ExternalScanner for Scanner {
@@ -1002,11 +1014,7 @@ impl ExternalScanner for Scanner {
             self.ongoing_raw_str_hash_count = value;
             return;
         }
-        // C casts signed `char` directly to uint32_t, sign-extending high bytes.
-        self.ongoing_raw_str_hash_count = ((buffer[0] as i8 as u32) << 24)
-            | ((buffer[1] as i8 as u32) << 16)
-            | ((buffer[2] as i8 as u32) << 8)
-            | (buffer[3] as i8 as u32);
+        self.deserialize_signed_bytes(buffer);
     }
 }
 
