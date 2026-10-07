@@ -836,46 +836,71 @@ pub(crate) fn ts_parser_set_language(parser: &mut Parser, language: Option<&Lang
 }
 
 pub(crate) fn ts_parser_logger(parser: &Parser) -> Option<&Logger> {
-    todo!("parser-4: ts_parser_logger")
+    parser.logger.as_ref()
 }
 
 pub(crate) fn ts_parser_set_logger(parser: &mut Parser, logger: Option<Logger>) {
-    todo!("parser-4: ts_parser_set_logger")
+    parser.logger = logger;
 }
 
 pub(crate) fn ts_parser_print_dot_graphs(
     parser: &mut Parser,
     output: Option<Box<dyn std::io::Write + Send>>,
 ) {
-    todo!("parser-4: ts_parser_print_dot_graphs")
+    // Closing C's previous FILE flushes any buffered graph output.
+    if let Some(mut previous) = parser.dot_graph.take() {
+        let _ = previous.flush();
+    }
+    parser.dot_graph = output;
 }
 
 pub(crate) fn ts_parser_cancellation_flag(parser: &Parser) -> Option<&Arc<AtomicUsize>> {
-    todo!("parser-4: ts_parser_cancellation_flag")
+    parser.cancellation_flag.as_ref()
 }
 
 pub(crate) fn ts_parser_set_cancellation_flag(parser: &mut Parser, flag: Option<Arc<AtomicUsize>>) {
-    todo!("parser-4: ts_parser_set_cancellation_flag")
+    parser.cancellation_flag = flag;
 }
 
 pub(crate) fn ts_parser_timeout_micros(parser: &Parser) -> u64 {
-    todo!("parser-4: ts_parser_timeout_micros")
+    duration_to_micros(parser.timeout_duration)
 }
 
 pub(crate) fn ts_parser_set_timeout_micros(parser: &mut Parser, timeout_micros: u64) {
-    todo!("parser-4: ts_parser_set_timeout_micros")
+    parser.timeout_duration = duration_from_micros(timeout_micros);
 }
 
 pub(crate) fn ts_parser_set_included_ranges(parser: &mut Parser, ranges: &[Range]) -> bool {
-    todo!("parser-4: ts_parser_set_included_ranges")
+    crate::lexer::ts_lexer_set_included_ranges(&mut parser.lexer, ranges)
 }
 
 pub(crate) fn ts_parser_included_ranges(parser: &Parser) -> &[Range] {
-    todo!("parser-4: ts_parser_included_ranges")
+    crate::lexer::ts_lexer_included_ranges(&parser.lexer)
 }
 
 pub(crate) fn ts_parser_reset(parser: &mut Parser) {
-    todo!("parser-4: ts_parser_reset")
+    ts_parser__external_scanner_destroy(parser);
+
+    if !parser.old_tree.is_null() {
+        ts_subtree_release(&mut parser.tree_pool, std::mem::take(&mut parser.old_tree));
+    }
+
+    crate::reusable_node::reusable_node_clear(&mut parser.reusable_node);
+    crate::lexer::ts_lexer_reset(&mut parser.lexer, crate::length::length_zero());
+    ts_stack_clear(&mut parser.stack, &mut parser.tree_pool);
+    ts_parser__set_cached_token(parser, 0, Subtree::Null, Subtree::Null);
+    if !parser.finished_tree.is_null() {
+        ts_subtree_release(
+            &mut parser.tree_pool,
+            std::mem::take(&mut parser.finished_tree),
+        );
+    }
+    parser.accept_count = 0;
+    parser.has_scanner_error = false;
+    parser.has_error = false;
+    parser.canceled_balancing = false;
+    // Parse options live only in the borrowed ParseContext, not in Parser.
+    parser.parse_state = ParseState::default();
 }
 
 pub(crate) fn ts_parser_parse(
@@ -883,7 +908,172 @@ pub(crate) fn ts_parser_parse(
     old_tree: Option<&Tree>,
     context: &mut ParseContext<'_, '_>,
 ) -> Option<Tree> {
-    todo!("parser-4: ts_parser_parse")
+    let language = parser.language?;
+
+    // Input is a trait object with a required read method, so C's null-read
+    // callback check is unnecessary. The caller selects the input encoding.
+    let encoding = parser.lexer.encoding;
+    crate::lexer::ts_lexer_set_input(&mut parser.lexer, encoding);
+    parser.included_range_differences.clear();
+    parser.included_range_difference_index = 0;
+
+    parser.operation_count = 0;
+    parser.end_clock = if parser.timeout_duration != 0 {
+        clock_after(clock_now(), parser.timeout_duration)
+    } else {
+        clock_null()
+    };
+
+    let resume_balancing = if ts_parser_has_outstanding_parse(parser) {
+        if parser.logger.is_some() || parser.dot_graph.is_some() {
+            parser.lexer.debug_buffer = "resume_parsing".into();
+            ts_parser__log(parser);
+        }
+        parser.canceled_balancing
+    } else {
+        ts_parser__external_scanner_create(parser);
+        if parser.has_scanner_error {
+            ts_parser_reset(parser);
+            return None;
+        }
+
+        if let Some(old_tree) = old_tree {
+            parser.old_tree = old_tree.root.as_ref().clone();
+            crate::get_changed_ranges::ts_range_array_get_changed_ranges(
+                &old_tree.included_ranges,
+                &parser.lexer.included_ranges,
+                &mut parser.included_range_differences,
+            );
+            crate::reusable_node::reusable_node_reset(
+                &mut parser.reusable_node,
+                old_tree.root.as_ref().clone(),
+            );
+            if parser.logger.is_some() || parser.dot_graph.is_some() {
+                parser.lexer.debug_buffer = "parse_after_edit".into();
+                ts_parser__log(parser);
+            }
+            if let Some(output) = parser.dot_graph.as_mut() {
+                let _ = ts_subtree_print_dot_graph(&parser.old_tree, &language, output);
+                let _ = output.write_all(b"\n");
+            }
+            for i in 0..parser.included_range_differences.len() {
+                if parser.logger.is_some() || parser.dot_graph.is_some() {
+                    let range = &parser.included_range_differences[i];
+                    parser.lexer.debug_buffer = format!(
+                        "different_included_range {} - {}",
+                        range.start_byte, range.end_byte,
+                    );
+                    ts_parser__log(parser);
+                }
+            }
+        } else {
+            crate::reusable_node::reusable_node_clear(&mut parser.reusable_node);
+            if parser.logger.is_some() || parser.dot_graph.is_some() {
+                parser.lexer.debug_buffer = "new_parse".into();
+                ts_parser__log(parser);
+            }
+        }
+        false
+    };
+
+    if !resume_balancing {
+        let mut position = 0;
+        let mut last_position = 0;
+        loop {
+            let mut version = 0;
+            // Re-read the version count at every for-loop condition, including
+            // the final failed condition, exactly as in C. Advance may split
+            // or remove versions, but allow_node_reuse is fixed per version.
+            let version_count = loop {
+                let version_count = ts_stack_version_count(&parser.stack);
+                if version >= version_count {
+                    break version_count;
+                }
+                let allow_node_reuse = version_count == 1;
+                while ts_stack_is_active(&parser.stack, version) {
+                    if parser.logger.is_some() || parser.dot_graph.is_some() {
+                        let point = ts_stack_position(&parser.stack, version).extent;
+                        parser.lexer.debug_buffer = format!(
+                            "process version:{}, version_count:{}, state:{}, row:{}, col:{}",
+                            version,
+                            ts_stack_version_count(&parser.stack),
+                            ts_stack_state(&parser.stack, version),
+                            point.row,
+                            point.column,
+                        );
+                        ts_parser__log(parser);
+                    }
+
+                    if !ts_parser__advance(parser, context, version, allow_node_reuse) {
+                        if parser.has_scanner_error {
+                            ts_parser_reset(parser);
+                        }
+                        // Timeout/progress cancellation preserves the stack and
+                        // scanner so the next call can resume this parse.
+                        return None;
+                    }
+
+                    if let Some(output) = parser.dot_graph.as_mut() {
+                        let _ = ts_stack_print_dot_graph(&mut parser.stack, &language, output);
+                        let _ = output.write_all(b"\n\n");
+                    }
+
+                    position = ts_stack_position(&parser.stack, version).bytes;
+                    if position > last_position || (version > 0 && position == last_position) {
+                        last_position = position;
+                        break;
+                    }
+                }
+                version += 1;
+            };
+
+            let min_error_cost = ts_parser__condense_stack(parser);
+            if !parser.finished_tree.is_null()
+                && ts_subtree_error_cost(&parser.finished_tree) < min_error_cost
+            {
+                // Drop stack references before rebalancing the accepted tree.
+                ts_stack_clear(&mut parser.stack, &mut parser.tree_pool);
+                break;
+            }
+
+            while let Some(range) = parser
+                .included_range_differences
+                .get(parser.included_range_difference_index as usize)
+            {
+                if range.end_byte <= position {
+                    parser.included_range_difference_index += 1;
+                } else {
+                    break;
+                }
+            }
+            if version_count == 0 {
+                break;
+            }
+        }
+    }
+
+    assert!(!parser.finished_tree.is_null());
+    if !ts_parser__balance_subtree(parser, context) {
+        parser.canceled_balancing = true;
+        return None;
+    }
+    parser.canceled_balancing = false;
+    if parser.logger.is_some() || parser.dot_graph.is_some() {
+        parser.lexer.debug_buffer = "done".into();
+        ts_parser__log(parser);
+    }
+    if let Some(output) = parser.dot_graph.as_mut() {
+        let _ = ts_subtree_print_dot_graph(&parser.finished_tree, &language, output);
+        let _ = output.write_all(b"\n");
+    }
+
+    let result = crate::tree::ts_tree_new(
+        std::mem::take(&mut parser.finished_tree),
+        &language,
+        &parser.lexer.included_ranges,
+    );
+    ts_parser_reset(parser);
+    Some(result)
 }
 
 pub(crate) fn ts_parser_parse_with_options(
@@ -892,7 +1082,11 @@ pub(crate) fn ts_parser_parse_with_options(
     input: &mut dyn Input,
     options: ParseOptions<'_>,
 ) -> Option<Tree> {
-    todo!("parser-4: ts_parser_parse_with_options")
+    // Callback input in the supported public API is UTF-8. Options (including
+    // their borrowed payload) are dropped at return, even after cancellation.
+    parser.lexer.encoding = InputEncoding::Utf8;
+    let mut context = ParseContext { input, options };
+    ts_parser_parse(parser, old_tree, &mut context)
 }
 
 pub(crate) fn ts_parser_parse_string(
@@ -900,7 +1094,7 @@ pub(crate) fn ts_parser_parse_string(
     old_tree: Option<&Tree>,
     string: &[u8],
 ) -> Option<Tree> {
-    todo!("parser-4: ts_parser_parse_string")
+    ts_parser_parse_string_encoding(parser, old_tree, string, InputEncoding::Utf8)
 }
 
 pub(crate) fn ts_parser_parse_string_encoding(
@@ -909,5 +1103,14 @@ pub(crate) fn ts_parser_parse_string_encoding(
     string: &[u8],
     encoding: InputEncoding,
 ) -> Option<Tree> {
-    todo!("parser-4: ts_parser_parse_string_encoding")
+    let mut input = SliceInput {
+        bytes: string,
+        chunk_start: 0,
+    };
+    parser.lexer.encoding = encoding;
+    let mut context = ParseContext {
+        input: &mut input,
+        options: ParseOptions::default(),
+    };
+    ts_parser_parse(parser, old_tree, &mut context)
 }
