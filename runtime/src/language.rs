@@ -78,7 +78,7 @@ impl TableEntry {
         )
     }
 }
-const PARSE_TABLE_CACHE_SIZE: usize = 8192;
+const PARSE_TABLE_CACHE_SIZE: usize = 16384;
 
 /// Parser-local memoization of immutable compact parse-table entries. Cache
 /// collisions only trigger the original lookup, and changing grammars clears it.

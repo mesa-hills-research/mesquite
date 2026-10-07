@@ -5,7 +5,7 @@
 - Keep the compressed-table cache's miss scan in a cold, non-inlined helper.
   Profiling main showed that its inlined scan required saving six callee-saved
   registers even on cache hits. The short hit path can now inline independently.
-- Use 8,192 eight-byte cache slots (64 KiB per parser, previously 32 KiB).
+- Use 16,384 eight-byte cache slots (128 KiB per parser, previously 32 KiB).
   The state/symbol pair plus one is a nonzero 33-bit key; the low 16 bits of a
   slot remain its value. Checking the entire key preserves zero results and
   makes collisions harmless. A stride of 131 spreads neighboring states better
@@ -24,29 +24,34 @@ is larger.
 
 ## Measurements
 
-Pinned `run_oracle(inputs="benchmark")` against main `4a40c35`:
+Pinned `run_oracle(inputs="benchmark")` against main `de86b49`, after merging
+its new stack fast paths and rechecking the combined optimization:
 
 | Run | Main overall port/C | Branch overall port/C |
 | --- | ---: | ---: |
-| 1 | 0.939 | 0.915 |
-| 2 | 0.939 | 0.941 |
-| 3 | 0.939 | 0.918 |
+| 1 | 0.917 | 0.899 |
+| 2 | 0.917 | 0.896 |
+| 3 | 0.917 | 0.892 |
 
-The median is **0.918**, about **2.2% less parse time** than main, exceeding the
-reported 1.9% overall noise. Run 2 had isolated Go/Rust timing spikes; per-language
+The median is **0.896**, about **2.3% less parse time** than main, exceeding the
+reported 1.9% overall noise. Run 1 had an isolated Java timing spike; per-language
 medians from these three runs were:
 
 | Language | Main | Branch median |
 | --- | ---: | ---: |
-| C | 0.93 | 0.90 |
-| C++ | 0.99 | 0.96 |
-| Go | 0.94 | 0.92 |
-| Java | 0.89 | 0.87 |
-| JavaScript | 0.97 | 0.94 |
-| Python | 0.93 | 0.90 |
-| Rust | 0.94 | 0.92 |
-| TSX | 0.93 | 0.91 |
-| TypeScript | 0.95 | 0.93 |
+| C | 0.91 | 0.88 |
+| C++ | 0.97 | 0.93 |
+| Go | 0.92 | 0.89 |
+| Java | 0.87 | 0.85 |
+| JavaScript | 0.94 | 0.92 |
+| Python | 0.90 | 0.87 |
+| Rust | 0.91 | 0.90 |
+| TSX | 0.91 | 0.88 |
+| TypeScript | 0.93 | 0.90 |
+
+An earlier 8,192-slot version measured 2.2% faster than main `4a40c35` but only
+1.7% after the stack changes. The retained 16,384-slot version was measured
+against the newer combined baseline, not against an outdated main.
 
 ## Rejected experiments
 
@@ -64,3 +69,7 @@ header-backed `TableEntry` with the host table decoder's action slice and flag.
 Targeted tests cover the two-word representation, borrowed slice identity,
 default entries, zero values, colliding keys, the all-ones state/symbol pair,
 language changes, and existing first-action/last-action semantics.
+
+Final validation: all 4,712 oracle gate files passed with incremental edits and
+query checks enabled; 190 runtime unit tests passed and runtime all-targets
+clippy was clean. Whole-kernel/fresh-repository validation remains with the host.

@@ -157,8 +157,8 @@ state, scanner, reusable-node path, token cache, old/finished roots and scratch
 buffers. It is automatically Send. `Language` is a Copy/Clone handle to
 `&'static LanguageTables`; conversion from that reference is implemented. Grammar
 strings/action runs can therefore be returned with 'static lifetimes, without
-leaking freshly allocated strings. Parser owns an 8,192-entry direct-mapped cache
-of immutable compact-table lookups (64 KiB). Dense rows bypass it. Each entry
+leaking freshly allocated strings. Parser owns a 16,384-entry direct-mapped cache
+of immutable compact-table lookups (128 KiB). Dense rows bypass it. Each entry
 packs a nonzero 33-bit key (the full u32 state/symbol pair plus one) and the u16
 value; collisions run the original lookup in a cold helper. Clear it whenever
 setting a language, including rejected languages. Ordinary parse resets need
