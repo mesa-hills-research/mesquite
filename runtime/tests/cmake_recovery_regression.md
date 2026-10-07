@@ -69,3 +69,18 @@ Checks rerun for this bucket:
 - `cargo clippy -p ts_port_cmake --all-targets -- -D warnings`: passes.
 
 This verification adds no C deviations, unsafe code, or generated-file changes.
+
+### Parser-level range regression coverage
+
+At starting revision `7fcdd89`, this bucket still passes with no further
+implementation changes. `cmake_error_ranges.rs` now parses both smallest bucket
+inputs and checks the single ERROR, its content/identifier children, exact byte
+and point ranges through the final newline, and zero progress callbacks. Each
+case also runs after bracket arguments and bracket comments on the same parser
+to exercise scanner reset through the public API, not just scanner unit tests.
+
+Revalidation: bucket **5/5**, CMake gate **270/270**, and fresh **9878/9878** pass;
+`cargo check --workspace --all-targets`, `cargo test -p ts_port`, and
+`cargo test -p ts_port_cmake` pass (23 scanner/grammar tests). Strict clippy for
+both packages and all their targets passes. Workspace check still reports only
+the existing host-owned generated YAML lexer warning described above.
