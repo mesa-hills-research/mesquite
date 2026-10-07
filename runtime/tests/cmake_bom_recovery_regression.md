@@ -70,9 +70,9 @@ the extended BOM regression pass. Workspace all-target checking and targeted
 strict clippy pass; the only workspace warning remains the host-owned YAML lexer
 unused assignment noted above.
 
-## Reverification on merged baselines `ddcce0a` and `91c0515`
+## Reverification on merged baselines `ddcce0a`, `91c0515`, and `e2cf12d`
 
-Bucket `548436bf` was already resolved when reassigned on both baselines. Compared
+Bucket `548436bf` was already resolved when reassigned on all three baselines. Compared
 scanner creation, reset, and bracket-content scanning against the current C source;
 the merged implementation still matches, including consuming embedded NULs until
 actual EOF. Reran the bucket (4/4), all CMake oracle inputs (gate 270/270 with
