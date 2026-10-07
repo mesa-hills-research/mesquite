@@ -59,13 +59,13 @@ This follow-up changes only this verification note; it introduces no deviation
 from C and no new unsafe code.
 
 
-### Revalidation of `4d6cc948` at `cabce01`
+### Revalidation of `4d6cc948` at `3e39027`
 
 The assigned Registry-query input still passes before any new changes, as it did
-at `9c27be8` and `88489b8`. Direct comparison with the current C scanner confirms
+at `cabce01`, `9c27be8`, and `88489b8`. Direct comparison with the current C scanner confirms
 that the merged zero-valued creation/reset behavior above is the required
 correction; no additional runtime change is warranted. The checks below were
-rerun at `cabce01`,
+rerun at `3e39027`,
 including the parser regression with both fresh and reused scanner state,
 single-byte input chunks, and incremental repair/restoration. The reduced
 Registry-query expression is already present in both scanner and parser tests;
