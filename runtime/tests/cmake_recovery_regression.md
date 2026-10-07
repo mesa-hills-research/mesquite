@@ -56,7 +56,7 @@ from C and no new unsafe code.
 
 ## ERROR range bucket `e0b0bff8`
 
-Reverified at `c373f7e`: all five reported inputs already pass with the merged
+Reverified at `5671d20`: all five reported inputs already pass with the merged
 scanner initialization/reset correction above. In particular, recovery from
 byte 5 of `E_sleep-no-args-stderr.cmake` emits bracket content through byte 72,
 including the final newline. The enclosing ERROR therefore reaches EOF, rather
@@ -92,7 +92,7 @@ and point ranges through the final newline, and zero progress callbacks. Each
 case also runs after bracket arguments and bracket comments on the same parser
 to exercise scanner reset through the public API, not just scanner unit tests.
 
-Revalidation at `c373f7e`: bucket **5/5**, CMake gate **270/270**, and fresh
+Revalidation at `5671d20`: bucket **5/5**, CMake gate **270/270**, and fresh
 **9878/9878** pass. `cargo check --workspace --all-targets`,
 `cargo test -p ts_port`, and `cargo test -p ts_port_cmake` pass (24
 scanner/grammar tests). The two `cmake_error_ranges` parser tests also pass
