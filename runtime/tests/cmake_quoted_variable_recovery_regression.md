@@ -121,3 +121,21 @@ Checks completed during this verification:
 No bucket work remains. The broader oracle was not rerun in this stop-time
 verification; the all-input results above belong to their stated earlier
 revisions. No deviations from C, unsafe code, or generated-file edits were made.
+
+## Resumed verification at `0bdcd07`
+
+After the operator restarted the run, completed the deferred broader CMake
+verification on the same runtime/scanner checkout:
+
+- `run_oracle(inputs = "all", languages = "cmake")`: **270/270 gate inputs**
+  pass with incremental (`incremental=7`) and query checks; **9878/9878 fresh
+  inputs** pass with query checks, including the four assigned bucket inputs.
+- `cargo check --workspace --all-targets`: passes, with only the unchanged
+  host-owned YAML unused-assignment warning described above.
+- `cargo test -p ts_port_cmake -p ts_port`: **212 runtime unit tests**, **24 CMake
+  scanner unit tests**, and **20 integration tests** pass; doc tests pass.
+- `cargo clippy -p ts_port -p ts_port_cmake --all-targets -- -D warnings`: passes.
+
+The bucket remains fully resolved by the existing scanner initialization/reset
+fix. No additional behavior changes were needed, and no work remains for this
+assignment.
