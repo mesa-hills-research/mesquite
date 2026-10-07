@@ -252,6 +252,18 @@ state. Timeout uses monotonic Instant; callback count is independent of wall tim
 Cancellation-flag internals use owned Arc<AtomicUsize>, relaxed loads; the old unsafe
 public borrowed flag API is outside this subset. No extra locks/atomics in the stack.
 
+The parse entry selects a const-generic diagnostic mode for its loop, advance
+and lex paths. The exclusive parser borrow keeps logger/DOT configuration fixed
+within a call; reselect it on every entry, including after cancellation. Preserve
+lazy argument evaluation and the enabled diagnostics. An empty reusable-node
+stack may bypass reuse traversal: that traversal would return Null without any
+side effects. Do not bypass a nonempty cursor on incremental parses.
+
+Single-active-version condensation needs only its cost, not a full comparison
+record, but must still lower `node_count_at_last_error` to the current node count
+when necessary. Return `u32::MAX` for an error-state head; retain the general
+algorithm for multiple or inactive versions.
+
 `ts_parser__breakdown_lookahead` uses parser.reusable_node directly; its redundant
 C parameter was removed to avoid borrowing the parser and its own field mutably
 at once. Other borrow conflicts should be resolved with scoped field borrows or
