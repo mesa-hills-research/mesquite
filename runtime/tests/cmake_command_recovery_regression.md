@@ -33,3 +33,16 @@ delimiter levels, callback order, and native-endian snapshot round trips.
 - `cargo clippy -p ts_port_cmake --all-targets -- -D warnings`: passes.
 
 This verification adds no runtime changes, deviations from C, or unsafe code.
+
+## Executable command-recovery regression
+
+`cmake_command_recovery.rs` now checks the three smallest malformed variable
+references (`UnterminatedBrace1`, `NameWithTabs`, and `NameWithSpaces`) through
+the public parser API. It asserts the top-level `ERROR` kind and flags, child
+counts, and the recovery content's byte/point ranges through the final newline.
+Each input is tested on a fresh parser and after bracket-argument and
+bracket-comment parses to exercise scanner reset as well as creation.
+
+Reverification: the bucket remains **7/7**, the CMake gate **270/270**, and fresh
+CMake **9878/9878**. The new integration test and its `cargo clippy` target pass
+with `-D warnings`.
