@@ -40,15 +40,20 @@ pub(crate) struct Scanner {
 }
 
 // Keep speculative span lookahead out of the common no-delimiter scan frame.
+// Select token ids here rather than carrying them as additional scan arguments;
+// both delimiter handlers then fit the register argument budget for a tail call.
 #[inline(never)]
 fn parse_leaf_delimiter(
     lexer: &mut dyn Lexer,
     delimiter_length: &mut u8,
     valid_symbols: &[bool; 15],
     delimiter: u8,
-    open_token: Token,
-    close_token: Token,
 ) -> bool {
+    let (open_token, close_token) = if delimiter == b'`' {
+        (Token::CodeSpanStart, Token::CodeSpanClose)
+    } else {
+        (Token::LatexSpanStart, Token::LatexSpanClose)
+    };
     // Dispatch already checked the first delimiter. Keep one lookahead per
     // position; the closing-run search can reuse the final opening lookahead.
     let mut level = 0u8;
@@ -119,15 +124,24 @@ fn find_closing_run(
 
 impl Scanner {
     // C's parse_star, parse_underscore, and parse_tilde have identical logic,
-    // differing only in the character and the two token ids.
+    // differing only in the character and the two token ids. Select the token
+    // pair here so the common dispatch remains small, including its rejection
+    // path. Keep this handler outlined just like speculative span scanning.
+    #[inline(never)]
     fn parse_emphasis_delimiter(
         &mut self,
         lexer: &mut dyn Lexer,
         valid_symbols: &[bool; 15],
         delimiter: u8,
-        open_token: Token,
-        close_token: Token,
     ) -> bool {
+        let (open_token, close_token) = match delimiter {
+            b'*' => (Token::EmphasisOpenStar, Token::EmphasisCloseStar),
+            b'_' => (
+                Token::EmphasisOpenUnderscore,
+                Token::EmphasisCloseUnderscore,
+            ),
+            _ => (Token::StrikethroughOpen, Token::StrikethroughClose),
+        };
         lexer.advance(false);
         if self.num_emphasis_delimiters_left > 0 {
             if self.state & STATE_EMPHASIS_DELIMITER_IS_OPEN != 0
@@ -196,43 +210,17 @@ impl ExternalScanner for Scanner {
             return true;
         }
         match lexer.lookahead() {
-            0x60 => parse_leaf_delimiter(
-                lexer,
-                &mut self.code_span_delimiter_length,
-                valid_symbols,
-                b'`',
-                Token::CodeSpanStart,
-                Token::CodeSpanClose,
-            ),
-            0x24 => parse_leaf_delimiter(
-                lexer,
-                &mut self.latex_span_delimiter_length,
-                valid_symbols,
-                b'$',
-                Token::LatexSpanStart,
-                Token::LatexSpanClose,
-            ),
-            0x2a => self.parse_emphasis_delimiter(
-                lexer,
-                valid_symbols,
-                b'*',
-                Token::EmphasisOpenStar,
-                Token::EmphasisCloseStar,
-            ),
-            0x5f => self.parse_emphasis_delimiter(
-                lexer,
-                valid_symbols,
-                b'_',
-                Token::EmphasisOpenUnderscore,
-                Token::EmphasisCloseUnderscore,
-            ),
-            0x7e => self.parse_emphasis_delimiter(
-                lexer,
-                valid_symbols,
-                b'~',
-                Token::StrikethroughOpen,
-                Token::StrikethroughClose,
-            ),
+            delimiter @ (0x60 | 0x24) => {
+                let length = if delimiter == 0x60 {
+                    &mut self.code_span_delimiter_length
+                } else {
+                    &mut self.latex_span_delimiter_length
+                };
+                parse_leaf_delimiter(lexer, length, valid_symbols, delimiter as u8)
+            }
+            delimiter @ (0x2a | 0x5f | 0x7e) => {
+                self.parse_emphasis_delimiter(lexer, valid_symbols, delimiter as u8)
+            }
             _ => false,
         }
     }
@@ -397,6 +385,28 @@ mod tests {
             let mut lexer = TestLexer::new(input);
             assert!(!scanner.scan(&mut lexer, &valid(&[Token::CodeSpanStart])));
             assert!(lexer.calls.borrow().is_empty());
+        }
+    }
+
+    #[test]
+    fn grouped_dispatch_rejects_non_delimiters_without_state_or_lexer_effects() {
+        let mut scanner = Scanner::default();
+        let state = [0xfd, 7, 8, 3];
+        scanner.deserialize(&state);
+        let mut valid_symbols = [true; 15];
+        valid_symbols[Token::TriggerError as usize] = false;
+        // Include low-byte aliases of all delimiters, NUL, invalid scalar
+        // values, and non-ASCII scalars. Dispatch must compare full codepoints
+        // before narrowing the matched delimiter to a byte for its handler.
+        for codepoint in (0..=0x2ff).chain([i32::MIN, -1, 0xd800, 0x10ffff, i32::MAX]) {
+            if matches!(codepoint, 0x24 | 0x2a | 0x5f | 0x60 | 0x7e) {
+                continue;
+            }
+            let mut lexer = TestLexer::new("");
+            lexer.input = vec![codepoint];
+            assert!(!scanner.scan(&mut lexer, &valid_symbols), "{codepoint:x}");
+            assert!(lexer.calls.borrow().is_empty(), "{codepoint:x}");
+            assert_eq!(snapshot(&mut scanner), state, "{codepoint:x}");
         }
     }
 
