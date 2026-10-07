@@ -350,6 +350,39 @@ mod tests {
     }
 
     #[test]
+    fn recovery_in_quoted_variable_names_skips_only_leading_whitespace() {
+        // Recovery in a malformed quoted variable name starts at its first
+        // space/tab. C skips that leading whitespace, then emits the entire
+        // suffix as bracket content, including later whitespace and quotes.
+        for input in [
+            "message(\"${var\twith\ttab}\")\n",
+            "message(\"${var with space}\")\n",
+        ] {
+            let mut scanner = create();
+            for _ in 0..2 {
+                let mut lexer = TestLexer::new(input);
+                lexer.position = 14;
+                assert!(scanner.scan(&mut lexer, &[true; 7]));
+                assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
+                assert_eq!(lexer.position, input.len());
+                assert_eq!(lexer.end, Some(input.len()));
+
+                let mut expected = vec![Event::Advance(14, true)];
+                for position in 15..input.len() {
+                    expected.push(Event::Advance(position, false));
+                    expected.push(Event::MarkEnd(position + 1));
+                }
+                expected.push(Event::Symbol(BRACKET_ARGUMENT_CONTENT as u16));
+                assert_eq!(lexer.events, expected);
+
+                // Reset must restore OPEN, not retain the CONTENT token that
+                // this scan just set. Otherwise the next recovery scan fails.
+                scanner.deserialize(&[]);
+            }
+        }
+    }
+
+    #[test]
     fn recovery_content_keeps_multiline_error_ranges_through_eof() {
         // Recovery can start after an identifier or at the beginning of a
         // non-CMake file. The content token includes the final newline, so the
@@ -454,22 +487,64 @@ mod tests {
     }
 
     #[test]
-    fn fresh_and_reset_scanners_emit_zero_width_content_at_eof() {
+    fn backslash_nul_recovery_consumes_and_marks_every_byte() {
+        // Reduced NullAfterBackslash.cmake: ordinary external lexing rejects
+        // the backslash, then recovery consumes the NUL and following line as
+        // bracket content. The prefix must not be included in scanner events.
+        let input = "A(AAA\\\0\n(AAA\n";
+        let start = input.find('\\').unwrap();
         let mut scanner = create();
-        for reset in [false, true] {
-            if reset {
-                // The previous scan changed token to CONTENT; resetting must
-                // allow the same zero-width recovery token to be emitted again.
-                scanner.deserialize(&[]);
-            }
-            let mut lexer = TestLexer::new("");
+        for _ in 0..2 {
+            let mut lexer = TestLexer::new(input);
+            lexer.position = start;
+            assert!(!scanner.scan(
+                &mut lexer,
+                &valid(&[BRACKET_ARGUMENT_OPEN, BRACKET_COMMENT_OPEN, LINE_COMMENT])
+            ));
+            assert!(lexer.events.is_empty());
             assert!(scanner.scan(&mut lexer, &[true; 7]));
-            assert_eq!(lexer.position, 0);
-            assert_eq!(lexer.end, None);
-            assert_eq!(
-                lexer.events,
-                [Event::Symbol(BRACKET_ARGUMENT_CONTENT as u16)]
-            );
+            assert_eq!(lexer.position, input.len());
+            assert_eq!(lexer.end, Some(input.len()));
+            assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
+
+            let mut expected = Vec::new();
+            for position in start..input.len() {
+                expected.push(Event::Advance(position, false));
+                expected.push(Event::MarkEnd(position + 1));
+            }
+            expected.push(Event::Symbol(BRACKET_ARGUMENT_CONTENT as u16));
+            assert_eq!(lexer.events, expected);
+            scanner.deserialize(&[]);
+        }
+    }
+
+    #[test]
+    fn fresh_and_reset_scanners_emit_zero_width_content_at_eof() {
+        // Recovery after `a` starts at EOF; after `if(\n` it first skips the
+        // trailing newline. Both must emit empty content without mark_end.
+        for trailing in ["", "\n", "\r\n", " \t\n"] {
+            let mut scanner = create();
+            for reset in [false, true] {
+                if reset {
+                    // The previous scan changed token to CONTENT; resetting
+                    // must allow the zero-width recovery token again.
+                    scanner.deserialize(&[]);
+                }
+                let mut lexer = TestLexer::new(trailing);
+                assert!(scanner.scan(&mut lexer, &[true; 7]));
+                assert_eq!(lexer.position, trailing.len());
+                assert_eq!(lexer.end, None);
+                let expected: Vec<_> = (0..trailing.len())
+                    .map(|position| Event::Advance(position, true))
+                    .chain([Event::Symbol(BRACKET_ARGUMENT_CONTENT as u16)])
+                    .collect();
+                assert_eq!(lexer.events, expected);
+
+                // Once emitted, content cannot repeat without a state reset.
+                lexer.events.clear();
+                assert!(!scanner.scan(&mut lexer, &[true; 7]));
+                assert!(lexer.events.is_empty());
+            }
         }
     }
 
