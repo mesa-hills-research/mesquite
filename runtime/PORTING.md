@@ -90,6 +90,11 @@ Ownership rules for signatures:
 * `ts_subtree_make_mut` returns an owned unique/COW-ready handle. Subsequent
   modifications still use `heap_mut` or `Arc::make_mut`. The C unsafe mutable
   reinterpretation helper is an ownership move here and contains no unsafe code.
+* Parser balancing borrows disjoint child slots using a stack of reverse
+  `IterMut`s. Pending siblings never retain subtree handles or borrow ancestors,
+  so compression still sees C's uniqueness counts. Cancellation saves each
+  iterator's remaining length (the current child's index) in `balance_path`;
+  resuming reconstructs only the unvisited sibling prefixes.
 * Pools store uniquely owned `Arc<SubtreeHeapData>` handles, permitting reuse of
   the heap allocation, not just the header value. Pool allocate/free return/take
   Arc handles. Only pool uniquely owned, drained data, with C's 32-entry limit.

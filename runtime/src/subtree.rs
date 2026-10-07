@@ -411,6 +411,10 @@ pub(crate) fn ts_subtree_compress(
 
 pub(crate) fn ts_subtree_summarize_children(tree: &mut Subtree, language: &Language) {
     let data = tree.heap_mut().expect("cannot summarize an inline leaf");
+    summarize_children(data, language);
+}
+
+fn summarize_children(data: &mut SubtreeHeapData, language: &Language) {
     let SubtreePayload::Branch(branch) = &mut data.payload else {
         panic!("child summaries require a branch payload");
     };
@@ -558,7 +562,7 @@ pub(crate) fn ts_subtree_new_node(
 ) -> Subtree {
     let metadata = ts_language_symbol_metadata(language, symbol);
     let fragile = symbol == BUILTIN_SYM_ERROR || symbol == BUILTIN_SYM_ERROR_REPEAT;
-    let mut result = Subtree::Heap(Arc::new(SubtreeHeapData {
+    let mut data = SubtreeHeapData {
         symbol,
         visible: metadata.visible,
         named: metadata.named,
@@ -570,9 +574,11 @@ pub(crate) fn ts_subtree_new_node(
             ..BranchData::default()
         }),
         ..SubtreeHeapData::default()
-    }));
-    ts_subtree_summarize_children(&mut result, language);
-    result
+    };
+    // Finish the new header while it is exclusively owned, before introducing
+    // reference counting. No COW/Arc uniqueness check is needed on construction.
+    summarize_children(&mut data, language);
+    Subtree::Heap(Arc::new(data))
 }
 
 pub(crate) fn ts_subtree_new_error_node(
@@ -642,7 +648,10 @@ pub(crate) fn ts_subtree_release(pool: &mut SubtreePool, tree: Subtree) {
 /// Drop shared references immediately, in child order, just as C decrements each
 /// refcount before pushing the newly unreferenced heaps on its LIFO worklist.
 fn subtree_queue_release(stack: &mut Vec<Subtree>, tree: Subtree) {
+    // Shared references need only their normal Arc drop. Avoid get_mut's weak
+    // counter synchronization unless this could actually be the final owner.
     if let Subtree::Heap(mut data) = tree
+        && Arc::strong_count(&data) == 1
         && Arc::get_mut(&mut data).is_some()
     {
         stack.push(Subtree::Heap(data));

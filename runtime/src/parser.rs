@@ -415,16 +415,12 @@ pub(crate) fn ts_parser__external_scanner_serialize(parser: &mut Parser) -> u32 
 }
 
 pub(crate) fn ts_parser__external_scanner_deserialize(
-    parser: &mut Parser,
+    scanner: &mut dyn ExternalScanner,
     external_token: &Subtree,
 ) {
     let data = ts_subtree_external_scanner_state(external_token)
         .map_or(&[][..], ts_external_scanner_state_data);
-    parser
-        .external_scanner
-        .as_mut()
-        .expect("external scanner")
-        .deserialize(data);
+    scanner.deserialize(data);
 }
 
 pub(crate) fn ts_parser__external_scanner_scan(
@@ -492,8 +488,6 @@ pub(crate) fn ts_parser__lex(
         return Subtree::Null;
     }
     let start_position = ts_stack_position(&parser.stack, version);
-    // Retain the handle across mutable parser calls, not a borrow of its stack.
-    let external_token = ts_stack_last_external_token(&parser.stack, version).clone();
     let mut found_external_token = false;
     let mut error_mode = parse_state == ERROR_STATE;
     let mut skipped_error = false;
@@ -518,7 +512,15 @@ pub(crate) fn ts_parser__lex(
                 current_position.extent.column
             );
             ts_lexer_start(&mut parser_lexer(parser, context));
-            ts_parser__external_scanner_deserialize(parser, &external_token);
+            // Lexing does not mutate the stack. Borrow the scanner snapshot
+            // from its head instead of retaining/releasing an Arc per token.
+            ts_parser__external_scanner_deserialize(
+                parser
+                    .external_scanner
+                    .as_deref_mut()
+                    .expect("external scanner"),
+                ts_stack_last_external_token(&parser.stack, version),
+            );
             let mut found_token =
                 ts_parser__external_scanner_scan(parser, context, lex_mode.external_lex_state);
             if parser.has_scanner_error {
@@ -529,7 +531,10 @@ pub(crate) fn ts_parser__lex(
                 external_scanner_state_len = ts_parser__external_scanner_serialize(parser);
                 let bytes = &parser.scanner_buffer[..external_scanner_state_len as usize];
                 external_scanner_state_changed =
-                    !ts_subtree_external_scanner_state(&external_token)
+                    !ts_subtree_external_scanner_state(ts_stack_last_external_token(
+                        &parser.stack,
+                        version,
+                    ))
                         .map_or(bytes.is_empty(), |state| {
                             ts_external_scanner_state_eq(state, bytes)
                         });
@@ -710,7 +715,7 @@ fn parser2_log_stack(parser: &mut Parser) {
 }
 
 pub(crate) fn ts_parser__get_cached_token(
-    parser: &mut Parser,
+    parser: &Parser,
     state: StateId,
     position: usize,
     last_external_token: &Subtree,
@@ -773,7 +778,6 @@ pub(crate) fn ts_parser__reuse_node(
     version: StackVersion,
     state: &mut StateId,
     position: u32,
-    last_external_token: &Subtree,
     table_entry: &mut TableEntry,
 ) -> Subtree {
     use crate::reusable_node::*;
@@ -811,7 +815,7 @@ pub(crate) fn ts_parser__reuse_node(
         }
         if !ts_subtree_external_scanner_state_eq(
             &parser.reusable_node.last_external_token,
-            last_external_token,
+            ts_stack_last_external_token(&parser.stack, version),
         ) {
             parser2_log!(
                 parser,
@@ -1676,7 +1680,9 @@ pub(crate) fn ts_parser__advance(
     let language = parser.language.expect("parser language");
     let mut state = ts_stack_state(&parser.stack, version);
     let position = ts_stack_position(&parser.stack, version).bytes;
-    let last_external_token = ts_stack_last_external_token(&parser.stack, version).clone();
+    // Reuse, lexing and reductions preserve this head's scanner state; only a
+    // shift/recovery (which returns from advance) installs a new external token.
+    // Borrow from the head when needed, retaining only for the owning cache.
     let mut did_reuse = true;
     let mut lookahead = Subtree::Null;
     let mut table_entry = TableEntry::default();
@@ -1687,7 +1693,6 @@ pub(crate) fn ts_parser__advance(
             version,
             &mut state,
             position,
-            &last_external_token,
             &mut table_entry,
         );
     }
@@ -1697,7 +1702,7 @@ pub(crate) fn ts_parser__advance(
             parser,
             state,
             position as usize,
-            &last_external_token,
+            ts_stack_last_external_token(&parser.stack, version),
             &mut table_entry,
         );
     }
@@ -1713,7 +1718,7 @@ pub(crate) fn ts_parser__advance(
                 ts_parser__set_cached_token(
                     parser,
                     position,
-                    last_external_token.clone(),
+                    ts_stack_last_external_token(&parser.stack, version).clone(),
                     lookahead.clone(),
                 );
                 ts_subtree_symbol(&lookahead)
@@ -1977,28 +1982,27 @@ pub(crate) fn ts_parser__balance_subtree(
             return true;
         }
     }
+    let mut finished_tree = std::mem::take(&mut parser.finished_tree);
     let mut cursor = BalanceCursor {
-        tree: std::mem::take(&mut parser.finished_tree),
         parents: Vec::new(),
     };
-    for &index in &parser.balance_path {
-        cursor.descend(index);
-    }
+    let mut tree = cursor.resume(&mut finished_tree, &parser.balance_path);
     parser.balance_path.clear();
     loop {
         if !ts_parser__check_progress(parser, context, None, None, 1) {
-            cursor.save(parser);
+            cursor.save_path(&mut parser.balance_path);
+            parser.finished_tree = finished_tree;
             return false;
         }
-        if ts_subtree_repeat_depth(&cursor.tree) > 0 {
-            let children = ts_subtree_children(&cursor.tree);
+        if ts_subtree_repeat_depth(tree) > 0 {
+            let children = ts_subtree_children(tree);
             let repeat_delta = i64::from(ts_subtree_repeat_depth(&children[0]))
                 - i64::from(ts_subtree_repeat_depth(children.last().unwrap()));
             if repeat_delta > 0 {
                 let mut i = repeat_delta as u32 / 2;
                 while i > 0 {
                     ts_subtree_compress(
-                        &mut cursor.tree,
+                        tree,
                         i,
                         &parser.language.expect("parser language"),
                         &mut parser.tree_pool.tree_stack,
@@ -2012,17 +2016,20 @@ pub(crate) fn ts_parser__balance_subtree(
                         None,
                         u32::from(operations),
                     ) {
-                        cursor.save(parser);
+                        cursor.save_path(&mut parser.balance_path);
+                        parser.finished_tree = finished_tree;
                         return false;
                     }
                     i /= 2;
                 }
             }
         }
-        if !cursor.advance() {
-            parser.finished_tree = cursor.tree;
+        cursor.descend(tree);
+        let Some(next_tree) = cursor.advance() else {
+            parser.finished_tree = finished_tree;
             return true;
-        }
+        };
+        tree = next_tree;
     }
 }
 
@@ -2417,22 +2424,21 @@ fn parser3_log_stack(parser: &mut Parser) {
     }
 }
 
-/// An owning zipper for C's non-owning balancing worklist. A detached child is
-/// replaced by Null in its parent until we ascend, so no Arc reference counts
-/// change and compression still sees exactly the uniquely owned C subtrees.
-/// Children are visited last-to-first, matching C's push-all-children worklist.
-/// This takes O(depth) space, and does not repeatedly walk from the root.
-struct BalanceCursor {
-    tree: Subtree,
-    parents: Vec<(Subtree, usize)>,
+/// A borrowing worklist for C's non-owning balancing traversal. Each iterator
+/// holds only unvisited siblings, disjoint from the current subtree. Unlike an
+/// owning zipper, descending/ascending needs no subtree moves or parent mutation;
+/// no additional Arc owners are introduced, so compression's uniqueness checks
+/// are unchanged. Children are visited last-to-first, exactly as in C.
+struct BalanceCursor<'a> {
+    parents: Vec<std::slice::IterMut<'a, Subtree>>,
 }
 
-impl BalanceCursor {
+impl<'a> BalanceCursor<'a> {
     fn is_unique_branch(tree: &Subtree) -> bool {
         matches!(tree, Subtree::Heap(data) if !data.children.is_empty() && Arc::strong_count(data) == 1)
     }
 
-    fn children_mut(tree: &mut Subtree) -> &mut Vec<Subtree> {
+    fn children_mut(tree: &mut Subtree) -> &mut [Subtree] {
         let Subtree::Heap(data) = tree else {
             unreachable!("only heap branches are balanced");
         };
@@ -2441,44 +2447,40 @@ impl BalanceCursor {
             .children
     }
 
-    fn descend(&mut self, index: usize) {
-        let child = std::mem::take(&mut Self::children_mut(&mut self.tree)[index]);
-        let parent = std::mem::replace(&mut self.tree, child);
-        self.parents.push((parent, index));
-    }
-
-    fn ascend(&mut self) -> Option<usize> {
-        let (mut parent, index) = self.parents.pop()?;
-        Self::children_mut(&mut parent)[index] = std::mem::take(&mut self.tree);
-        self.tree = parent;
-        Some(index)
-    }
-
-    fn advance(&mut self) -> bool {
-        let mut end = ts_subtree_children(&self.tree).len();
-        loop {
-            if let Some(index) = ts_subtree_children(&self.tree)[..end]
-                .iter()
-                .rposition(Self::is_unique_branch)
-            {
-                self.descend(index);
-                return true;
-            }
-            // This node is done; continue at its preceding sibling, without
-            // reprocessing its parent or adding any progress checks on ascent.
-            let Some(index) = self.ascend() else {
-                return false;
-            };
-            end = index;
+    fn resume(&mut self, mut tree: &'a mut Subtree, path: &[usize]) -> &'a mut Subtree {
+        for &index in path {
+            // Later siblings were visited before cancellation; earlier siblings
+            // must remain queued. Split off the current child without retaining
+            // a mutable reference to its parent or sharing the subtree itself.
+            let (earlier, remaining) = Self::children_mut(tree).split_at_mut(index);
+            self.parents.push(earlier.iter_mut());
+            tree = &mut remaining[0];
         }
+        tree
     }
 
-    fn save(mut self, parser: &mut Parser) {
-        parser
-            .balance_path
-            .extend(self.parents.iter().map(|(_, index)| *index));
-        while self.ascend().is_some() {}
-        parser.finished_tree = self.tree;
+    fn descend(&mut self, tree: &'a mut Subtree) {
+        self.parents.push(Self::children_mut(tree).iter_mut());
+    }
+
+    fn advance(&mut self) -> Option<&'a mut Subtree> {
+        while let Some(children) = self.parents.last_mut() {
+            for child in children.by_ref().rev() {
+                if Self::is_unique_branch(child) {
+                    return Some(child);
+                }
+            }
+            // This node is done. Continue with its preceding sibling without
+            // reprocessing the parent or adding any progress checks on ascent.
+            self.parents.pop();
+        }
+        None
+    }
+
+    fn save_path(self, path: &mut Vec<usize>) {
+        // next_back has consumed the current child, so the remaining length is
+        // its index. Dropping the borrowed iterators leaves the tree untouched.
+        path.extend(self.parents.iter().map(ExactSizeIterator::len));
     }
 }
 
@@ -2689,7 +2691,7 @@ mod parser3_tests {
     #[test]
     fn balancing_cursor_preserves_ownership_and_lifo_order() {
         let shared = branch(7, vec![Subtree::Inline(InlineLeaf::default())]);
-        let tree = branch(
+        let mut tree = branch(
             1,
             vec![
                 branch(2, vec![Subtree::Inline(InlineLeaf::default())]),
@@ -2705,26 +2707,69 @@ mod parser3_tests {
             _ => unreachable!(),
         });
         let mut cursor = BalanceCursor {
-            tree,
             parents: Vec::new(),
         };
+        let mut current = &mut tree;
         let mut symbols = Vec::new();
         loop {
-            assert!(BalanceCursor::is_unique_branch(&cursor.tree));
-            symbols.push(ts_subtree_symbol(&cursor.tree));
-            if !cursor.advance() {
+            assert!(BalanceCursor::is_unique_branch(current));
+            symbols.push(ts_subtree_symbol(current));
+            cursor.descend(current);
+            let Some(next) = cursor.advance() else {
                 break;
-            }
+            };
+            current = next;
         }
         assert_eq!(symbols, [1, 3, 4, 2]);
         assert!(cursor.parents.is_empty());
-        let Subtree::Heap(root) = &cursor.tree else {
+        let Subtree::Heap(root) = &tree else {
             unreachable!()
         };
         assert_eq!(Arc::as_ptr(root), root_address);
         assert!(root.children[1].ptr_eq(&shared));
         assert_eq!(ts_subtree_symbol(&root.children[0]), 2);
         assert_eq!(ts_subtree_symbol(&root.children[2]), 3);
+    }
+
+    #[test]
+    fn balancing_cursor_resumes_before_every_child_including_earlier_siblings() {
+        let expected = [1, 5, 7, 6, 4, 2, 3];
+        for stop in 0..expected.len() {
+            let leaf = || Subtree::Inline(InlineLeaf::default());
+            let mut tree = branch(
+                1,
+                vec![
+                    leaf(),
+                    branch(2, vec![branch(3, vec![leaf()])]),
+                    branch(4, vec![leaf()]),
+                    leaf(),
+                    branch(5, vec![branch(6, vec![leaf()]), branch(7, vec![leaf()])]),
+                ],
+            );
+            let mut cursor = BalanceCursor { parents: Vec::new() };
+            let mut current = cursor.resume(&mut tree, &[]);
+            let mut visited = Vec::new();
+            for _ in 0..stop {
+                visited.push(ts_subtree_symbol(current));
+                cursor.descend(current);
+                current = cursor.advance().unwrap();
+            }
+            assert_eq!(ts_subtree_symbol(current), expected[stop]);
+            let mut path = Vec::new();
+            cursor.save_path(&mut path);
+
+            // No restoration step or extra Arc owner is needed on cancellation.
+            assert_eq!(ts_subtree_symbol(&tree), 1);
+            let mut cursor = BalanceCursor { parents: Vec::new() };
+            let mut current = cursor.resume(&mut tree, &path);
+            loop {
+                visited.push(ts_subtree_symbol(current));
+                cursor.descend(current);
+                let Some(next) = cursor.advance() else { break };
+                current = next;
+            }
+            assert_eq!(visited, expected, "resumed at traversal index {stop}");
+        }
     }
 
     #[test]
