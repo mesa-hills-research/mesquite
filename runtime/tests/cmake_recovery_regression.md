@@ -174,7 +174,7 @@ changes.
 
 ## Empty recovery-content bucket `f5e2762e`
 
-Reverified at `a08dab1`: all 16 reported inputs already pass. The merged scanner
+Reverified at `2ab898f`: all 16 reported inputs already pass. The merged scanner
 initialization/reset correction above allows `bracket_argument_content` at EOF
 without an opener, including after `a` and after skipping the newline in `if(\n`.
 This zero-width token is a real scanner token, not an inserted missing node.
@@ -193,7 +193,12 @@ The block/while cases additionally verify that a complete header remains a sibli
 of the empty recovery content when its terminating command is missing. Tree
 cursor assertions confirm that the empty token remains traversable at EOF.
 
-Checks rerun for this bucket:
+The current C source was compared directly with the Rust scanner: creation uses
+`ts_calloc`, and empty/wrong-length deserialization clears both state fields.
+The matching implementation and all regression cases were already present at
+this starting revision, so no duplicate test or behavior change was warranted.
+
+Checks rerun for this bucket at `2ab898f`:
 
 - `run_oracle(inputs = "bucket:f5e2762e")`: 16/16 pass.
 - `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs
@@ -211,7 +216,7 @@ changes are introduced.
 
 ## Unterminated-call bucket `7f8795fb`
 
-Reverified at `4f9d98d`: all three reported inputs already pass on the starting
+Reverified at `911402c`: all three reported inputs already pass on the starting
 checkout with the merged scanner initialization/reset correction above. The
 current C scanner uses
 `ts_calloc` and clears both fields on empty or invalid-length snapshots, matching
@@ -229,7 +234,7 @@ input chunks. The earlier verification note incorrectly described all three coun
 as zero; the existing tests already assert the correct counts. No additional
 behavior change or duplicate test is needed.
 
-Validation rerun for this bucket at `4f9d98d` (all checks completed successfully):
+Validation rerun for this bucket at `911402c`:
 
 - `run_oracle(inputs = "bucket:7f8795fb")`: 3/3 pass.
 - `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs
@@ -240,6 +245,9 @@ Validation rerun for this bucket at `4f9d98d` (all checks completed successfully
 - `cargo test -p ts_port`: all unit and integration tests pass, including the
   three `cmake_unterminated_call_recovery` tests (also run separately).
 - `cargo clippy -p ts_port -p ts_port_cmake --all-targets -- -D warnings`: passes.
+- `cargo clippy --workspace --all-targets -- -D warnings`: blocked by the
+  pre-existing unused-assignment warning in host-owned `grammars/yaml/src/lex.rs:20`.
+  That generated file is outside this bucket and was left unchanged.
 
 This follow-up only records verification; no C deviations, unsafe code, or
 host-owned generated-file changes were introduced.
