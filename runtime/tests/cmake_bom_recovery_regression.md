@@ -21,7 +21,11 @@ embedded NULs in these UTF-16/32 files are consumed along with invalid UTF-8
 bytes. The existing unit test
 `recovery_content_consumes_non_utf8_boms_and_embedded_nuls` covers all four
 encoding layouts, both on creation and after empty-state deserialization.
-No additional scanner or runtime change is required for this bucket.
+The parser-level regression in `cmake_bom_recovery.rs` also checks all four
+complete byte inputs against the reference tree shape, flags, byte/point ranges,
+and progress-callback count. Each is parsed with a fresh scanner and after
+parsing valid bracket arguments and comments to exercise scanner reset.
+No additional scanner or runtime behavior change is required for this bucket.
 
 ## Verification
 
@@ -33,8 +37,11 @@ All checks were rerun for this task with the correction already merged:
   - Fresh repository: 9,878/9,878 pass, queries enabled.
 - `cargo check --workspace --all-targets`: passes; the existing unused-assignment
   warning in host-owned `grammars/yaml/src/lex.rs:20` is unrelated and unchanged.
-- `cargo test -p ts_port_cmake`: all 21 tests pass.
+- `cargo test -p ts_port_cmake`: all 24 tests pass.
+- `cargo test -p ts_port --test cmake_bom_recovery`: passes (all four encodings
+  with fresh and reused parsers).
 - `cargo clippy -p ts_port_cmake --all-targets -- -D warnings`: passes.
+- `cargo clippy -p ts_port --test cmake_bom_recovery -- -D warnings`: passes.
 
-This follow-up records verification only: no deviations from C, no unsafe code,
-and no host-owned generated files changed.
+This follow-up adds parser-level regression coverage: no deviations from C, no
+unsafe code, and no host-owned generated files changed.

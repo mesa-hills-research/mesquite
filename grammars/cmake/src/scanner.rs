@@ -267,6 +267,7 @@ mod tests {
     }
 
     struct TestLexer {
+        // Include the runtime's -1 lookahead for invalid UTF-8, not only chars.
         input: Vec<i32>,
         position: usize,
         end: Option<usize>,
@@ -468,6 +469,40 @@ mod tests {
     }
 
     #[test]
+    fn broken_utf32_boms_are_bracket_content_during_recovery() {
+        // UTF-8 decoding of the truncated UTF-32 BOMs 00 00 FE and FF FE 00
+        // produces these lookaheads. Neither NUL nor DECODE_ERROR means EOF.
+        for input in [[0, 0, -1], [-1, -1, 0]] {
+            let mut scanner = create();
+            for _ in 0..2 {
+                let mut lexer = TestLexer {
+                    input: input.to_vec(),
+                    ..TestLexer::new("")
+                };
+                assert!(scanner.scan(&mut lexer, &[true; 7]));
+                assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
+                assert_eq!(lexer.position, 3);
+                assert_eq!(lexer.end, Some(3));
+                assert_eq!(
+                    lexer.events,
+                    [
+                        Event::Advance(0, false),
+                        Event::MarkEnd(1),
+                        Event::Advance(1, false),
+                        Event::MarkEnd(2),
+                        Event::Advance(2, false),
+                        Event::MarkEnd(3),
+                        Event::Symbol(BRACKET_ARGUMENT_CONTENT as u16),
+                    ]
+                );
+                // An empty snapshot must restore the same zero-token state
+                // used by a fresh scanner, not retain the content token.
+                scanner.deserialize(&[]);
+            }
+        }
+    }
+
+    #[test]
     fn recovery_content_does_not_treat_nul_as_eof() {
         let mut scanner = create();
         for input in ["\0", "\0tail", "text\0tail"] {
@@ -522,7 +557,7 @@ mod tests {
     fn fresh_and_reset_scanners_emit_zero_width_content_at_eof() {
         // Recovery after `a` starts at EOF; after `if(\n` it first skips the
         // trailing newline. Both must emit empty content without mark_end.
-        for trailing in ["", "\n", "\r\n", " \t\n"] {
+        for trailing in ["", "\n", "\r\n", " \t\n", " \t\r\n"] {
             let mut scanner = create();
             for reset in [false, true] {
                 if reset {
