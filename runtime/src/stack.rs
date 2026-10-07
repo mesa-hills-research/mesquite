@@ -480,17 +480,6 @@ pub(crate) fn stack__iter(
     callback: &mut impl FnMut(&StackArena, &StackIterator) -> StackAction,
     goal_subtree_count: i32,
 ) -> Vec<StackSlice> {
-    stack__iter_internal::<false>(stack, pool, version, callback, goal_subtree_count)
-}
-
-fn stack__iter_internal<const CONSUME: bool>(
-    stack: &mut Stack,
-    pool: &mut SubtreePool,
-    version: StackVersion,
-    callback: &mut impl FnMut(&StackArena, &StackIterator) -> StackAction,
-    goal_subtree_count: i32,
-) -> Vec<StackSlice> {
-    let mut consume_prefix = CONSUME;
     stack.slices.clear();
     stack.iterators.clear();
     let include_subtrees = goal_subtree_count >= 0;
@@ -532,32 +521,10 @@ fn stack__iter_internal<const CONSUME: bool>(
             }
             return std::mem::take(&mut stack.slices);
         }
-        if consume_prefix && stack.arena.node(iterator.node).ref_count != 1 {
-            consume_prefix = false;
-        }
-        if consume_prefix {
-            let top = iterator.node;
-            let data = stack.arena.nodes[top.0].take().expect("live stack node");
-            let link = data.links.first.expect("initialized stack link");
-            stack.arena.free.push(top);
-            stack.heads[version as usize].node = link.node;
-            iterator.node = link.node;
-            if !link.subtree.is_null() {
-                if !ts_subtree_extra(&link.subtree) {
-                    iterator.subtree_count = iterator.subtree_count.wrapping_add(1);
-                    if !link.is_pending { iterator.is_pending = false; }
-                }
-                iterator.subtrees.push(link.subtree);
-            } else {
-                iterator.subtree_count = iterator.subtree_count.wrapping_add(1);
-                iterator.is_pending = false;
-            }
-        } else {
-            let link = stack.arena.node(iterator.node).links[0]
-                .as_ref()
-                .expect("initialized stack link");
-            iterator.advance(link, include_subtrees);
-        }
+        let link = stack.arena.node(iterator.node).links[0]
+            .as_ref()
+            .expect("initialized stack link");
+        iterator.advance(link, include_subtrees);
     }
     stack.iterators.push(iterator);
     while !stack.iterators.is_empty() {
@@ -757,14 +724,48 @@ pub(crate) fn ts_stack_pop_count(
     )
 }
 
-pub(crate) fn ts_stack_pop_count_committed(
+/// The original version remains present until advance halts it after a merge.
+/// Error recovery and the parser's outer scheduling loop can still inspect its
+/// header in the meantime, even though its consumed links will never be popped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StackHeadSnapshot {
+    state: StateId,
+    position: Length,
+    error_cost: u32,
+    node_count: u32,
+    dynamic_precedence: i32,
+    null_link: bool,
+}
+
+pub(crate) fn ts_stack_head_snapshot(stack: &Stack, version: StackVersion) -> StackHeadSnapshot {
+    let node = stack.arena.node(stack.heads[version as usize].node);
+    StackHeadSnapshot {
+        state: node.state,
+        position: node.position,
+        error_cost: node.error_cost,
+        node_count: node.node_count,
+        dynamic_precedence: node.dynamic_precedence,
+        null_link: node.links.first.as_ref().is_none_or(|link| link.subtree.is_null()),
+    }
+}
+
+pub(crate) fn ts_stack_restore_head_snapshot(
     stack: &mut Stack,
     pool: &mut SubtreePool,
     version: StackVersion,
-    count: u32,
-) -> Vec<StackSlice> {
-    stack__iter_internal::<true>(stack, pool, version,
-        &mut |_, iterator| pop_count_callback(count, iterator), count as i32)
+    snapshot: StackHeadSnapshot,
+) {
+    let node = stack.arena.node_mut(stack.heads[version as usize].node);
+    debug_assert_eq!(node.ref_count, 1);
+    node.state = snapshot.state;
+    node.position = snapshot.position;
+    node.error_cost = snapshot.error_cost;
+    node.node_count = snapshot.node_count;
+    node.dynamic_precedence = snapshot.dynamic_precedence;
+    if snapshot.null_link {
+        let link = node.links.first.as_mut().expect("reduced stack link");
+        ts_subtree_release(pool, std::mem::take(&mut link.subtree));
+    }
 }
 
 /// Prepare a one-child committed reduction without recycling its stack slot.

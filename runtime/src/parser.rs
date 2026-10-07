@@ -1036,6 +1036,8 @@ pub(crate) fn ts_parser__reduce(
         || version_count <= MAX_VERSION_COUNT + MAX_VERSION_COUNT_OVERFLOW
             + ts_stack_halted_version_count(&parser.stack)
     );
+    let original_head = (allow_replacement && version_count > 1)
+        .then(|| ts_stack_head_snapshot(&parser.stack, version));
     let popped = if allow_replacement {
         if count == 0 {
             ts_stack_pop_count_in_place(&mut parser.stack, 0).map(|children| {
@@ -1100,6 +1102,12 @@ pub(crate) fn ts_parser__reduce(
             if other != version && ts_stack_merge_contents(
                 &mut parser.stack, &mut parser.tree_pool, other, version,
             ) {
+                ts_stack_restore_head_snapshot(
+                    &mut parser.stack,
+                    &mut parser.tree_pool,
+                    version,
+                    original_head.expect("merging requires another version"),
+                );
                 return STACK_VERSION_NONE;
             }
         }
@@ -1114,7 +1122,6 @@ pub(crate) fn ts_parser__reduce(
         production_id,
         is_fragile,
         end_of_non_terminal_extra,
-        replace_version,
     )
 }
 
@@ -1127,15 +1134,10 @@ fn ts_parser__reduce_general(
     production_id: u16,
     is_fragile: bool,
     end_of_non_terminal_extra: bool,
-    replace_version: bool,
 ) -> StackVersion {
     let language = parser.language.unwrap();
     let initial_version_count = ts_stack_version_count(&parser.stack);
-    let mut slices = if replace_version {
-        ts_stack_pop_count_committed(&mut parser.stack, &mut parser.tree_pool, version, count)
-    } else {
-        ts_stack_pop_count(&mut parser.stack, &mut parser.tree_pool, version, count)
-    };
+    let mut slices = ts_stack_pop_count(&mut parser.stack, &mut parser.tree_pool, version, count);
     let pop_size = slices.len();
     let mut pop = slices.iter_mut().peekable();
     let mut removed_version_count = 0;
@@ -2883,6 +2885,139 @@ mod parser3_tests {
                         assert_eq!(snapshots[0], snapshots[1]);
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn committed_multi_version_reductions_preserve_merge_order_and_halted_headers() {
+        let language = reduction_language();
+        let symbol = language.tables.token_count as Symbol;
+        for source in [0, 1] {
+            for old_state in [ERROR_STATE, 5] {
+                for null in [false, true] {
+                    for count in [1, 3] {
+                        for extra_count in [0, 2] {
+                            for merge in [false, true] {
+                                let mut outcomes = Vec::new();
+                                for committed in [false, true] {
+                                    let mut parser = ts_parser_new();
+                                    parser.language = Some(language);
+                                    ts_stack_copy_version(&mut parser.stack, 0);
+                                    let other = 1 - source;
+                                    let mut children = Vec::new();
+                                    for i in 0..count {
+                                        let child = if null && i + 1 == count {
+                                            Subtree::Null
+                                        } else {
+                                            Subtree::Inline(InlineLeaf {
+                                                symbol: i as u8 + 1,
+                                                flags: VISIBLE | NAMED,
+                                                size_bytes: 2,
+                                                ..InlineLeaf::default()
+                                            })
+                                        };
+                                        if !child.is_null() {
+                                            children.push(child.clone());
+                                        }
+                                        ts_stack_push(&mut parser.stack, &mut parser.tree_pool,
+                                            source, child, true, old_state);
+                                    }
+                                    let parent = ts_subtree_new_node_with(symbol, children, 0, &language, |data| {
+                                        data.fragile_left = true;
+                                        data.fragile_right = true;
+                                        data.parse_state = TS_TREE_STATE_NONE;
+                                        let SubtreePayload::Branch(branch) = &mut data.payload else { unreachable!() };
+                                        branch.dynamic_precedence += 1;
+                                    });
+                                    let state = parser.parse_table_cache.next_state(&language, 1, symbol);
+                                    let target_state = state.wrapping_add(u16::from(!merge));
+                                    ts_stack_push(&mut parser.stack, &mut parser.tree_pool,
+                                        other, parent, false, target_state);
+                                    for _ in 0..extra_count {
+                                        let extra = Subtree::Inline(InlineLeaf {
+                                            symbol: 4,
+                                            flags: VISIBLE | EXTRA,
+                                            size_bytes: 1,
+                                            ..InlineLeaf::default()
+                                        });
+                                        ts_stack_push(&mut parser.stack, &mut parser.tree_pool,
+                                            source, extra.clone(), false, old_state);
+                                        ts_stack_push(&mut parser.stack, &mut parser.tree_pool,
+                                            other, extra, false, target_state);
+                                    }
+                                    parser.stack.heads[source as usize].node_count_at_last_error = 19;
+                                    let before = ts_stack_head_snapshot(&parser.stack, source);
+                                    let reduced = ts_parser__reduce(&mut parser, source, symbol,
+                                        count, 3, 0, false, false, committed);
+                                    if merge {
+                                        assert_eq!(reduced, STACK_VERSION_NONE);
+                                        assert_eq!(ts_stack_version_count(&parser.stack), 2);
+                                        assert_eq!(ts_stack_head_snapshot(&parser.stack, source), before);
+                                        assert_eq!(parser.stack.heads[source as usize].node_count_at_last_error, 19);
+                                        ts_stack_halt(&mut parser.stack, source);
+                                        ts_stack_remove_version(&mut parser.stack, &mut parser.tree_pool, source);
+                                    } else {
+                                        assert_ne!(reduced, STACK_VERSION_NONE);
+                                        ts_stack_renumber_version(&mut parser.stack, &mut parser.tree_pool, reduced, source);
+                                    }
+                                    let mut heads = Vec::new();
+                                    let version_count = ts_stack_version_count(&parser.stack);
+                                    for version in 0..version_count {
+                                        let header = ts_stack_head_snapshot(&parser.stack, version);
+                                        let slices = ts_stack_pop_all(&mut parser.stack, &mut parser.tree_pool, version);
+                                        heads.push((header, slices.iter().map(|slice| format!("{:?}", slice.subtrees)).collect::<Vec<_>>()));
+                                        while ts_stack_version_count(&parser.stack) > version_count {
+                                            ts_stack_remove_version(&mut parser.stack, &mut parser.tree_pool, version_count);
+                                        }
+                                    }
+                                    outcomes.push(heads);
+                                    ts_parser_reset(&mut parser);
+                                }
+                                assert_eq!(outcomes[0], outcomes[1], "source={source} state={old_state} null={null} count={count} extras={extra_count} merge={merge}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn committed_reduction_obeys_temporary_version_limit_with_halted_allowance() {
+        let language = reduction_language();
+        let symbol = language.tables.token_count as Symbol;
+        let limit = MAX_VERSION_COUNT + MAX_VERSION_COUNT_OVERFLOW;
+        for version_count in [limit, limit + 1] {
+            for halted in [false, true] {
+                let mut outcomes = Vec::new();
+                for committed in [false, true] {
+                    let mut parser = ts_parser_new();
+                    parser.language = Some(language);
+                    for _ in 1..version_count {
+                        ts_stack_copy_version(&mut parser.stack, 0);
+                    }
+                    if halted {
+                        ts_stack_halt(&mut parser.stack, version_count - 1);
+                    }
+                    ts_stack_push(&mut parser.stack, &mut parser.tree_pool, 0,
+                        Subtree::Inline(InlineLeaf { symbol: 1, size_bytes: 1, ..InlineLeaf::default() }), false, 2);
+                    let original = ts_stack_head_snapshot(&parser.stack, 0);
+                    let reduced = ts_parser__reduce(&mut parser, 0, symbol, 1, 0, 0, false, false, committed);
+                    let aborted = version_count > limit + u32::from(halted);
+                    assert_eq!(reduced == STACK_VERSION_NONE, aborted);
+                    if aborted {
+                        assert_eq!(ts_stack_head_snapshot(&parser.stack, 0), original);
+                    } else {
+                        ts_stack_renumber_version(&mut parser.stack, &mut parser.tree_pool, reduced, 0);
+                    }
+                    assert_eq!(ts_stack_version_count(&parser.stack), version_count);
+                    let header = ts_stack_head_snapshot(&parser.stack, 0);
+                    let slices = ts_stack_pop_all(&mut parser.stack, &mut parser.tree_pool, 0);
+                    outcomes.push((header, format!("{:?}", slices[0].subtrees)));
+                    ts_parser_reset(&mut parser);
+                }
+                assert_eq!(outcomes[0], outcomes[1]);
             }
         }
     }
