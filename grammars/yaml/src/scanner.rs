@@ -694,7 +694,9 @@ impl Scanner {
                         col = col.wrapping_add(1);
                         lexer.advance(false);
                         let next = lexer.lookahead();
-                        if plain_kind::<BLOCK>(next) < 3 {
+                        // Inside a run, only the stop/content distinction matters.
+                        // Block mode uses a range check instead of an ASCII-table load.
+                        if !is_plain_run(next, BLOCK) {
                             self.cur_col = col;
                             self.cur_chr = c;
                             self.lookahead = next;
@@ -3124,6 +3126,7 @@ mod tests {
                     plain_kind::<false>(c)
                 };
                 assert_eq!(actual, expected, "codepoint {c:#x}, block={block}");
+                assert_eq!(actual >= 3, is_plain_run(c, block));
             }
         }
     }
