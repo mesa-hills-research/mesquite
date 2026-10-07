@@ -182,8 +182,20 @@ Empty chunks mean EOF according to the C lexer. `LexerState.current_range_end`
 caches the current nonempty included range's end byte (zero at EOF), avoiding
 per-character Vec lookups. Refresh it on goto, range transitions, and empty reads;
 empty included ranges must still be visited in order when crossing a boundary.
-Never retain a chunk reference across another read. Decode malformed UTF-8 exactly as C, including consumed bytes
-and -1 lookahead; lexer also owns the three unicode decoding helper stubs.
+A 128-byte ASCII window copies only bytes inside the current chunk and included
+range. Non-ASCII values (0x80 for unused slots) force the full-chunk decoder path;
+this lets ordinary advances bypass virtual chunk access and boundary checks.
+Invalidate the window on every chunk read/clear and when goto changes the range
+end. Refilling the window must not call the input callback. Never retain a chunk
+reference across another read. Decode malformed UTF-8 exactly as C, including
+consumed bytes and -1 lookahead.
+
+Scalar-column state stores a wrapping offset from the current absolute byte
+position, rather than eagerly incrementing a second counter for every ASCII
+byte. Adjust that offset for multibyte characters/BOM, reset it on newlines, and
+preserve the scalar value across included-range jumps (including goto's same-byte
+relocation). Invalid column state still reads as zero until get_column replays
+the line. Parser scanner rollback saves/restores the offset with its byte position.
 
 `ParseContext<'input,'options>` holds the borrowed Input and ParseOptions. Functions
 that lex/check progress/advance/balance explicitly receive this context. Neither
