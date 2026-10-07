@@ -73,7 +73,7 @@ unused assignment noted above.
 ## Reverification on subsequent merged baselines
 
 Bucket `548436bf` was already resolved when reassigned on baselines `ddcce0a`,
-`91c0515`, `e2cf12d`, `549fdf3`, and `b55992b`. Compared
+`91c0515`, `e2cf12d`, `549fdf3`, `b55992b`, and `156e4d4`. Compared
 scanner creation, reset, and bracket-content scanning against the current C source;
 the merged implementation still matches, including consuming embedded NULs until
 actual EOF. Reran the bucket (4/4), all CMake oracle inputs (gate 270/270 with
