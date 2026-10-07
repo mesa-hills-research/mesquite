@@ -14,7 +14,10 @@ const LINE_COMMENT: usize = 6;
 // four-byte TokenType enum, both native-endian, with no padding.
 const STATE_SIZE: usize = 8;
 
-/// The scanner's state (C's `payload`), zero-initialized by `ts_calloc`.
+/// The scanner's state (C's `payload`).
+///
+/// C allocates this with `ts_calloc`, so the initial token is zero
+/// (`BRACKET_ARGUMENT_OPEN`), even before an opening bracket has been scanned.
 #[derive(Default)]
 pub(crate) struct Scanner {
     level: u32,
@@ -170,6 +173,7 @@ impl ExternalScanner for Scanner {
             self.level = u32::from_ne_bytes(buffer[..4].try_into().unwrap());
             self.token = u32::from_ne_bytes(buffer[4..STATE_SIZE].try_into().unwrap());
         } else {
+            // C resets both fields when there is no complete saved state.
             // Zero is BRACKET_ARGUMENT_OPEN, so a reset permits argument content
             // when error recovery enables all symbols, even without an opener.
             *self = Self::default();
@@ -260,22 +264,40 @@ mod tests {
     }
 
     #[test]
-    fn fresh_scanner_allows_bracket_content_in_recovery() {
-        let mut scanner = create();
-        let mut buffer = [0xff; STATE_SIZE];
-        assert_eq!(scanner.serialize(&mut buffer), STATE_SIZE);
-        assert_eq!(buffer, [0; STATE_SIZE]);
-
-        // Creation and an empty snapshot restore the same zero-valued token.
-        // Recovery can therefore accept argument content without an opener.
+    fn fresh_scanner_allows_bracket_content_during_recovery() {
         for reset in [false, true] {
-            if reset {
+            for input in ["", "text"] {
+                let mut scanner = create();
+                if reset {
+                    scanner.deserialize(&[]);
+                }
+                let mut state = [0xff; STATE_SIZE];
+                assert_eq!(scanner.serialize(&mut state), STATE_SIZE);
+                assert_eq!(state, [0; STATE_SIZE]);
+
+                // Recovery enables all tokens. C's zero initial token allows
+                // content without an opener, including zero-width content at EOF.
+                let mut lexer = TestLexer::new(input);
+                assert!(scanner.scan(&mut lexer, &[true; 7]));
+                assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
+                assert_eq!(lexer.position, input.len());
+                assert_eq!(lexer.end, (!input.is_empty()).then_some(input.len()));
+                if input.is_empty() {
+                    assert_eq!(
+                        lexer.events,
+                        [Event::Symbol(BRACKET_ARGUMENT_CONTENT as u16)]
+                    );
+                }
+
+                // Content changes the token, so a second scan cannot emit it
+                // again without an intervening reset or opening bracket.
+                let mut eof = TestLexer::new("");
+                assert!(!scanner.scan(&mut eof, &[true; 7]));
+                assert!(eof.events.is_empty());
                 scanner.deserialize(&[]);
+                assert!(scanner.scan(&mut eof, &[true; 7]));
+                assert_eq!(eof.symbol, BRACKET_ARGUMENT_CONTENT as u16);
             }
-            let mut lexer = TestLexer::new("text");
-            assert!(scanner.scan(&mut lexer, &[true; 7]));
-            assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
-            assert_eq!(lexer.end, Some(4));
         }
     }
 
@@ -444,8 +466,7 @@ mod tests {
         assert_eq!(restored.level, scanner.level);
         assert_eq!(restored.token, scanner.token);
         for length in [0, 1, 7, 9, 16] {
-            restored.level = 42;
-            restored.token = BRACKET_COMMENT_CONTENT as u32;
+            restored.deserialize(&buffer[..STATE_SIZE]);
             restored.deserialize(&buffer[..length]);
             assert_eq!(restored.level, 0);
             assert_eq!(restored.token, BRACKET_ARGUMENT_OPEN as u32);
