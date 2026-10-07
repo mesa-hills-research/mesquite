@@ -1,6 +1,6 @@
 # CMake quoted-variable recovery verification (bucket `1b5a6fb7`)
 
-All four reported inputs already pass at the starting revision `c3e1474`:
+All four reported inputs already pass at the starting revision `d14c3c2`:
 
 - `Tests/RunCMake/Syntax/NameWithTabsQuoted.cmake`
 - `Tests/RunCMake/Syntax/NameWithSpacesQuoted.cmake`
@@ -47,7 +47,7 @@ parser API, independent of the external fixture checkout:
 
 ## Latest verification
 
-Rechecked the Rust scanner against the current C source and reran at `c3e1474`:
+Rechecked the Rust scanner against the current C source and reran at `d14c3c2`:
 
 - `run_oracle(inputs = "bucket:1b5a6fb7")`: **4/4 pass**, queries enabled.
 - `run_oracle(inputs = "all", languages = "cmake")`:
@@ -68,7 +68,7 @@ bucket failures remain.
 
 ## Registry-query bucket `4d6cc948`
 
-Reverified again at `b34de06` (latest assigned baseline, after `b130253`): the assigned
+Reverified at `e5772de` (current assigned baseline, superseding `b34de06`): the assigned
 `Tests/RunCMake/find_package/Registry-query.cmake` already passes on the starting
 checkout. Its malformed `${CMAKE_ CURRENT_SOURCE_DIR}/${FILE_DIR}` reference
 exercised the same incorrect scanner initialization/reset described above:
