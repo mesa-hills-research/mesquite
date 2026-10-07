@@ -28,21 +28,28 @@ fn whitespace_in_quoted_variable_names_does_not_nest_errors() {
                 assert!(!tree.root_node().has_error());
             }
 
-            let mut progress_calls = 0;
-            let mut progress = |_: &ParseState| {
-                progress_calls += 1;
-                false
-            };
-            let tree = parser
-                .parse_with_options(
-                    &mut |offset, _| source.as_bytes().get(offset..).unwrap_or_default(),
-                    None,
-                    Some(ParseOptions::new().progress_callback(&mut progress)),
-                )
-                .unwrap();
-            assert_eq!(progress_calls, 0);
+            // Split malformed variable names and their recovery suffix at
+            // every byte boundary, including the final newline before EOF.
+            for chunk_size in [source.len(), 1] {
+                let mut progress_calls = 0;
+                let mut progress = |_: &ParseState| {
+                    progress_calls += 1;
+                    false
+                };
+                let tree = parser
+                    .parse_with_options(
+                        &mut |offset, _| {
+                            let remaining = source.as_bytes().get(offset..).unwrap_or_default();
+                            &remaining[..remaining.len().min(chunk_size)]
+                        },
+                        None,
+                        Some(ParseOptions::new().progress_callback(&mut progress)),
+                    )
+                    .unwrap();
+                assert_eq!(progress_calls, 0);
 
-            assert_quoted_variable_recovery(&tree, source);
+                assert_quoted_variable_recovery(&tree, source);
+            }
         }
     }
 }
