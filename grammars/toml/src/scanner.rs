@@ -11,7 +11,7 @@ const MULTILINE_LITERAL_STRING_END: Symbol = 4;
 /// The C scanner has no payload or serialized state.
 pub(crate) struct Scanner;
 
-// The cold non-LF dispatch shares the quote loop for both delimiters.
+// The cold quote dispatch shares the quote loop for both delimiters.
 // Inline it there to avoid a second call frame; only the delimiter needs to
 // survive the lexer callbacks, with token IDs computed at the final position.
 #[inline(always)]
@@ -44,27 +44,34 @@ fn scan_multiline_string_end(lexer: &mut dyn Lexer, delimiter: i32) -> bool {
     true
 }
 
-// LF takes the direct path in scan. Dispatch the remaining starts only
-// when needed. Marking this helper cold lets the enabled LF path fall
-// through the entry checks instead of branching around failure returns.
+// Quotes and recovery are uncommon compared with line-ending-only states.
+// Dispatch those states separately so the ordinary LF path does not need to
+// preserve the validity slice across its lexer callbacks.
 #[cold]
 #[inline(never)]
-fn scan_non_newline(lexer: &mut dyn Lexer, valid_symbols: &[bool; 5], mut lookahead: i32) -> bool {
-    // Only these non-LF starts can lead to a line-ending token. The range
-    // check keeps decoder errors and non-ASCII low-byte aliases out of the
-    // shift, and the mask avoids an indirect dispatch for this small set.
-    const LINE_STARTS: u64 = (1 << 0) | (1 << 9) | (1 << 13) | (1 << 32);
-    if lookahead as u32 <= 32 && (LINE_STARTS >> lookahead) & 1 != 0 {
-        if !valid_symbols[LINE_ENDING_OR_EOF as usize] {
-            return false;
-        }
+fn scan_with_quotes(lexer: &mut dyn Lexer, valid_symbols: &[bool; 5]) -> bool {
+    let lookahead = lexer.lookahead();
+    let symbol = match lookahead {
+        0x22 => MULTILINE_BASIC_STRING_END,
+        0x27 => MULTILINE_LITERAL_STRING_END,
+        _ => LINE_ENDING_OR_EOF,
+    };
+    if !valid_symbols[symbol as usize] {
+        return false;
+    }
+    if symbol == LINE_ENDING_OR_EOF {
+        scan_line_ending(lexer, lookahead)
     } else {
-        let end_symbol = match lookahead {
-            0x22 => MULTILINE_BASIC_STRING_END,
-            0x27 => MULTILINE_LITERAL_STRING_END,
-            _ => return false,
-        };
-        return valid_symbols[end_symbol as usize] && scan_multiline_string_end(lexer, lookahead);
+        scan_multiline_string_end(lexer, lookahead)
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn scan_line_ending(lexer: &mut dyn Lexer, mut lookahead: i32) -> bool {
+    const STARTS: u64 = (1 << 0) | (1 << 9) | (1 << 10) | (1 << 13) | (1 << 32);
+    if lookahead as u32 > 32 || (STARTS >> lookahead) & 1 == 0 {
+        return false;
     }
 
     while matches!(lookahead, 0x20 | 0x09) {
@@ -87,20 +94,35 @@ fn scan_non_newline(lexer: &mut dyn Lexer, valid_symbols: &[bool; 5], mut lookah
     accepted
 }
 
+// There are no applicable external tokens for this mask. Keep the callback
+// out of the enabled path so it need not carry an enable flag across the read.
+#[cold]
+#[inline(never)]
+fn scan_disabled(lexer: &mut dyn Lexer) -> bool {
+    lexer.lookahead();
+    false
+}
+
 impl ExternalScanner for Scanner {
     fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
         let Some(valid_symbols) = valid_symbols.first_chunk::<5>() else {
             return false;
         };
+        if valid_symbols[MULTILINE_BASIC_STRING_END as usize]
+            || valid_symbols[MULTILINE_LITERAL_STRING_END as usize]
+        {
+            return scan_with_quotes(lexer, valid_symbols);
+        }
+        if !valid_symbols[LINE_ENDING_OR_EOF as usize] {
+            // Preserve the one initial read even for an all-disabled mask.
+            return scan_disabled(lexer);
+        }
         let lookahead = lexer.lookahead();
         if lookahead == 0x0a {
-            let accepted = valid_symbols[LINE_ENDING_OR_EOF as usize];
-            if accepted {
-                lexer.set_result_symbol(LINE_ENDING_OR_EOF);
-            }
-            accepted
+            lexer.set_result_symbol(LINE_ENDING_OR_EOF);
+            true
         } else {
-            scan_non_newline(lexer, valid_symbols, lookahead)
+            scan_line_ending(lexer, lookahead)
         }
     }
 
