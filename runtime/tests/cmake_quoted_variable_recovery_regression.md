@@ -101,3 +101,32 @@ checkout, not inherited from the earlier verification):
 
 This follow-up records verification only. No scanner/runtime behavior changes,
 C deviations, unsafe code, generated-file edits, or new warnings are introduced.
+
+### Stop-time verification at `4e8767f`
+
+The reassigned bucket `4d6cc948` still passes on the merged starting baseline:
+`run_oracle(inputs = "bucket:4d6cc948")` reports **1/1 pass**, queries enabled.
+The scanner's zero-initialized creation and whole-state reset on invalid snapshots
+still match the current C reference; no additional behavioral fix is necessary.
+
+Before the operator stopped this run, the following checks completed:
+
+- `cargo check --workspace --all-targets`: passes; the existing host-owned YAML
+  lexer unused-assignment warning remains unchanged.
+- `cargo test -p ts_port_cmake`: **24/24 tests pass**, plus doc tests.
+- `cargo test -p ts_port --test cmake_quoted_variable_recovery`: **3/3 pass**.
+- `cargo clippy -p ts_port -p ts_port_cmake --all-targets -- -D warnings`: passes.
+
+After the workflow restarted at `60f946f`, verification completed:
+
+- `run_oracle(inputs = "all", languages = "cmake")`: **270/270 gate** inputs
+  pass with incremental and query checks; **9878/9878 fresh** inputs pass with
+  query checks.
+- `cargo check --workspace --all-targets`: passes with the same unchanged YAML
+  warning.
+- `cargo test -p ts_port -p ts_port_cmake`: **212 runtime unit tests**, **24 CMake
+  unit tests**, and **20 integration tests** pass; doc tests pass as well.
+- `cargo clippy -p ts_port -p ts_port_cmake --all-targets -- -D warnings`: passes.
+
+No code, generated files, or behavior changed; no bucket failure remains to fix.
+The unrelated languages' oracle sets were not rerun.
