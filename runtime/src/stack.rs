@@ -773,7 +773,10 @@ pub(crate) fn ts_stack_pop_count_in_place(
     subtrees.reverse();
     stack.slices.clear();
     stack.iterators.clear();
-    stack.slices.push(StackSlice { subtrees, version: 0 });
+    stack.slices.push(StackSlice {
+        subtrees,
+        version: 0,
+    });
     Some(std::mem::take(&mut stack.slices))
 }
 
@@ -2001,7 +2004,10 @@ mod stack_1_tests {
             visible: true,
             children: Vec::new(),
             payload: SubtreePayload::Leaf,
-            size: Length { bytes: 3, extent: Point { row: 0, column: 3 } },
+            size: Length {
+                bytes: 3,
+                extent: Point { row: 0, column: 3 },
+            },
             ..SubtreeHeapData::default()
         }));
         for count in 0..=4 {
@@ -2015,11 +2021,23 @@ mod stack_1_tests {
                     leaf(2, EXTRA),
                     heap.clone(),
                     leaf(4, EXTRA),
-                ].into_iter().enumerate() {
-                    ts_stack_push(&mut stack, &mut pool, 0, tree, i % 2 == 0, (i + 2) as StateId);
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    ts_stack_push(
+                        &mut stack,
+                        &mut pool,
+                        0,
+                        tree,
+                        i % 2 == 0,
+                        (i + 2) as StateId,
+                    );
                 }
                 stack.heads[0].summary = Some(vec![StackSummaryEntry {
-                    position: length_zero(), depth: 0, state: 5,
+                    position: length_zero(),
+                    depth: 0,
+                    state: 5,
                 }]);
                 stack.heads[0].node_count_at_last_error = 17;
                 ts_stack_set_last_external_token(&mut stack, &mut pool, 0, heap.clone());
@@ -2034,11 +2052,14 @@ mod stack_1_tests {
                 _ => unreachable!(),
             });
             let fast = ts_stack_pop_count_in_place(&mut optimized, count);
-            // Moving the handles must not transiently retain any subtrees.
-            assert_eq!(Arc::strong_count(match &heap {
-                Subtree::Heap(data) => data,
-                _ => unreachable!(),
-            }), original_refs);
+            // Moving the handles preserves the subtree reference counts.
+            assert_eq!(
+                Arc::strong_count(match &heap {
+                    Subtree::Heap(data) => data,
+                    _ => unreachable!(),
+                }),
+                original_refs
+            );
             let mut slow = ts_stack_pop_count(&mut ordinary, &mut pool, 0, count);
             if count == 4 {
                 assert!(fast.is_none());
@@ -2054,13 +2075,18 @@ mod stack_1_tests {
                     assert!(fast.ptr_eq(slow));
                 }
                 assert_eq!(ts_stack_state(&optimized, 0), ts_stack_state(&ordinary, 0));
-                assert_eq!(ts_stack_position(&optimized, 0), ts_stack_position(&ordinary, 0));
+                assert_eq!(
+                    ts_stack_position(&optimized, 0),
+                    ts_stack_position(&ordinary, 0)
+                );
                 assert_eq!(optimized.heads[0].node_count_at_last_error, 17);
                 assert_eq!(optimized.heads[0].summary.as_ref().unwrap()[0].state, 5);
                 assert!(ts_stack_last_external_token(&optimized, 0).ptr_eq(&heap));
                 assert_eq!(optimized.arena.free, ordinary.arena.free);
-                assert_eq!(optimized.arena.node(optimized.heads[0].node).ref_count,
-                    ordinary.arena.node(ordinary.heads[0].node).ref_count);
+                assert_eq!(
+                    optimized.arena.node(optimized.heads[0].node).ref_count,
+                    ordinary.arena.node(ordinary.heads[0].node).ref_count
+                );
             }
             ts_stack_delete(&mut optimized, &mut pool);
             ts_stack_delete(&mut ordinary, &mut pool);
@@ -2081,13 +2107,26 @@ mod stack_1_tests {
         stack_node_retain(&mut stack.arena, shared);
         assert!(ts_stack_pop_count_in_place(&mut stack, 2).is_none());
         assert_eq!(stack.heads[0].node, top);
-        assert!(stack.arena.node(top).links[0].as_ref().unwrap().subtree.ptr_eq(&leaf(2, VISIBLE)));
+        assert!(
+            stack.arena.node(top).links[0]
+                .as_ref()
+                .unwrap()
+                .subtree
+                .ptr_eq(&leaf(2, VISIBLE))
+        );
         assert!(stack.arena.free.is_empty());
         stack_node_release(&mut stack.arena, shared, &mut pool);
         let base = stack.base_node;
-        stack_node_add_link(&mut stack.arena, shared, StackLink {
-            node: base, subtree: leaf(3, VISIBLE), is_pending: true,
-        }, &mut pool);
+        stack_node_add_link(
+            &mut stack.arena,
+            shared,
+            StackLink {
+                node: base,
+                subtree: leaf(3, VISIBLE),
+                is_pending: true,
+            },
+            &mut pool,
+        );
         assert_eq!(stack.arena.node(shared).link_count, 2);
         assert!(ts_stack_pop_count_in_place(&mut stack, 2).is_none());
         assert_eq!(stack.heads[0].node, top);

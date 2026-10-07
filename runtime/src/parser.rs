@@ -2588,8 +2588,17 @@ mod parser3_tests {
             let allocation = parser.stack.slices.as_ptr();
             let capacity = parser.stack.slices.capacity();
             for i in 0..128 {
-                let version =
-                    ts_parser__reduce(&mut parser, 0, symbol, u32::from(i > 0), 0, 0, false, false, replace_version);
+                let version = ts_parser__reduce(
+                    &mut parser,
+                    0,
+                    symbol,
+                    u32::from(i > 0),
+                    0,
+                    0,
+                    false,
+                    false,
+                    replace_version,
+                );
                 assert_eq!(version, if replace_version { 0 } else { 1 });
                 assert!(parser.stack.slices.is_empty());
                 assert_eq!(parser.stack.slices.as_ptr(), allocation);

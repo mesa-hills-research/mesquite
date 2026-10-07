@@ -137,6 +137,16 @@ view, replacing void* payloads. Pop-error captures `&mut bool`; summary captures
 `SummarizeStackSession`; callbacks inspect predecessor nodes through the arena.
 Order of links, versions, slices and summaries is semantically important.
 
+For a sole reduce action on the sole active version, the parser may fuse the pop
+with the immediately following replacement of the original head.
+`ts_stack_pop_count_in_place` first verifies that every removed node is uniquely
+owned and has one predecessor; failure leaves the stack untouched for the normal
+traversal. On success it moves child handles into the slice and transfers the
+last predecessor reference back to head 0, avoiding transient retains, a second
+head, and the subsequent release walk. Preserve the head's scanner token, error
+baseline and summary. Never use this path for speculative reductions or multiple
+actions/versions: those still need the original head for alternatives and merges.
+
 ## Parser, input, lexer, scanner and progress
 
 The public `Parser` is the persistent runtime state. It owns stack, pool, lexer
