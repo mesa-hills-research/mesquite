@@ -71,7 +71,7 @@ bucket failures remain.
 
 ## Registry-query bucket `4d6cc948`
 
-Reverified at `3c0e4ad` (current assigned baseline, superseding `b494b56`): the assigned
+Reverified at `30fc800` (current assigned baseline): the assigned
 `Tests/RunCMake/find_package/Registry-query.cmake` already passes on the starting
 checkout. Its malformed `${CMAKE_ CURRENT_SOURCE_DIR}/${FILE_DIR}` reference
 exercised the same incorrect scanner initialization/reset described above:
@@ -86,7 +86,7 @@ regressions check fresh/reused scanners, whole-input and one-byte chunks, two
 incremental repair/restore cycles, tree ranges/flags, and progress counts. No
 duplicate test was added.
 
-Checks rerun for this assignment at `3c0e4ad` (all results below are from this
+Checks rerun for this assignment at `30fc800` (all results below are from this
 checkout, not inherited from the earlier verification):
 
 - `run_oracle(inputs = "bucket:4d6cc948")`: **1/1 pass**, queries enabled.
@@ -95,38 +95,49 @@ checkout, not inherited from the earlier verification):
 - `cargo check --workspace --all-targets`: passes with the pre-existing
   unused-assignment warning in host-owned `grammars/yaml/src/lex.rs:20` unchanged.
 - `cargo test -p ts_port_cmake -p ts_port`: **212 runtime unit tests**,
-  **24 CMake unit tests**, and all integration and doc tests pass, including
-  the three quoted-variable tests.
+  **24 CMake unit tests**, and **20 integration tests** pass, including
+  the three quoted-variable tests; doc tests pass as well.
 - `cargo clippy -p ts_port -p ts_port_cmake --all-targets -- -D warnings`: passes.
 
 This follow-up records verification only. No scanner/runtime behavior changes,
 C deviations, unsafe code, generated-file edits, or new warnings are introduced.
+No bucket failure remains to fix.
+The unrelated languages' oracle sets were not rerun.
 
-### Stop-time verification at `4e8767f`
+## Stop-time verification at `8d199b0`
 
-The reassigned bucket `4d6cc948` still passes on the merged starting baseline:
-`run_oracle(inputs = "bucket:4d6cc948")` reports **1/1 pass**, queries enabled.
-The scanner's zero-initialized creation and whole-state reset on invalid snapshots
-still match the current C reference; no additional behavioral fix is necessary.
+Rechecked bucket `1b5a6fb7` on the current merged checkout before the operator
+stopped the run. All four inputs already pass; the scanner's zero-initialized
+state and full reset on invalid snapshot lengths still match the current C
+source. No additional runtime changes or duplicate regressions were needed.
 
-Before the operator stopped this run, the following checks completed:
+Checks completed during this verification:
 
-- `cargo check --workspace --all-targets`: passes; the existing host-owned YAML
-  lexer unused-assignment warning remains unchanged.
-- `cargo test -p ts_port_cmake`: **24/24 tests pass**, plus doc tests.
+- `run_oracle(inputs = "bucket:1b5a6fb7")`: **4/4 pass**, queries enabled,
+  incremental checks off.
+- `cargo check --workspace --all-targets`: passes; only the existing warning
+  in host-owned `grammars/yaml/src/lex.rs:20` was reported.
 - `cargo test -p ts_port --test cmake_quoted_variable_recovery`: **3/3 pass**.
 - `cargo clippy -p ts_port -p ts_port_cmake --all-targets -- -D warnings`: passes.
 
-After the workflow restarted at `60f946f`, verification completed:
+No bucket work remains. The broader oracle was not rerun in this stop-time
+verification; the all-input results above belong to their stated earlier
+revisions. No deviations from C, unsafe code, or generated-file edits were made.
 
-- `run_oracle(inputs = "all", languages = "cmake")`: **270/270 gate** inputs
-  pass with incremental and query checks; **9878/9878 fresh** inputs pass with
-  query checks.
-- `cargo check --workspace --all-targets`: passes with the same unchanged YAML
-  warning.
-- `cargo test -p ts_port -p ts_port_cmake`: **212 runtime unit tests**, **24 CMake
-  unit tests**, and **20 integration tests** pass; doc tests pass as well.
+## Resumed verification at `0bdcd07`
+
+After the operator restarted the run, completed the deferred broader CMake
+verification on the same runtime/scanner checkout:
+
+- `run_oracle(inputs = "all", languages = "cmake")`: **270/270 gate inputs**
+  pass with incremental (`incremental=7`) and query checks; **9878/9878 fresh
+  inputs** pass with query checks, including the four assigned bucket inputs.
+- `cargo check --workspace --all-targets`: passes, with only the unchanged
+  host-owned YAML unused-assignment warning described above.
+- `cargo test -p ts_port_cmake -p ts_port`: **212 runtime unit tests**, **24 CMake
+  scanner unit tests**, and **20 integration tests** pass; doc tests pass.
 - `cargo clippy -p ts_port -p ts_port_cmake --all-targets -- -D warnings`: passes.
 
-No code, generated files, or behavior changed; no bucket failure remains to fix.
-The unrelated languages' oracle sets were not rerun.
+The bucket remains fully resolved by the existing scanner initialization/reset
+fix. No additional behavior changes were needed, and no work remains for this
+assignment.
