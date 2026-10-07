@@ -1030,13 +1030,19 @@ pub(crate) fn ts_parser__reduce(
     end_of_non_terminal_extra: bool,
     replace_version: bool,
 ) -> StackVersion {
-    let popped = if replace_version {
+    let version_count = ts_stack_version_count(&parser.stack);
+    let allow_replacement = replace_version && (
+        version_count <= MAX_VERSION_COUNT + MAX_VERSION_COUNT_OVERFLOW
+        || version_count <= MAX_VERSION_COUNT + MAX_VERSION_COUNT_OVERFLOW
+            + ts_stack_halted_version_count(&parser.stack)
+    );
+    let popped = if allow_replacement {
         if count == 0 {
             ts_stack_pop_count_in_place(&mut parser.stack, 0).map(|children| {
                 (children, ts_stack_state(&parser.stack, version), false)
             })
         } else {
-            ts_stack_prepare_reduction(&mut parser.stack, count)
+            ts_stack_prepare_reduction(&mut parser.stack, version, count)
                 .map(|(children, state)| (children, state, true))
         }
     } else { None };
@@ -1053,7 +1059,7 @@ pub(crate) fn ts_parser__reduce(
                 if end_of_non_terminal_extra && next_state == state {
                     data.extra = true;
                 }
-                if is_fragile {
+                if is_fragile || version_count > 1 {
                     data.fragile_left = true;
                     data.fragile_right = true;
                     data.parse_state = TS_TREE_STATE_NONE;
@@ -1067,7 +1073,7 @@ pub(crate) fn ts_parser__reduce(
             },
         );
         if retained {
-            ts_stack_replace_reduced_top(&mut parser.stack, parent, next_state);
+            ts_stack_replace_reduced_top(&mut parser.stack, version, parent, next_state);
         } else {
             ts_stack_push(
                 &mut parser.stack,
@@ -1090,6 +1096,13 @@ pub(crate) fn ts_parser__reduce(
                 );
             }
         }
+        for other in 0..version_count {
+            if other != version && ts_stack_merge_contents(
+                &mut parser.stack, &mut parser.tree_pool, other, version,
+            ) {
+                return STACK_VERSION_NONE;
+            }
+        }
         return version;
     }
     ts_parser__reduce_general(
@@ -1101,6 +1114,7 @@ pub(crate) fn ts_parser__reduce(
         production_id,
         is_fragile,
         end_of_non_terminal_extra,
+        replace_version,
     )
 }
 
@@ -1113,10 +1127,15 @@ fn ts_parser__reduce_general(
     production_id: u16,
     is_fragile: bool,
     end_of_non_terminal_extra: bool,
+    replace_version: bool,
 ) -> StackVersion {
     let language = parser.language.unwrap();
     let initial_version_count = ts_stack_version_count(&parser.stack);
-    let mut slices = ts_stack_pop_count(&mut parser.stack, &mut parser.tree_pool, version, count);
+    let mut slices = if replace_version {
+        ts_stack_pop_count_committed(&mut parser.stack, &mut parser.tree_pool, version, count)
+    } else {
+        ts_stack_pop_count(&mut parser.stack, &mut parser.tree_pool, version, count)
+    };
     let pop_size = slices.len();
     let mut pop = slices.iter_mut().peekable();
     let mut removed_version_count = 0;

@@ -480,6 +480,17 @@ pub(crate) fn stack__iter(
     callback: &mut impl FnMut(&StackArena, &StackIterator) -> StackAction,
     goal_subtree_count: i32,
 ) -> Vec<StackSlice> {
+    stack__iter_internal::<false>(stack, pool, version, callback, goal_subtree_count)
+}
+
+fn stack__iter_internal<const CONSUME: bool>(
+    stack: &mut Stack,
+    pool: &mut SubtreePool,
+    version: StackVersion,
+    callback: &mut impl FnMut(&StackArena, &StackIterator) -> StackAction,
+    goal_subtree_count: i32,
+) -> Vec<StackSlice> {
+    let mut consume_prefix = CONSUME;
     stack.slices.clear();
     stack.iterators.clear();
     let include_subtrees = goal_subtree_count >= 0;
@@ -521,10 +532,32 @@ pub(crate) fn stack__iter(
             }
             return std::mem::take(&mut stack.slices);
         }
-        let link = stack.arena.node(iterator.node).links[0]
-            .as_ref()
-            .expect("initialized stack link");
-        iterator.advance(link, include_subtrees);
+        if consume_prefix && stack.arena.node(iterator.node).ref_count != 1 {
+            consume_prefix = false;
+        }
+        if consume_prefix {
+            let top = iterator.node;
+            let data = stack.arena.nodes[top.0].take().expect("live stack node");
+            let link = data.links.first.expect("initialized stack link");
+            stack.arena.free.push(top);
+            stack.heads[version as usize].node = link.node;
+            iterator.node = link.node;
+            if !link.subtree.is_null() {
+                if !ts_subtree_extra(&link.subtree) {
+                    iterator.subtree_count = iterator.subtree_count.wrapping_add(1);
+                    if !link.is_pending { iterator.is_pending = false; }
+                }
+                iterator.subtrees.push(link.subtree);
+            } else {
+                iterator.subtree_count = iterator.subtree_count.wrapping_add(1);
+                iterator.is_pending = false;
+            }
+        } else {
+            let link = stack.arena.node(iterator.node).links[0]
+                .as_ref()
+                .expect("initialized stack link");
+            iterator.advance(link, include_subtrees);
+        }
     }
     stack.iterators.push(iterator);
     while !stack.iterators.is_empty() {
@@ -724,14 +757,24 @@ pub(crate) fn ts_stack_pop_count(
     )
 }
 
+pub(crate) fn ts_stack_pop_count_committed(
+    stack: &mut Stack,
+    pool: &mut SubtreePool,
+    version: StackVersion,
+    count: u32,
+) -> Vec<StackSlice> {
+    stack__iter_internal::<true>(stack, pool, version,
+        &mut |_, iterator| pop_count_callback(count, iterator), count as i32)
+}
+
 /// Prepare a one-child committed reduction without recycling its stack slot.
 /// The child handle moves out, but the unique edge still owns its predecessor.
 #[inline]
-pub(crate) fn ts_stack_take_top_for_reduction(stack: &mut Stack) -> Option<(Vec<Subtree>, StateId)> {
-    if stack.heads.len() != 1 || stack.heads[0].status != StackStatus::Active {
+pub(crate) fn ts_stack_take_top_for_reduction(stack: &mut Stack, version: StackVersion) -> Option<(Vec<Subtree>, StateId)> {
+    if stack.heads[version as usize].status != StackStatus::Active {
         return None;
     }
-    let top = stack.heads[0].node;
+    let top = stack.heads[version as usize].node;
     let node = stack.arena.node_mut(top);
     if node.ref_count != 1 || node.link_count != 1 {
         return None;
@@ -747,17 +790,17 @@ pub(crate) fn ts_stack_take_top_for_reduction(stack: &mut Stack) -> Option<(Vec<
 }
 
 #[inline]
-pub(crate) fn ts_stack_prepare_reduction(stack: &mut Stack, count: u32) -> Option<(Vec<Subtree>, StateId)> {
+pub(crate) fn ts_stack_prepare_reduction(stack: &mut Stack, version: StackVersion, count: u32) -> Option<(Vec<Subtree>, StateId)> {
     if count == 1 {
-        ts_stack_take_top_for_reduction(stack).or_else(|| prepare_reduction_general(stack, count))
+        ts_stack_take_top_for_reduction(stack, version).or_else(|| prepare_reduction_general(stack, version, count))
     } else {
-        prepare_reduction_general(stack, count)
+        prepare_reduction_general(stack, version, count)
     }
 }
 
-fn prepare_reduction_general(stack: &mut Stack, count: u32) -> Option<(Vec<Subtree>, StateId)> {
-    if count == 0 || stack.heads.len() != 1 || stack.heads[0].status != StackStatus::Active { return None; }
-    let top = stack.heads[0].node;
+fn prepare_reduction_general(stack: &mut Stack, version: StackVersion, count: u32) -> Option<(Vec<Subtree>, StateId)> {
+    if count == 0 || stack.heads[version as usize].status != StackStatus::Active { return None; }
+    let top = stack.heads[version as usize].node;
     let mut node = top;
     let mut remaining = count;
     let mut subtree_count = 0;
@@ -784,7 +827,7 @@ fn prepare_reduction_general(stack: &mut Stack, count: u32) -> Option<(Vec<Subtr
         stack.arena.free.push(node);
         node = next;
     }
-    stack.heads[0].node = node;
+    stack.heads[version as usize].node = node;
     subtrees.reverse();
     stack.slices.clear();
     stack.iterators.clear();
@@ -794,8 +837,8 @@ fn prepare_reduction_general(stack: &mut Stack, count: u32) -> Option<(Vec<Subtr
 /// Complete the matching committed replacement. No edge reference count changes:
 /// the same unique node continues to own the same predecessor.
 #[inline]
-pub(crate) fn ts_stack_replace_reduced_top(stack: &mut Stack, parent: Subtree, state: StateId) {
-    let top = stack.heads[0].node;
+pub(crate) fn ts_stack_replace_reduced_top(stack: &mut Stack, version: StackVersion, parent: Subtree, state: StateId) {
+    let top = stack.heads[version as usize].node;
     let predecessor = stack.arena.node(top).links.first.as_ref().unwrap().node;
     let previous = stack.arena.node(predecessor);
     let position = length_add(previous.position, ts_subtree_total_size(&parent));
@@ -1126,6 +1169,18 @@ pub(crate) fn ts_stack_merge(
     version1: StackVersion,
     version2: StackVersion,
 ) -> bool {
+    if ts_stack_merge_contents(stack, pool, version1, version2) {
+        ts_stack_remove_version(stack, pool, version2);
+        true
+    } else { false }
+}
+
+pub(crate) fn ts_stack_merge_contents(
+    stack: &mut Stack,
+    pool: &mut SubtreePool,
+    version1: StackVersion,
+    version2: StackVersion,
+) -> bool {
     if !ts_stack_can_merge(stack, version1, version2) {
         return false;
     }
@@ -1150,7 +1205,6 @@ pub(crate) fn ts_stack_merge(
     if node.state == ERROR_STATE {
         stack.heads[version1 as usize].node_count_at_last_error = node.node_count;
     }
-    ts_stack_remove_version(stack, pool, version2);
     true
 }
 
