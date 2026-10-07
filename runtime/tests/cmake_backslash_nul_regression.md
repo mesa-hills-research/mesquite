@@ -1,6 +1,6 @@
 # CMake backslash/NUL recovery (bucket `9a8ee9c6`)
 
-Reverified at starting revision `7713127` (after the latest main merge).
+Reverified at starting revision `f4564e7` (after the latest main merge).
 The reported 113-byte input,
 `Tests/RunCMake/Syntax/NullAfterBackslash.cmake`, already passes with the merged
 CMake scanner correction; no additional runtime or scanner change is needed.
@@ -20,12 +20,14 @@ parse has one ERROR with three children: identifier `0..1`, `(` at `1..2`, and
 `bracket_argument_content` at `54..113`, ending at point `(2, 0)`. It invokes the
 progress callback once.
 
-## Existing regression coverage
+## Regression coverage
 
 - `runtime/tests/cmake_backslash_nul.rs` checks this exact source, tree shape,
   node flags, byte/point ranges, and progress-callback count with both whole-file
-  and one-byte input chunks. It also reuses the parser after bracket arguments
-  and bracket comments to exercise scanner reset.
+  and one-byte input chunks. This follow-up also checks symbol IDs and chunk
+  boundaries immediately before/after the backslash, NUL, and newline (chunk
+  sizes 54, 55, 56, and 57). It reuses the parser after bracket arguments and
+  bracket comments to exercise scanner reset.
 - Scanner test `backslash_nul_recovery_consumes_and_marks_every_byte` checks
   ordinary lexing rejection followed by recovery acceptance, including each
   advance/mark callback across the embedded NUL, before and after reset.
@@ -33,7 +35,8 @@ progress callback once.
 ## Verification
 
 All checks below were rerun at this revision. The bucket passed before any
-changes, and the existing scanner and parser regressions passed unchanged.
+changes, and both the existing scanner tests and strengthened parser regression
+pass.
 
 - Bucket oracle: **1/1 passes** (queries enabled).
 - All CMake oracle inputs: **270/270 gate** (incremental and query checks),
@@ -45,5 +48,6 @@ changes, and the existing scanner and parser regressions passed unchanged.
 - `cargo clippy -p ts_port_cmake -p ts_port --all-targets -- -D warnings`: passes.
 
 The bucket was already passing before this verification; the oracle reported no
-remaining divergence to fix. This follow-up records verification only: no C
-deviations, new unsafe code, or changes to host-owned generated files.
+remaining divergence to fix. This follow-up strengthens regression coverage:
+no production behavior changes, C deviations, new unsafe code, or changes to
+host-owned generated files.

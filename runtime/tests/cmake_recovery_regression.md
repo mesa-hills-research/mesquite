@@ -59,13 +59,16 @@ This follow-up changes only this verification note; it introduces no deviation
 from C and no new unsafe code.
 
 
-### Revalidation of `4d6cc948` at `ed294b1`
+### Revalidation of `4d6cc948` at `9c27be8`
 
 The assigned Registry-query input still passes before any new changes. Direct
 comparison with the current C scanner confirms that the merged zero-valued
 creation/reset behavior above is the required correction; no additional
 runtime change is warranted. The checks below were rerun at this revision,
-including the parser regression with both fresh and reused scanner state.
+including the parser regression with both fresh and reused scanner state,
+single-byte input chunks, and incremental repair/restoration. The reduced
+Registry-query expression is already present in both scanner and parser tests;
+no duplicate regression was added.
 
 - Bucket: **1/1 passes**, with query checks.
 - All CMake inputs: **270/270 gate** (including incremental/query checks) and
@@ -102,14 +105,16 @@ unsafe code, or generated-file changes are introduced.
 
 ## ERROR range bucket `e0b0bff8`
 
-Reverified at `d5608ec`: all five reported inputs already pass on the starting
+Reverified at `61e4869`: all five reported inputs already pass on the starting
 checkout with the merged scanner initialization/reset correction above. Direct
 comparison with the current C scanner confirms that no additional implementation
 change is needed: creation uses `ts_calloc`, and invalid-length deserialization
-resets both `level` and `token` to zero. All checks listed below were rerun,
-including the existing parser regressions with chunked input, reused scanners,
-and incremental EOF edits. This follow-up only refreshes the verification record;
-it does not change runtime behavior or duplicate existing tests. Recovery from
+resets both `level` and `token` to zero. Token zero is `BRACKET_ARGUMENT_OPEN`,
+not an inert sentinel, so recovery can emit bracket content without an opener.
+All checks listed below were rerun, including the existing parser regressions
+with chunked input, reused scanners, and incremental EOF edits. This follow-up
+only refreshes the verification record; it does not change runtime behavior or
+duplicate existing tests. Recovery from
 byte 5 of `E_sleep-no-args-stderr.cmake` emits bracket content through byte 72,
 including the final newline. The enclosing ERROR therefore reaches EOF, rather
 than ending at byte 71 with only the initial identifier as a visible child.
@@ -219,9 +224,9 @@ changes are introduced.
 
 ## Unterminated-call bucket `7f8795fb`
 
-Reverified at `40208fa`: all three reported inputs already pass on the starting
-checkout with the merged scanner initialization/reset correction above. The
-current C scanner uses
+Reverified at `40208fa` and again at `a4425c2`: all three reported inputs
+already pass on both starting checkouts with the merged scanner
+initialization/reset correction above. The current C scanner uses
 `ts_calloc` and clears both fields on empty or invalid-length snapshots, matching
 the Rust implementation. This allows recovery content without an opener:
 zero-width content at EOF in `UnterminatedCall1.cmake` and
@@ -237,7 +242,7 @@ input chunks. The earlier verification note incorrectly described all three coun
 as zero; the existing tests already assert the correct counts. No additional
 behavior change or duplicate test is needed.
 
-Validation rerun for this bucket at `40208fa`:
+Validation rerun for this bucket at `a4425c2` (same results as `40208fa`):
 
 - `run_oracle(inputs = "bucket:7f8795fb")`: 3/3 pass.
 - `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs
@@ -252,6 +257,6 @@ Validation rerun for this bucket at `40208fa`:
   pre-existing unused-assignment warning in host-owned `grammars/yaml/src/lex.rs:20`.
   That generated file is outside this bucket and was left unchanged.
 
-The bucket and its regression coverage were already resolved at this revision,
+The bucket and its regression coverage were already resolved at both revisions,
 so this follow-up only records verification; no C deviations, unsafe code, or
 host-owned generated-file changes were introduced.
