@@ -35,6 +35,32 @@ const ELEMENT_REFERENCE_BRACKET: usize = 28;
 const SHORT_INTERPOLATION: usize = 29;
 const NONE: usize = 30;
 
+// The external-token flags are C booleans (0 or 1). Pack eight at a time
+// with a multiply instead of carrying their slice through every scan branch.
+#[derive(Clone, Copy, Debug, Default)]
+struct ValidSymbols(u32);
+
+impl ValidSymbols {
+    #[inline(never)]
+    fn new(symbols: &[bool]) -> Self {
+        let s: &[bool; NONE] = symbols[..NONE].try_into().unwrap();
+        fn pack(bytes: [bool; 8]) -> u32 {
+            let word = u64::from_le_bytes(bytes.map(u8::from));
+            (word.wrapping_mul(0x0102_0408_1020_4080) >> 56) as u32
+        }
+        Self(
+            pack([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]])
+                | (pack([s[8], s[9], s[10], s[11], s[12], s[13], s[14], s[15]]) << 8)
+                | (pack([s[16], s[17], s[18], s[19], s[20], s[21], s[22], s[23]]) << 16)
+                | (pack([s[24], s[25], s[26], s[27], s[28], s[29], false, false]) << 24),
+        )
+    }
+
+    fn has(self, symbol: usize) -> bool {
+        self.0 & (1 << symbol) != 0
+    }
+}
+
 // All recognized source delimiters are ASCII; restored delimiters and kinds
 // are bytes as well. Only nesting_depth needs C's full int width while scanning
 // a token (it is deliberately narrowed only at serialization).
@@ -59,6 +85,8 @@ struct Heredoc {
 /// Leading whitespace is scan-local: C never includes it in a snapshot.
 #[derive(Debug, Default)]
 pub(crate) struct Scanner {
+    valid_input: [bool; NONE],
+    valid_mask: ValidSymbols,
     literal_stack: Vec<Literal>,
     open_heredocs: Vec<Heredoc>,
 }
@@ -405,8 +433,8 @@ impl Scanner {
 
     // Only CR/LF can start a heredoc body. Inspect the queue at those positions
     // rather than loading and retaining its header on every scanner attempt.
-    fn start_heredoc(&mut self, valid_symbols: &[bool; NONE]) -> bool {
-        if valid_symbols[HEREDOC_BODY_START]
+    fn start_heredoc(&mut self, valid_symbols: ValidSymbols) -> bool {
+        if valid_symbols.has(HEREDOC_BODY_START)
             && let Some(heredoc) = self.open_heredocs.first_mut()
             && !heredoc.started
         {
@@ -420,10 +448,11 @@ impl Scanner {
     fn scan_whitespace(
         &mut self,
         lexer: &mut CachedLexer<'_>,
-        valid_symbols: &[bool; NONE],
+        valid_symbols: ValidSymbols,
     ) -> WhitespaceResult {
         let mut has_leading_whitespace = false;
-        let line_break_is_valid = !valid_symbols[NO_LINE_BREAK] && valid_symbols[LINE_BREAK];
+        let line_break_is_valid =
+            !valid_symbols.has(NO_LINE_BREAK) && valid_symbols.has(LINE_BREAK);
         loop {
             if line_break_is_valid && lexer.is_at_included_range_start() {
                 lexer.mark_end();
@@ -524,7 +553,7 @@ impl Scanner {
         has_leading_whitespace: bool,
         lexer: &mut CachedLexer<'_>,
         literal: &mut Literal,
-        valid_symbols: &[bool; NONE],
+        valid_symbols: ValidSymbols,
     ) -> bool {
         match lexer.lookahead() {
             0x22 | 0x27 => {
@@ -538,7 +567,7 @@ impl Scanner {
             }
             0x60 => {
                 // '`'
-                if !valid_symbols[SUBSHELL_START] {
+                if !valid_symbols.has(SUBSHELL_START) {
                     return false;
                 }
                 literal.kind = SUBSHELL_START as u8;
@@ -550,7 +579,7 @@ impl Scanner {
             }
             0x2f => {
                 // '/'
-                if !valid_symbols[REGEX_START] {
+                if !valid_symbols.has(REGEX_START) {
                     return false;
                 }
                 literal.kind = REGEX_START as u8;
@@ -558,7 +587,7 @@ impl Scanner {
                 literal.close_delimiter = lexer.lookahead() as u8;
                 literal.allows_interpolation = true;
                 advance(lexer);
-                if valid_symbols[FORWARD_SLASH] {
+                if valid_symbols.has(FORWARD_SLASH) {
                     if !has_leading_whitespace {
                         return false;
                     }
@@ -586,7 +615,7 @@ impl Scanner {
                     0x49 => (SYMBOL_ARRAY_START, SYMBOL_ARRAY_START, true, true), // 'I'
                     _ => (STRING_START, STRING_START, true, false),
                 };
-                if !valid_symbols[required] {
+                if !valid_symbols.has(required) {
                     return false;
                 }
                 literal.kind = kind as u8;
@@ -619,7 +648,7 @@ impl Scanner {
                         // '\r', '\n', ' ', '\t'
                         // Preserve C's zero delimiters in this branch. Where `/`
                         // is valid, `%` plus whitespace must be an operator.
-                        if valid_symbols[FORWARD_SLASH] {
+                        if valid_symbols.has(FORWARD_SLASH) {
                             return false;
                         }
                     }
@@ -805,17 +834,14 @@ impl Scanner {
         }
     }
 
-    fn scan_cached(&mut self, lexer: &mut CachedLexer<'_>, valid_symbols: &[bool]) -> bool {
-        // The grammar has NONE external tokens. Check that once instead of
-        // bounds-checking each individual token lookup in the scanning paths.
-        let valid_symbols: &[bool; NONE] = valid_symbols[..NONE].try_into().unwrap();
-        if !valid_symbols[STRING_START] {
-            if (valid_symbols[STRING_CONTENT] || valid_symbols[STRING_END])
+    fn scan_cached(&mut self, lexer: &mut CachedLexer<'_>, valid_symbols: ValidSymbols) -> bool {
+        if !valid_symbols.has(STRING_START) {
+            if (valid_symbols.has(STRING_CONTENT) || valid_symbols.has(STRING_END))
                 && !self.literal_stack.is_empty()
             {
                 return self.scan_literal_content(lexer);
             }
-            if (valid_symbols[HEREDOC_CONTENT] || valid_symbols[HEREDOC_BODY_END])
+            if (valid_symbols.has(HEREDOC_CONTENT) || valid_symbols.has(HEREDOC_BODY_END))
                 && !self.open_heredocs.is_empty()
             {
                 return self.scan_heredoc_content(lexer);
@@ -838,9 +864,9 @@ impl Scanner {
         // below. Handle this common case without walking their dispatch first.
         let word_kind = word_char_kind(lookahead);
         if word_kind >= 2
-            && (valid_symbols[HASH_KEY_SYMBOL]
-                | valid_symbols[IDENTIFIER_SUFFIX]
-                | (valid_symbols[CONSTANT_SUFFIX] & (word_kind == 3)))
+            && (valid_symbols.has(HASH_KEY_SYMBOL)
+                | valid_symbols.has(IDENTIFIER_SUFFIX)
+                | (valid_symbols.has(CONSTANT_SUFFIX) & (word_kind == 3)))
         {
             let valid_identifier_symbol = if word_kind == 3 {
                 CONSTANT_SUFFIX
@@ -856,13 +882,14 @@ impl Scanner {
                     break;
                 }
             }
-            if valid_symbols[HASH_KEY_SYMBOL] && lexer.lookahead() == i32::from(b':') {
+            if valid_symbols.has(HASH_KEY_SYMBOL) && lexer.lookahead() == i32::from(b':') {
                 lexer.mark_end();
                 advance(lexer);
                 if lexer.lookahead() != i32::from(b':') {
                     return emit(lexer, HASH_KEY_SYMBOL);
                 }
-            } else if valid_symbols[valid_identifier_symbol] && lexer.lookahead() == i32::from(b'!')
+            } else if valid_symbols.has(valid_identifier_symbol)
+                && lexer.lookahead() == i32::from(b'!')
             {
                 advance(lexer);
                 if lexer.lookahead() != i32::from(b'=') {
@@ -875,7 +902,7 @@ impl Scanner {
         match lookahead {
             0x26 => {
                 // '&'
-                if valid_symbols[BLOCK_AMPERSAND] {
+                if valid_symbols.has(BLOCK_AMPERSAND) {
                     advance(lexer);
                     if lexer.lookahead() != i32::from(b'&')
                         && lexer.lookahead() != i32::from(b'.')
@@ -889,7 +916,7 @@ impl Scanner {
             }
             0x3c => {
                 // '<'
-                if valid_symbols[SINGLETON_CLASS_LEFT_ANGLE_LEFT_ANGLE] {
+                if valid_symbols.has(SINGLETON_CLASS_LEFT_ANGLE_LEFT_ANGLE) {
                     advance(lexer);
                     if lexer.lookahead() == i32::from(b'<') {
                         advance(lexer);
@@ -900,47 +927,51 @@ impl Scanner {
             }
             0x2a => {
                 // '*'
-                if valid_symbols[SPLAT_STAR]
-                    || valid_symbols[BINARY_STAR]
-                    || valid_symbols[HASH_SPLAT_STAR_STAR]
-                    || valid_symbols[BINARY_STAR_STAR]
+                if valid_symbols.has(SPLAT_STAR)
+                    || valid_symbols.has(BINARY_STAR)
+                    || valid_symbols.has(HASH_SPLAT_STAR_STAR)
+                    || valid_symbols.has(BINARY_STAR_STAR)
                 {
                     advance(lexer);
                     if lexer.lookahead() == i32::from(b'=') {
                         return false;
                     }
                     if lexer.lookahead() == i32::from(b'*') {
-                        if valid_symbols[HASH_SPLAT_STAR_STAR] || valid_symbols[BINARY_STAR_STAR] {
+                        if valid_symbols.has(HASH_SPLAT_STAR_STAR)
+                            || valid_symbols.has(BINARY_STAR_STAR)
+                        {
                             advance(lexer);
                             if lexer.lookahead() == i32::from(b'=') {
                                 return false;
                             }
-                            if valid_symbols[BINARY_STAR_STAR] && !has_leading_whitespace {
+                            if valid_symbols.has(BINARY_STAR_STAR) && !has_leading_whitespace {
                                 return emit(lexer, BINARY_STAR_STAR);
                             }
-                            if valid_symbols[HASH_SPLAT_STAR_STAR] && !is_space(lexer.lookahead()) {
+                            if valid_symbols.has(HASH_SPLAT_STAR_STAR)
+                                && !is_space(lexer.lookahead())
+                            {
                                 return emit(lexer, HASH_SPLAT_STAR_STAR);
                             }
-                            if valid_symbols[BINARY_STAR_STAR] {
+                            if valid_symbols.has(BINARY_STAR_STAR) {
                                 return emit(lexer, BINARY_STAR_STAR);
                             }
-                            if valid_symbols[HASH_SPLAT_STAR_STAR] {
+                            if valid_symbols.has(HASH_SPLAT_STAR_STAR) {
                                 return emit(lexer, HASH_SPLAT_STAR_STAR);
                             }
                             return false;
                         }
                         return false;
                     }
-                    if valid_symbols[BINARY_STAR] && !has_leading_whitespace {
+                    if valid_symbols.has(BINARY_STAR) && !has_leading_whitespace {
                         return emit(lexer, BINARY_STAR);
                     }
-                    if valid_symbols[SPLAT_STAR] && !is_space(lexer.lookahead()) {
+                    if valid_symbols.has(SPLAT_STAR) && !is_space(lexer.lookahead()) {
                         return emit(lexer, SPLAT_STAR);
                     }
-                    if valid_symbols[BINARY_STAR] {
+                    if valid_symbols.has(BINARY_STAR) {
                         return emit(lexer, BINARY_STAR);
                     }
-                    if valid_symbols[SPLAT_STAR] {
+                    if valid_symbols.has(SPLAT_STAR) {
                         return emit(lexer, SPLAT_STAR);
                     }
                     return false;
@@ -948,25 +979,25 @@ impl Scanner {
             }
             0x2d => {
                 // '-'
-                if valid_symbols[UNARY_MINUS]
-                    || valid_symbols[UNARY_MINUS_NUM]
-                    || valid_symbols[BINARY_MINUS]
+                if valid_symbols.has(UNARY_MINUS)
+                    || valid_symbols.has(UNARY_MINUS_NUM)
+                    || valid_symbols.has(BINARY_MINUS)
                 {
                     advance(lexer);
                     if lexer.lookahead() != i32::from(b'=') && lexer.lookahead() != i32::from(b'>')
                     {
-                        if valid_symbols[UNARY_MINUS_NUM]
-                            && (!valid_symbols[BINARY_STAR] || has_leading_whitespace)
+                        if valid_symbols.has(UNARY_MINUS_NUM)
+                            && (!valid_symbols.has(BINARY_STAR) || has_leading_whitespace)
                             && is_digit(lexer.lookahead())
                         {
                             return emit(lexer, UNARY_MINUS_NUM);
                         }
-                        if valid_symbols[UNARY_MINUS]
+                        if valid_symbols.has(UNARY_MINUS)
                             && has_leading_whitespace
                             && !is_space(lexer.lookahead())
                         {
                             lexer.set_result_symbol(UNARY_MINUS as u16);
-                        } else if valid_symbols[BINARY_MINUS] {
+                        } else if valid_symbols.has(BINARY_MINUS) {
                             lexer.set_result_symbol(BINARY_MINUS as u16);
                         } else {
                             lexer.set_result_symbol(UNARY_MINUS as u16);
@@ -978,12 +1009,12 @@ impl Scanner {
             }
             0x3a => {
                 // ':'
-                if valid_symbols[SYMBOL_START] {
+                if valid_symbols.has(SYMBOL_START) {
                     return self.scan_symbol_start(lexer);
                 }
             }
-            0x5b if valid_symbols[ELEMENT_REFERENCE_BRACKET]
-                && (!has_leading_whitespace || !valid_symbols[STRING_START]) =>
+            0x5b if valid_symbols.has(ELEMENT_REFERENCE_BRACKET)
+                && (!has_leading_whitespace || !valid_symbols.has(STRING_START)) =>
             {
                 advance(lexer);
                 return emit(lexer, ELEMENT_REFERENCE_BRACKET);
@@ -991,7 +1022,7 @@ impl Scanner {
             _ => {}
         }
 
-        if valid_symbols[STRING_START] {
+        if valid_symbols.has(STRING_START) {
             return self.scan_literal_start(lexer, valid_symbols, has_leading_whitespace);
         }
         false
@@ -1039,7 +1070,7 @@ impl Scanner {
     fn scan_literal_start(
         &mut self,
         lexer: &mut CachedLexer<'_>,
-        valid_symbols: &[bool; NONE],
+        valid_symbols: ValidSymbols,
         has_leading_whitespace: bool,
     ) -> bool {
         let mut literal = Literal {
@@ -1074,7 +1105,12 @@ impl Scanner {
 
 impl ExternalScanner for Scanner {
     fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
-        self.scan_cached(&mut CachedLexer::new(lexer), valid_symbols)
+        let valid: &[bool; NONE] = valid_symbols[..NONE].try_into().unwrap();
+        if self.valid_input != *valid {
+            self.valid_input = *valid;
+            self.valid_mask = ValidSymbols::new(valid);
+        }
+        self.scan_cached(&mut CachedLexer::new(lexer), self.valid_mask)
     }
 
     fn serialize(&mut self, buffer: &mut [u8]) -> usize {
@@ -1584,6 +1620,7 @@ mod tests {
                     ..Heredoc::default()
                 },
             ],
+            ..Scanner::default()
         };
         let mut buffer = [0; SERIALIZATION_BUFFER_SIZE];
         let size = scanner.serialize(&mut buffer);
@@ -1617,6 +1654,7 @@ mod tests {
                 heredoc(b"FIRST", true, false),
                 heredoc(b"LAST", false, true),
             ],
+            ..Scanner::default()
         };
         scanner.literal_stack.reserve(32);
         scanner.open_heredocs.reserve(8);
@@ -1831,7 +1869,10 @@ mod tests {
                         actual.range_starts.push(boundary);
                         expected.range_starts.push(boundary);
                         assert_eq!(
-                            fast.scan_whitespace(&mut CachedLexer::new(&mut actual), &valid),
+                            fast.scan_whitespace(
+                                &mut CachedLexer::new(&mut actual),
+                                ValidSymbols::new(&valid)
+                            ),
                             unsplit_whitespace(
                                 &mut reference,
                                 &mut CachedLexer::new(&mut expected),
@@ -1848,6 +1889,36 @@ mod tests {
                         assert_eq!(fast.open_heredocs, reference.open_heredocs);
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn packed_token_masks_preserve_every_bit_and_refresh_on_mutation() {
+        let mut scanner = Scanner::default();
+        for group in 0..4 {
+            for byte in 0..=u8::MAX {
+                let mut valid = [false; NONE];
+                for bit in 0..8 {
+                    let index = group * 8 + bit;
+                    if index < NONE {
+                        valid[index] = byte & (1 << bit) != 0;
+                    }
+                }
+                let packed = ValidSymbols::new(&valid);
+                for (index, expected) in valid.iter().copied().enumerate() {
+                    assert_eq!(packed.has(index), expected);
+                }
+                // The input array is reused at the same address with different
+                // contents: an address-only mask cache would be incorrect.
+                assert!(!scanner.scan(&mut TestLexer::new(""), &valid));
+                assert_eq!(scanner.valid_mask.0, packed.0);
+                assert!(!scanner.scan(&mut TestLexer::new(""), &valid));
+                assert_eq!(scanner.valid_mask.0, packed.0);
+                let mut snapshot = [0xff; 2];
+                assert_eq!(scanner.serialize(&mut snapshot), 2);
+                assert_eq!(snapshot, [0, 0]);
+                scanner.deserialize(&snapshot);
             }
         }
     }
