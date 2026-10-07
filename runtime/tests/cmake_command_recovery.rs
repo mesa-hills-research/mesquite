@@ -1,6 +1,6 @@
 //! Regressions for CMake oracle bucket 6c68c51b.
 
-use ts_port::{Language, ParseOptions, ParseState, Parser, Point};
+use ts_port::{InputEdit, Language, ParseOptions, ParseState, Parser, Point};
 
 #[test]
 fn malformed_variable_references_recover_as_top_level_errors() {
@@ -171,6 +171,80 @@ fn multiline_command_errors_preserve_recovery_boundaries() {
                 assert!(!content.has_error());
                 assert_eq!(content.child_count(), 0);
             }
+        }
+    }
+}
+
+#[test]
+fn repairing_and_restoring_variable_references_restores_top_level_errors() {
+    let language = Language::from(ts_port_cmake::language());
+    for (source, content_start) in [
+        ("set(var \"${\")\n", 11),
+        ("message(${var\twith\ttab})\n", 14),
+        ("message(${var with space})\n", 14),
+    ] {
+        let mut parser = Parser::new();
+        parser.set_language(&language).unwrap();
+        let mut tree = parser.parse(source, None).unwrap();
+        let expected_sexp = tree.root_node().to_sexp();
+        assert!(tree.root_node().child(0).unwrap().is_error());
+
+        // Unlike a fresh parse or parser reuse without an old tree, incremental
+        // repair can reuse earlier reductions. Change the input length too:
+        // restoring the error must recreate the recovery token at its original
+        // byte/point range, not keep the repaired command or a stale snapshot.
+        let start = source.find("${").unwrap() + 2;
+        let (end, replacement) = match source.find('}') {
+            Some(end) => (end, "value"),
+            None => (start, "value}"),
+        };
+        let mut repaired = source.to_owned();
+        repaired.replace_range(start..end, replacement);
+        let repair = InputEdit {
+            start_byte: start,
+            old_end_byte: end,
+            new_end_byte: start + replacement.len(),
+            start_position: Point::new(0, start),
+            old_end_position: Point::new(0, end),
+            new_end_position: Point::new(0, start + replacement.len()),
+        };
+        let undo = InputEdit {
+            start_byte: repair.start_byte,
+            old_end_byte: repair.new_end_byte,
+            new_end_byte: repair.old_end_byte,
+            start_position: repair.start_position,
+            old_end_position: repair.new_end_position,
+            new_end_position: repair.old_end_position,
+        };
+
+        for _ in 0..2 {
+            tree.edit(&repair);
+            tree = parser.parse(&repaired, Some(&tree)).unwrap();
+            let root = tree.root_node();
+            assert_eq!(root.kind(), "source_file");
+            assert!(!root.has_error(), "{repaired:?}: {}", root.to_sexp());
+            assert_eq!(root.child(0).unwrap().kind(), "normal_command");
+            assert_eq!(root.byte_range(), 0..repaired.len());
+
+            tree.edit(&undo);
+            tree = parser.parse(source, Some(&tree)).unwrap();
+            let root = tree.root_node();
+            assert_eq!(root.to_sexp(), expected_sexp, "{source:?}");
+            assert_eq!(root.byte_range(), 0..source.len());
+            assert_eq!(root.end_position(), Point::new(1, 0));
+            assert_eq!(root.child_count(), 1);
+
+            let error = root.child(0).unwrap();
+            assert!(error.is_error());
+            assert!(error.is_extra());
+            assert_eq!(error.byte_range(), 0..source.len());
+            let content = error.child(error.child_count() - 1).unwrap();
+            assert_eq!(content.kind(), "bracket_argument_content");
+            assert_eq!(content.byte_range(), content_start..source.len());
+            assert_eq!(content.start_position(), Point::new(0, content_start));
+            assert_eq!(content.end_position(), Point::new(1, 0));
+            assert!(!content.is_missing());
+            assert!(!content.has_error());
         }
     }
 }
