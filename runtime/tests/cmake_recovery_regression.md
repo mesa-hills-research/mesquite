@@ -6,7 +6,7 @@ an exposed `(` in the port, around byte 3335 in a malformed quoted variable
 reference.
 
 The bucket already passed at revision `9b5a105` and was reverified after the
-merged fixes through `6df21f5`. The scanner initialization/reset correction is
+merged fixes through `41bd48a`. The scanner initialization/reset correction is
 already merged; no additional runtime or scanner behavior change is needed.
 
 ## Root cause and existing correction
@@ -31,7 +31,7 @@ scanners.
 
 ## Verification
 
-All checks below were rerun at `6df21f5`; the assigned input passed before
+All checks below were rerun at `41bd48a`; the assigned input passed before
 any changes. Existing scanner and parser regressions already cover the reduced
 Registry-query expression, including single-byte input chunks and incremental
 repair/restoration, so no duplicate test or further behavior change was needed.
