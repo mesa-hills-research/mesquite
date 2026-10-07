@@ -6,7 +6,7 @@ an exposed `(` in the port, around byte 3335 in a malformed quoted variable
 reference.
 
 The bucket already passed at revision `9b5a105` and was reverified after the
-merged fixes through `b21cac4`. The scanner initialization/reset correction is
+merged fixes through `d490ab6`. The scanner initialization/reset correction is
 already merged; no additional runtime or scanner behavior change is needed.
 
 ## Root cause and existing correction
@@ -25,10 +25,13 @@ scanner unit tests cover fresh/reset recovery, delimiter-level reset, empty
 content at EOF, invalid snapshot lengths, and native-endian state round trips.
 They also cover leading whitespace inside malformed quoted variable names,
 the same recovery scenario as `${CMAKE_ CURRENT_SOURCE_DIR}` in this bucket.
+The parser-level `cmake_quoted_variable_recovery` test additionally checks flat
+ERROR children, exact ranges, and progress callbacks with fresh and reused
+scanners.
 
 ## Verification
 
-All checks below were rerun at `b21cac4`.
+All checks below were rerun at `d490ab6`.
 
 - `run_oracle(inputs = "bucket:4d6cc948")`: 1/1 passes; incremental off,
   queries on.
@@ -44,14 +47,16 @@ All checks below were rerun at `b21cac4`.
   covering recovery tree structure with fresh and reused scanners.
 - `cargo test -p ts_port --test cmake_command_recovery`: 1 test passes,
   covering malformed variable references with fresh and reused scanners.
-- `cargo clippy -p ts_port_cmake --all-targets -- -D warnings`: passes.
+- `cargo test -p ts_port`: all 212 unit tests and all integration tests pass,
+  including `cmake_quoted_variable_recovery`.
+- `cargo clippy -p ts_port_cmake -p ts_port --all-targets -- -D warnings`: passes.
 
 This follow-up changes only this verification note; it introduces no deviation
 from C and no new unsafe code.
 
 ## ERROR range bucket `e0b0bff8`
 
-Reverified at `6eb07f2`: all five reported inputs already pass with the merged
+Reverified at `c373f7e`: all five reported inputs already pass with the merged
 scanner initialization/reset correction above. In particular, recovery from
 byte 5 of `E_sleep-no-args-stderr.cmake` emits bracket content through byte 72,
 including the final newline. The enclosing ERROR therefore reaches EOF, rather
@@ -71,8 +76,10 @@ Checks rerun for this bucket:
   (including incremental and query checks), and 9878/9878 fresh inputs pass.
 - `cargo check --workspace --all-targets`: passes with only the pre-existing
   host-owned generated YAML lexer warning noted above.
-- `cargo test -p ts_port_cmake`: 21 tests pass.
-- `cargo clippy -p ts_port_cmake --all-targets -- -D warnings`: passes.
+- `cargo test -p ts_port_cmake`: 24 tests pass.
+- `cargo test -p ts_port --test cmake_error_ranges`: both parser regressions pass.
+- `cargo test -p ts_port`: all unit, integration, and doc tests pass.
+- `cargo clippy -p ts_port_cmake -p ts_port --all-targets -- -D warnings`: passes.
 
 This verification adds no C deviations, unsafe code, or generated-file changes.
 
@@ -85,11 +92,14 @@ and point ranges through the final newline, and zero progress callbacks. Each
 case also runs after bracket arguments and bracket comments on the same parser
 to exercise scanner reset through the public API, not just scanner unit tests.
 
-Revalidation: bucket **5/5**, CMake gate **270/270**, and fresh **9878/9878** pass;
-`cargo check --workspace --all-targets`, `cargo test -p ts_port`, and
-`cargo test -p ts_port_cmake` pass (23 scanner/grammar tests). Strict clippy for
-both packages and all their targets passes. Workspace check still reports only
-the existing host-owned generated YAML lexer warning described above.
+Revalidation at `c373f7e`: bucket **5/5**, CMake gate **270/270**, and fresh
+**9878/9878** pass. `cargo check --workspace --all-targets`,
+`cargo test -p ts_port`, and `cargo test -p ts_port_cmake` pass (24
+scanner/grammar tests). The two `cmake_error_ranges` parser tests also pass
+when run separately. Strict clippy for both packages and all their targets
+passes. Workspace check still reports only the existing host-owned generated
+YAML lexer warning described above. The bucket was already resolved on this
+checkout; this revalidation changes no scanner or runtime behavior.
 
 ## Empty recovery-content bucket `f5e2762e`
 
