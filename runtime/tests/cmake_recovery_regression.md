@@ -59,13 +59,13 @@ This follow-up changes only this verification note; it introduces no deviation
 from C and no new unsafe code.
 
 
-### Revalidation of `4d6cc948` at `cabce01`
+### Revalidation of `4d6cc948` at `3e39027`
 
 The assigned Registry-query input still passes before any new changes, as it did
-at `9c27be8` and `88489b8`. Direct comparison with the current C scanner confirms
+at `cabce01`, `9c27be8`, and `88489b8`. Direct comparison with the current C scanner confirms
 that the merged zero-valued creation/reset behavior above is the required
 correction; no additional runtime change is warranted. The checks below were
-rerun at `cabce01`,
+rerun at `3e39027`,
 including the parser regression with both fresh and reused scanner state,
 single-byte input chunks, and incremental repair/restoration. The reduced
 Registry-query expression is already present in both scanner and parser tests;
@@ -255,8 +255,8 @@ changes are introduced.
 
 ## Unterminated-call bucket `7f8795fb`
 
-Reverified at `b5edaa9` (also previously at `40208fa` and `a4425c2`): all
-three reported inputs already pass on the starting checkout with the merged scanner
+Reverified at `9a8563b`: all three reported inputs already pass on the starting
+checkout with the merged scanner
 initialization/reset correction above. The current C scanner uses
 `ts_calloc` and clears both fields on empty or invalid-length snapshots, matching
 the Rust implementation. This allows recovery content without an opener:
@@ -273,7 +273,7 @@ input chunks. The earlier verification note incorrectly described all three coun
 as zero; the existing tests already assert the correct counts. No additional
 behavior change or duplicate test is needed.
 
-Validation rerun for this bucket at `b5edaa9`:
+Validation rerun for this bucket at `9a8563b`:
 
 - `run_oracle(inputs = "bucket:7f8795fb")`: 3/3 pass.
 - `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs
@@ -282,7 +282,7 @@ Validation rerun for this bucket at `b5edaa9`:
   in host-owned `grammars/yaml/src/lex.rs:20` noted above.
 - `cargo test -p ts_port_cmake`: 24 tests pass.
 - `cargo test -p ts_port`: all unit and integration tests pass, including the
-  three `cmake_unterminated_call_recovery` tests, which now also assert each
+  three `cmake_unterminated_call_recovery` tests, which also assert each
   direct ERROR child's kind, symbol id, range, flags, and child count.
 - `cargo clippy -p ts_port -p ts_port_cmake --all-targets -- -D warnings`: passes.
 - `cargo clippy --workspace --all-targets -- -D warnings`: blocked by the
