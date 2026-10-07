@@ -6,7 +6,7 @@ an exposed `(` in the port, around byte 3335 in a malformed quoted variable
 reference.
 
 The bucket already passed at revision `9b5a105` and was reverified after the
-merged fixes through `029b957`. The scanner initialization/reset correction is
+merged fixes through `6df21f5`. The scanner initialization/reset correction is
 already merged; no additional runtime or scanner behavior change is needed.
 
 ## Root cause and existing correction
@@ -31,7 +31,7 @@ scanners.
 
 ## Verification
 
-All checks below were rerun at `029b957`; the assigned input passed before
+All checks below were rerun at `6df21f5`; the assigned input passed before
 any changes. Existing scanner and parser regressions already cover the reduced
 Registry-query expression, including single-byte input chunks and incremental
 repair/restoration, so no duplicate test or further behavior change was needed.
@@ -51,7 +51,7 @@ repair/restoration, so no duplicate test or further behavior change was needed.
 - `cargo test -p ts_port --test cmake_command_recovery`: 2 tests pass,
   covering malformed variable references with fresh and reused scanners.
 - `cargo test -p ts_port`: all 212 unit tests and all integration tests pass,
-  including both `cmake_quoted_variable_recovery` tests, which cover fresh/reused
+  including all three `cmake_quoted_variable_recovery` tests, which cover fresh/reused
   scanners, single-byte input chunks, and incremental repair/restoration.
 - `cargo clippy -p ts_port_cmake -p ts_port --all-targets -- -D warnings`: passes.
 
