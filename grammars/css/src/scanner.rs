@@ -16,6 +16,13 @@ fn is_space(c: i32) -> bool {
     matches!(c, 0x09..=0x0d | 0x20)
 }
 
+// The Lexer contract guarantees zero lookahead at EOF. Avoid a dynamic EOF
+// call for every ordinary character, but still distinguish an embedded NUL
+// from the end of input (including the end of the included ranges).
+fn at_eof(lexer: &dyn Lexer, lookahead: i32) -> bool {
+    lookahead == 0 && lexer.eof()
+}
+
 impl ExternalScanner for Scanner {
     fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
         if valid_symbols[ERROR_RECOVERY] {
@@ -49,7 +56,7 @@ impl ExternalScanner for Scanner {
                         return false;
                     }
                     loop {
-                        if matches!(lookahead, 0x3b | 0x7d) || lexer.eof() {
+                        if matches!(lookahead, 0x3b | 0x7d) || at_eof(lexer, lookahead) {
                             return false;
                         }
                         if lookahead == 0x7b {
@@ -82,7 +89,7 @@ impl ExternalScanner for Scanner {
                 // its unconditional semicolon/closing-brace loop terminators,
                 // even while inside a comment.
                 let mut in_comment = false;
-                while !matches!(lookahead, 0x3b | 0x7d) && !lexer.eof() {
+                while !matches!(lookahead, 0x3b | 0x7d) && !at_eof(lexer, lookahead) {
                     lexer.advance(false);
                     lookahead = lexer.lookahead();
                     match lookahead {
@@ -106,7 +113,7 @@ impl ExternalScanner for Scanner {
                 }
 
                 // At EOF, prefer an erroneous pseudo class over a property.
-                return lexer.eof();
+                return at_eof(lexer, lookahead);
             }
         }
 
@@ -258,7 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn pseudo_class_marks_only_the_colon_and_preserves_callback_order() {
+    fn pseudo_class_marks_only_the_colon_and_preserves_advance_order() {
         let (accepted, lexer) = scan(" \t:x{", [false, true, false]);
         assert!(accepted);
         assert_eq!(lexer.end, Some(3));
@@ -270,7 +277,6 @@ mod tests {
                 Event::Advance(2, false),
                 Event::MarkEnd(3),
                 Event::Result(PSEUDO_CLASS_SELECTOR_COLON as u16),
-                Event::Eof(3),
                 Event::Advance(3, false),
             ]
         );
@@ -359,6 +365,58 @@ mod tests {
         }
         let (_, lexer) = scan(" :hover {", [true, true, true]);
         assert_eq!(lexer.lookahead_calls.get(), 0);
+    }
+
+    #[test]
+    fn eof_is_only_queried_at_zero_lookahead() {
+        for input in [
+            " :hover {",
+            " :hover;",
+            " :hover}",
+            " :hover",
+            ":hover {",
+            ":hover;",
+            ":hover}",
+            ":hover",
+            ":",
+            ":x/* unterminated",
+            ":x/* { */value {",
+            ":x/* ; */value {",
+            ":x/* } */value {",
+        ] {
+            for flags in [[true, true, false], [false, true, false]] {
+                let (_, lexer) = scan(input, flags);
+                for event in lexer.events.into_inner() {
+                    if let Event::Eof(position) = event {
+                        assert_eq!(position, lexer.input.len(), "{input:?} {flags:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn embedded_nul_is_not_eof_in_either_colon_scan() {
+        for (input, accepted) in [
+            (":\0x{", true),
+            (":\0x;", false),
+            (":\0x}", false),
+            (":x/\0{;", true),
+            (":x/*\0{*/;", false),
+            (":x/*\0{*/{", true),
+            (":x/*\0;*/{", false),
+            (":x/*\0}*/{", false),
+        ] {
+            assert_eq!(scan(input, [false, true, false]).0, accepted, "{input:?}");
+        }
+        for (input, accepted) in [
+            (" :\0x{", true),
+            (" :\0x;", false),
+            (" :\0x}", false),
+            (" :\0x", false),
+        ] {
+            assert_eq!(scan(input, [true, true, false]).0, accepted, "{input:?}");
+        }
     }
 
     #[test]
