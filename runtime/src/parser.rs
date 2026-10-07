@@ -1020,6 +1020,7 @@ pub(crate) fn ts_parser__shift(
     }
 }
 
+#[inline]
 pub(crate) fn ts_parser__reduce(
     parser: &mut Parser,
     version: StackVersion,
@@ -1031,15 +1032,19 @@ pub(crate) fn ts_parser__reduce(
     end_of_non_terminal_extra: bool,
     replace_version: bool,
 ) -> StackVersion {
-    // A committed reduction on the only active version needs neither a
-    // temporary version nor a slice worklist. Keep this path separate from the
-    // general reduction's grouping, selection, and version-merging machinery.
-    if replace_version
-        && let Some(mut children) = ts_stack_pop_count_in_place(&mut parser.stack, count)
-    {
+    let popped = if replace_version {
+        if count == 0 {
+            ts_stack_pop_count_in_place(&mut parser.stack, 0).map(|children| {
+                (children, ts_stack_state(&parser.stack, version), false)
+            })
+        } else {
+            ts_stack_prepare_reduction(&mut parser.stack, count)
+                .map(|(children, state)| (children, state, true))
+        }
+    } else { None };
+    if let Some((mut children, state, retained)) = popped {
         let language = parser.language.unwrap();
         ts_subtree_array_remove_trailing_extras(&mut children, &mut parser.trailing_extras);
-        let state = ts_stack_state(&parser.stack, version);
         let next_state = parser.parse_table_cache.next_state(&language, state, symbol);
         let parent = ts_subtree_new_node_with(
             symbol,
@@ -1063,14 +1068,18 @@ pub(crate) fn ts_parser__reduce(
                 branch.dynamic_precedence += dynamic_precedence;
             },
         );
-        ts_stack_push(
-            &mut parser.stack,
-            &mut parser.tree_pool,
-            version,
-            parent,
-            false,
-            next_state,
-        );
+        if retained {
+            ts_stack_replace_reduced_top(&mut parser.stack, parent, next_state);
+        } else {
+            ts_stack_push(
+                &mut parser.stack,
+                &mut parser.tree_pool,
+                version,
+                parent,
+                false,
+                next_state,
+            );
+        }
         if !parser.trailing_extras.is_empty() {
             for extra in parser.trailing_extras.drain(..) {
                 ts_stack_push(

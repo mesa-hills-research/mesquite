@@ -724,6 +724,95 @@ pub(crate) fn ts_stack_pop_count(
     )
 }
 
+/// Prepare a one-child committed reduction without recycling its stack slot.
+/// The child handle moves out, but the unique edge still owns its predecessor.
+#[inline]
+pub(crate) fn ts_stack_take_top_for_reduction(stack: &mut Stack) -> Option<(Vec<Subtree>, StateId)> {
+    if stack.heads.len() != 1 || stack.heads[0].status != StackStatus::Active {
+        return None;
+    }
+    let top = stack.heads[0].node;
+    let node = stack.arena.node_mut(top);
+    if node.ref_count != 1 || node.link_count != 1 {
+        return None;
+    }
+    let link = node.links.first.as_mut().expect("initialized stack link");
+    if ts_subtree_extra(&link.subtree) { return None; }
+    let child = std::mem::take(&mut link.subtree);
+    let predecessor = link.node;
+    let children = if child.is_null() { Vec::new() } else { vec![child] };
+    stack.slices.clear();
+    stack.iterators.clear();
+    Some((children, stack.arena.node(predecessor).state))
+}
+
+#[inline]
+pub(crate) fn ts_stack_prepare_reduction(stack: &mut Stack, count: u32) -> Option<(Vec<Subtree>, StateId)> {
+    if count == 1 {
+        ts_stack_take_top_for_reduction(stack).or_else(|| prepare_reduction_general(stack, count))
+    } else {
+        prepare_reduction_general(stack, count)
+    }
+}
+
+fn prepare_reduction_general(stack: &mut Stack, count: u32) -> Option<(Vec<Subtree>, StateId)> {
+    if count == 0 || stack.heads.len() != 1 || stack.heads[0].status != StackStatus::Active { return None; }
+    let top = stack.heads[0].node;
+    let mut node = top;
+    let mut remaining = count;
+    let mut subtree_count = 0;
+    while remaining > 0 {
+        let data = stack.arena.node(node);
+        if data.ref_count != 1 || data.link_count != 1 { return None; }
+        let link = data.links.first.as_ref().expect("initialized stack link");
+        if link.subtree.is_null() { remaining -= 1; }
+        else { subtree_count += 1; if !ts_subtree_extra(&link.subtree) { remaining -= 1; } }
+        node = link.node;
+    }
+    let goal = node;
+    let state = stack.arena.node(goal).state;
+    let mut subtrees = Vec::with_capacity(subtree_count);
+    node = top;
+    loop {
+        let data = stack.arena.node_mut(node);
+        let link = data.links.first.as_mut().expect("initialized stack link");
+        let next = link.node;
+        let child = std::mem::take(&mut link.subtree);
+        if !child.is_null() { subtrees.push(child); }
+        if next == goal { break; }
+        stack.arena.nodes[node.0] = None;
+        stack.arena.free.push(node);
+        node = next;
+    }
+    stack.heads[0].node = node;
+    subtrees.reverse();
+    stack.slices.clear();
+    stack.iterators.clear();
+    Some((subtrees, state))
+}
+
+/// Complete the matching committed replacement. No edge reference count changes:
+/// the same unique node continues to own the same predecessor.
+#[inline]
+pub(crate) fn ts_stack_replace_reduced_top(stack: &mut Stack, parent: Subtree, state: StateId) {
+    let top = stack.heads[0].node;
+    let predecessor = stack.arena.node(top).links.first.as_ref().unwrap().node;
+    let previous = stack.arena.node(predecessor);
+    let position = length_add(previous.position, ts_subtree_total_size(&parent));
+    let error_cost = previous.error_cost.wrapping_add(ts_subtree_error_cost(&parent));
+    let node_count = previous.node_count.wrapping_add(stack__subtree_node_count(&parent));
+    let dynamic_precedence = previous.dynamic_precedence.wrapping_add(ts_subtree_dynamic_precedence(&parent));
+    let node = stack.arena.node_mut(top);
+    node.state = state;
+    node.position = position;
+    node.error_cost = error_cost;
+    node.node_count = node_count;
+    node.dynamic_precedence = dynamic_precedence;
+    let link = node.links.first.as_mut().unwrap();
+    link.subtree = parent;
+    link.is_pending = false;
+}
+
 /// Fuse a single-path pop with removal of its original version. The caller must
 /// be committed to replacing that version (no alternative reduction/shift).
 /// Refuse shared or branching prefixes without changing anything, so the full
