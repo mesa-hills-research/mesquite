@@ -17,6 +17,9 @@ use ts_port_tables::{ExternalScanner, LexMode, SERIALIZATION_BUFFER_SIZE};
 #[cfg(test)]
 #[path = "parser_tests_1.rs"]
 mod parser1_tests;
+#[cfg(test)]
+#[path = "parser_logging_tests.rs"]
+mod parser_logging_tests;
 pub(crate) const MAX_VERSION_COUNT: u32 = 6;
 pub(crate) const MAX_VERSION_COUNT_OVERFLOW: u32 = 4;
 pub(crate) const MAX_SUMMARY_DEPTH: u32 = 16;
@@ -492,6 +495,7 @@ pub(crate) fn ts_parser__lex<const LOGGING: bool>(
     version: StackVersion,
     parse_state: StateId,
 ) -> Subtree {
+    // Specialize the diagnostic guard as well as its lazy argument evaluation.
     macro_rules! parser_log {
         ($parser:expr, $($arg:tt)*) => {
             if LOGGING && ($parser.logger.is_some() || $parser.dot_graph.is_some()) {
@@ -698,11 +702,11 @@ pub(crate) fn ts_parser__lex<const LOGGING: bool>(
         )
     };
     if LOGGING {
-    parser_log_lookahead!(
-        parser,
-        ts_language_symbol_name(&language, ts_subtree_symbol(&result)).unwrap_or(""),
-        ts_subtree_total_size(&result).bytes
-    );
+        parser_log_lookahead!(
+            parser,
+            ts_language_symbol_name(&language, ts_subtree_symbol(&result)).unwrap_or(""),
+            ts_subtree_total_size(&result).bytes
+        );
     }
     result
 }
@@ -1798,6 +1802,7 @@ pub(crate) fn ts_parser__advance<const LOGGING: bool>(
     version: StackVersion,
     allow_node_reuse: bool,
 ) -> bool {
+    // Match the ordinary lazy macro, but remove the guard on the quiet path.
     macro_rules! parser3_log {
         ($parser:expr, $message:expr $(,)?) => {
             if LOGGING && ($parser.logger.is_some() || $parser.dot_graph.is_some()) {
@@ -1817,6 +1822,8 @@ pub(crate) fn ts_parser__advance<const LOGGING: bool>(
     let mut lookahead = Subtree::Null;
     let mut table_entry = TableEntry::default();
 
+    // An exhausted cursor returns Null without changing parser state. Avoid
+    // entering the full reuse traversal for every token of a fresh parse.
     if allow_node_reuse && !parser.reusable_node.stack.is_empty() {
         lookahead = ts_parser__reuse_node(
             parser,
@@ -1952,7 +1959,9 @@ pub(crate) fn ts_parser__advance<const LOGGING: bool>(
                 last_reduction_version,
                 version,
             );
-            if LOGGING { parser3_log_stack(parser); }
+            if LOGGING {
+                parser3_log_stack(parser);
+            }
             state = ts_stack_state(&parser.stack, version);
             if lookahead.is_null() {
                 needs_lex = true;
@@ -2015,7 +2024,7 @@ pub(crate) fn ts_parser__advance<const LOGGING: bool>(
 #[inline]
 pub(crate) fn ts_parser__condense_stack(parser: &mut Parser) -> u32 {
     // An active sole version cannot merge, be pruned, or need resuming. Keep
-    // the version-status read: it also lowers the saved error node baseline.
+    // the version-status side effect of lowering the saved error node baseline.
     if let Some(cost) = ts_stack_single_active_error_cost(&mut parser.stack) {
         return cost;
     }
@@ -2338,6 +2347,8 @@ pub(crate) fn ts_parser_parse(
     old_tree: Option<&Tree>,
     context: &mut ParseContext<'_, '_>,
 ) -> Option<Tree> {
+    // The exclusive parser borrow keeps diagnostic configuration fixed during
+    // this call. Reselect on every entry, including after cancellation/resume.
     if parser.logger.is_some() || parser.dot_graph.is_some() {
         parse_with_logging::<true>(parser, old_tree, context)
     } else {
@@ -2394,7 +2405,9 @@ fn parse_with_logging<const LOGGING: bool>(
                 parser.lexer.debug_buffer = "parse_after_edit".into();
                 ts_parser__log(parser);
             }
-            if LOGGING && let Some(output) = parser.dot_graph.as_mut() {
+            if LOGGING
+                && let Some(output) = parser.dot_graph.as_mut()
+            {
                 let _ = ts_subtree_print_dot_graph(&parser.old_tree, &language, output);
                 let _ = output.write_all(b"\n");
             }
@@ -2446,7 +2459,8 @@ fn parse_with_logging<const LOGGING: bool>(
                         ts_parser__log(parser);
                     }
 
-                    let advanced = ts_parser__advance::<LOGGING>(parser, context, version, allow_node_reuse);
+                    let advanced =
+                        ts_parser__advance::<LOGGING>(parser, context, version, allow_node_reuse);
                     if !advanced {
                         if parser.has_scanner_error {
                             ts_parser_reset(parser);
@@ -2456,7 +2470,9 @@ fn parse_with_logging<const LOGGING: bool>(
                         return None;
                     }
 
-                    if LOGGING && let Some(output) = parser.dot_graph.as_mut() {
+                    if LOGGING
+                        && let Some(output) = parser.dot_graph.as_mut()
+                    {
                         let _ = ts_stack_print_dot_graph(&mut parser.stack, &language, output);
                         let _ = output.write_all(b"\n\n");
                     }
@@ -2505,7 +2521,9 @@ fn parse_with_logging<const LOGGING: bool>(
         parser.lexer.debug_buffer = "done".into();
         ts_parser__log(parser);
     }
-    if LOGGING && let Some(output) = parser.dot_graph.as_mut() {
+    if LOGGING
+        && let Some(output) = parser.dot_graph.as_mut()
+    {
         let _ = ts_subtree_print_dot_graph(&parser.finished_tree, &language, output);
         let _ = output.write_all(b"\n");
     }
