@@ -74,8 +74,8 @@ unused assignment noted above.
 
 Bucket `548436bf` was already resolved when reassigned on baselines `ddcce0a`,
 `91c0515`, `e2cf12d`, `549fdf3`, `b55992b`, `156e4d4`, `3f877ff`, `04c4945`,
-`dc3e913`, and `b5fc1cc`. Compared scanner creation, reset, and bracket-content
-scanning against the current C source;
+`dc3e913`, `b5fc1cc`, `4d2f528`, and `3187cdd`. Compared scanner creation, reset,
+and bracket-content scanning against the current C source;
 the merged implementation still matches, including consuming embedded NULs until
 actual EOF. Reran the bucket (4/4), all CMake oracle inputs (gate 270/270 with
 incremental/query checks; fresh repository 9,878/9,878), all 24 scanner tests, and
