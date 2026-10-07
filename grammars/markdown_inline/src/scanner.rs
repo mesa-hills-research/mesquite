@@ -42,15 +42,22 @@ pub(crate) struct Scanner {
 fn parse_leaf_delimiter(
     lexer: &mut dyn Lexer,
     delimiter_length: &mut u8,
-    valid_symbols: &[bool],
+    valid_symbols: &[bool; 15],
     delimiter: u8,
     open_token: Token,
     close_token: Token,
 ) -> bool {
+    // Dispatch already checked the first delimiter. Keep one lookahead per
+    // position; the closing-run search can reuse the final opening lookahead.
     let mut level = 0u8;
-    while lexer.lookahead() == i32::from(delimiter) {
+    let mut lookahead;
+    loop {
         lexer.advance(false);
         level = level.wrapping_add(1);
+        lookahead = lexer.lookahead();
+        if lookahead != i32::from(delimiter) {
+            break;
+        }
     }
     lexer.mark_end();
     if level == *delimiter_length && valid_symbols[close_token as usize] {
@@ -60,20 +67,9 @@ fn parse_leaf_delimiter(
     }
     if valid_symbols[open_token as usize] {
         // Look for a matching closing run, but leave the token end at the end
-        // of the opening run. C uses size_t here, unlike the opening u8 count.
-        let mut close_level = 0usize;
-        while !lexer.eof() {
-            if lexer.lookahead() == i32::from(delimiter) {
-                close_level = close_level.wrapping_add(1);
-            } else {
-                if close_level == usize::from(level) {
-                    break;
-                }
-                close_level = 0;
-            }
-            lexer.advance(false);
-        }
-        if close_level == usize::from(level) {
+        // of the opening run. The opening count wraps; closing runs use size_t
+        // in C. A wrapped zero already matches the empty run at this position.
+        if level == 0 || find_closing_run(lexer, lookahead, delimiter, usize::from(level)) {
             *delimiter_length = level;
             lexer.set_result_symbol(open_token as u16);
             return true;
@@ -86,13 +82,46 @@ fn parse_leaf_delimiter(
     false
 }
 
+/// Alternate ordinary content and delimiter runs, instead of resetting and
+/// comparing a closing counter on every ordinary character.
+fn find_closing_run(
+    lexer: &mut dyn Lexer,
+    mut lookahead: i32,
+    delimiter: u8,
+    level: usize,
+) -> bool {
+    loop {
+        while lookahead != i32::from(delimiter) {
+            // Zero can be an embedded NUL: only eof() distinguishes it from
+            // end-of-input. Nonzero content needs no virtual EOF query.
+            if lookahead == 0 && lexer.eof() {
+                return false;
+            }
+            lexer.advance(false);
+            lookahead = lexer.lookahead();
+        }
+        let mut close_level = 0usize;
+        loop {
+            close_level = close_level.wrapping_add(1);
+            lexer.advance(false);
+            lookahead = lexer.lookahead();
+            if lookahead != i32::from(delimiter) {
+                break;
+            }
+        }
+        if close_level == level {
+            return true;
+        }
+    }
+}
+
 impl Scanner {
     // C's parse_star, parse_underscore, and parse_tilde have identical logic,
     // differing only in the character and the two token ids.
     fn parse_emphasis_delimiter(
         &mut self,
         lexer: &mut dyn Lexer,
-        valid_symbols: &[bool],
+        valid_symbols: &[bool; 15],
         delimiter: u8,
         open_token: Token,
         close_token: Token,
@@ -116,19 +145,18 @@ impl Scanner {
         }
         lexer.mark_end();
         let mut delimiter_count = 1u8;
-        while lexer.lookahead() == i32::from(delimiter) {
+        let mut lookahead = lexer.lookahead();
+        while lookahead == i32::from(delimiter) {
             delimiter_count = delimiter_count.wrapping_add(1);
             lexer.advance(false);
+            lookahead = lexer.lookahead();
         }
-        let line_end = lexer.lookahead() == i32::from(b'\n')
-            || lexer.lookahead() == i32::from(b'\r')
-            || lexer.eof();
+        let line_end = matches!(lookahead, 10 | 13) || (lookahead == 0 && lexer.eof());
         if valid_symbols[open_token as usize] || valid_symbols[close_token as usize] {
             self.num_emphasis_delimiters_left = delimiter_count.wrapping_sub(1);
-            let next_symbol_whitespace = line_end
-                || lexer.lookahead() == i32::from(b' ')
-                || lexer.lookahead() == i32::from(b'\t');
-            let next_symbol_punctuation = is_punctuation(lexer.lookahead());
+            let next_symbol_whitespace =
+                line_end || lookahead == i32::from(b' ') || lookahead == i32::from(b'\t');
+            let next_symbol_punctuation = is_punctuation(lookahead);
             if valid_symbols[close_token as usize]
                 && !valid_symbols[Token::LastTokenWhitespace as usize]
                 && (!valid_symbols[Token::LastTokenPunctuation as usize]
@@ -158,6 +186,9 @@ impl Scanner {
 
 impl ExternalScanner for Scanner {
     fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
+        let valid_symbols = valid_symbols
+            .first_chunk::<15>()
+            .expect("external token flags");
         if valid_symbols[Token::TriggerError as usize] {
             lexer.set_result_symbol(Token::Error as u16);
             return true;
@@ -215,13 +246,22 @@ impl ExternalScanner for Scanner {
     }
 
     fn deserialize(&mut self, buffer: &[u8]) {
-        *self = Self::default();
-        if !buffer.is_empty() {
-            self.state = buffer[0];
-            self.code_span_delimiter_length = buffer[1];
-            self.latex_span_delimiter_length = buffer[2];
-            self.num_emphasis_delimiters_left = buffer[3];
-        }
+        // Check the fixed snapshot width once rather than zeroing the state
+        // and checking each byte separately on every external scan.
+        let &[state, code_span_delimiter_length, latex_span_delimiter_length, num_emphasis_delimiters_left] =
+            if buffer.is_empty() {
+                &[0; 4]
+            } else {
+                buffer
+                    .first_chunk::<4>()
+                    .expect("four-byte scanner snapshot")
+            };
+        *self = Self {
+            state,
+            code_span_delimiter_length,
+            latex_span_delimiter_length,
+            num_emphasis_delimiters_left,
+        };
     }
 }
 
@@ -233,7 +273,7 @@ pub(crate) fn create() -> Box<dyn ExternalScanner> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
     #[derive(Debug, PartialEq, Eq)]
     enum Call {
@@ -249,6 +289,7 @@ mod tests {
         end: Option<usize>,
         symbol: u16,
         calls: RefCell<Vec<Call>>,
+        lookahead_calls: Cell<usize>,
     }
 
     impl TestLexer {
@@ -259,12 +300,14 @@ mod tests {
                 end: None,
                 symbol: u16::MAX,
                 calls: RefCell::default(),
+                lookahead_calls: Cell::new(0),
             }
         }
     }
 
     impl Lexer for TestLexer {
         fn lookahead(&self) -> i32 {
+            self.lookahead_calls.set(self.lookahead_calls.get() + 1);
             self.input.get(self.position).copied().unwrap_or(0)
         }
 
@@ -375,11 +418,8 @@ mod tests {
                 [
                     Call::Advance(0),
                     Call::MarkEnd(1),
-                    Call::Eof(1),
                     Call::Advance(1),
-                    Call::Eof(2),
                     Call::Advance(2),
-                    Call::Eof(3),
                     Call::Symbol(open as u16),
                 ]
             );
@@ -473,7 +513,6 @@ mod tests {
                     Call::MarkEnd(1),
                     Call::Advance(1),
                     Call::Advance(2),
-                    Call::Eof(3),
                     Call::Symbol(open as u16),
                 ]
             );
@@ -529,13 +568,11 @@ mod tests {
                     assert_eq!(lexer.symbol, token as u16);
                 }
                 if matches!(suffix, "\n" | "\r") {
-                    assert!(
-                        !lexer
-                            .calls
-                            .borrow()
-                            .iter()
-                            .any(|call| matches!(call, Call::Eof(_)))
-                    );
+                    assert!(!lexer
+                        .calls
+                        .borrow()
+                        .iter()
+                        .any(|call| matches!(call, Call::Eof(_))));
                 }
             }
 
@@ -557,6 +594,190 @@ mod tests {
                 assert!(!scanner.scan(&mut lexer, &valid(&[open])));
                 assert_eq!(scanner.num_emphasis_delimiters_left, remaining);
                 assert_eq!((lexer.end, lexer.position), (Some(1), count));
+            }
+        }
+    }
+
+    // Original C control flow: compare all advances, marks, results and state,
+    // including failed scans. EOF queries themselves are pure and can be elided.
+    fn reference_leaf_delimiter(
+        lexer: &mut dyn Lexer,
+        delimiter_length: &mut u8,
+        valid_symbols: &[bool],
+        delimiter: u8,
+        open_token: Token,
+        close_token: Token,
+    ) -> bool {
+        let mut level = 0u8;
+        while lexer.lookahead() == i32::from(delimiter) {
+            lexer.advance(false);
+            level = level.wrapping_add(1);
+        }
+        lexer.mark_end();
+        if level == *delimiter_length && valid_symbols[close_token as usize] {
+            *delimiter_length = 0;
+            lexer.set_result_symbol(close_token as u16);
+            return true;
+        }
+        if valid_symbols[open_token as usize] {
+            // Look for a matching closing run, but leave the token end at the end
+            // of the opening run. C uses size_t here, unlike the opening u8 count.
+            let mut close_level = 0usize;
+            while !lexer.eof() {
+                if lexer.lookahead() == i32::from(delimiter) {
+                    close_level = close_level.wrapping_add(1);
+                } else {
+                    if close_level == usize::from(level) {
+                        break;
+                    }
+                    close_level = 0;
+                }
+                lexer.advance(false);
+            }
+            if close_level == usize::from(level) {
+                *delimiter_length = level;
+                lexer.set_result_symbol(open_token as u16);
+                return true;
+            }
+            if valid_symbols[Token::UnclosedSpan as usize] {
+                lexer.set_result_symbol(Token::UnclosedSpan as u16);
+                return true;
+            }
+        }
+        false
+    }
+
+    fn compare_leaf_with_reference(input: &[i32], delimiter: u8, length: u8, flags: u8) {
+        let (open, close, length_index) = if delimiter == b'`' {
+            (Token::CodeSpanStart, Token::CodeSpanClose, 1)
+        } else {
+            (Token::LatexSpanStart, Token::LatexSpanClose, 2)
+        };
+        let mut valid_symbols = [false; 15];
+        valid_symbols[open as usize] = flags & 1 != 0;
+        valid_symbols[close as usize] = flags & 2 != 0;
+        valid_symbols[Token::UnclosedSpan as usize] = flags & 4 != 0;
+        let mut scanner = Scanner::default();
+        let mut state = [0xa5, 7, 8, 0xfe];
+        state[length_index] = length;
+        scanner.deserialize(&state);
+        let mut actual = TestLexer::new("");
+        actual.input.extend_from_slice(input);
+        let mut expected = TestLexer::new("");
+        expected.input.extend_from_slice(input);
+        let expected_result = reference_leaf_delimiter(
+            &mut expected,
+            &mut state[length_index],
+            &valid_symbols,
+            delimiter,
+            open,
+            close,
+        );
+        assert_eq!(scanner.scan(&mut actual, &valid_symbols), expected_result);
+        assert_eq!(snapshot(&mut scanner), state);
+        assert_eq!(actual.position, expected.position);
+        assert_eq!(actual.end, expected.end);
+        assert_eq!(actual.symbol, expected.symbol);
+        assert!(actual
+            .calls
+            .borrow()
+            .iter()
+            .filter(|call| !matches!(call, Call::Eof(_)))
+            .eq(expected
+                .calls
+                .borrow()
+                .iter()
+                .filter(|call| !matches!(call, Call::Eof(_)))));
+    }
+
+    #[test]
+    fn leaf_run_search_matches_c_for_all_short_suffixes_and_token_sets() {
+        for delimiter in *b"`$" {
+            // Exhaustive short suffixes include embedded NUL, which is not EOF.
+            for suffix_length in 0..=5 {
+                for mut pattern in 0..3usize.pow(suffix_length) {
+                    let suffix: Vec<_> = (0..suffix_length)
+                        .map(|_| {
+                            let character = [i32::from(delimiter), i32::from(b'x'), 0][pattern % 3];
+                            pattern /= 3;
+                            character
+                        })
+                        .collect();
+                    for opening_count in [1, 2] {
+                        let mut input = vec![i32::from(delimiter); opening_count];
+                        input.extend_from_slice(&suffix);
+                        for previous_length in [0, 1, 2] {
+                            for flags in 0..8 {
+                                compare_leaf_with_reference(
+                                    &input,
+                                    delimiter,
+                                    previous_length,
+                                    flags,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn wrapped_opening_counts_and_long_closing_runs_match_c() {
+        for delimiter in *b"`$" {
+            for opening_count in [255, 256, 257, 512, 513] {
+                for closing_count in [0, 1, 2, 255, 256, 257, 512, 513] {
+                    for following in [None, Some(0), Some(i32::from(b'!'))] {
+                        let mut input = vec![i32::from(delimiter); opening_count];
+                        input.push(0);
+                        input.extend(std::iter::repeat_n(i32::from(delimiter), closing_count));
+                        input.extend(following);
+                        for flags in 0..8 {
+                            compare_leaf_with_reference(&input, delimiter, 0, flags);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_span_content_uses_one_lookahead_per_position_and_no_eof_queries() {
+        let mut scanner = Scanner::default();
+        let mut lexer = TestLexer::new(&format!("`{}`!", "content".repeat(32)));
+        assert!(scanner.scan(&mut lexer, &valid(&[Token::CodeSpanStart])));
+        assert_eq!(lexer.lookahead_calls.get(), lexer.position + 1);
+        assert!(!lexer
+            .calls
+            .borrow()
+            .iter()
+            .any(|call| matches!(call, Call::Eof(_))));
+        assert_eq!(lexer.end, Some(1));
+    }
+
+    #[test]
+    fn emphasis_treats_nul_as_content_but_eof_as_whitespace() {
+        for (delimiter, open, _) in EMPHASIS {
+            let valid_symbols = valid(&[open, Token::LastTokenWhitespace]);
+            for (suffix, accepted) in [("\0", true), ("", false)] {
+                let mut scanner = Scanner::default();
+                let mut lexer = TestLexer::new(&format!("{delimiter}{suffix}"));
+                assert_eq!(scanner.scan(&mut lexer, &valid_symbols), accepted);
+                assert_eq!(lexer.lookahead_calls.get(), 2);
+                assert_eq!(lexer.position, 1);
+                assert_eq!(lexer.end, Some(1));
+                assert_eq!(
+                    lexer
+                        .calls
+                        .borrow()
+                        .iter()
+                        .filter(|call| matches!(call, Call::Eof(_)))
+                        .count(),
+                    1
+                );
+                if accepted {
+                    assert_eq!(lexer.symbol, open as u16);
+                }
             }
         }
     }
