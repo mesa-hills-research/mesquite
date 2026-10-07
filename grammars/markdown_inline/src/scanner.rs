@@ -71,12 +71,7 @@ fn parse_leaf_delimiter(
         // Look for a matching closing run, but leave the token end at the end
         // of the opening run. The opening count wraps; closing runs use size_t
         // in C. A wrapped zero already matches the empty run at this position.
-        let found_close = level == 0 || if delimiter == b'`' {
-            find_closing_run::<b'`'>(lexer, lookahead, usize::from(level))
-        } else {
-            find_closing_run::<b'$'>(lexer, lookahead, usize::from(level))
-        };
-        if found_close {
+        if level == 0 || find_closing_run(lexer, lookahead, delimiter, usize::from(level)) {
             *delimiter_length = level;
             lexer.set_result_symbol(open_token as u16);
             return true;
@@ -91,38 +86,33 @@ fn parse_leaf_delimiter(
 
 /// Alternate ordinary content and delimiter runs, instead of resetting and
 /// comparing a closing counter on every ordinary character.
-#[inline(never)]
-fn find_closing_run<const DELIMITER: u8>(
+fn find_closing_run(
     lexer: &mut dyn Lexer,
     mut lookahead: i32,
+    delimiter: u8,
     level: usize,
 ) -> bool {
     loop {
-        // Ordinary characters necessarily have bits outside the delimiter.
-        // Only the small set of submasks needs exact delimiter/EOF checks.
-        while lookahead & !i32::from(DELIMITER) != 0 {
-            lexer.advance(false);
-            lookahead = lexer.lookahead();
-        }
-        if lookahead == i32::from(DELIMITER) {
-            let mut close_level = 0usize;
-            loop {
-                close_level = close_level.wrapping_add(1);
-                lexer.advance(false);
-                lookahead = lexer.lookahead();
-                if lookahead != i32::from(DELIMITER) {
-                    break;
-                }
-            }
-            if close_level == level {
-                return true;
-            }
-        } else {
+        while lookahead != i32::from(delimiter) {
+            // Zero can be an embedded NUL: only eof() distinguishes it from
+            // end-of-input. Nonzero content needs no virtual EOF query.
             if lookahead == 0 && lexer.eof() {
                 return false;
             }
             lexer.advance(false);
             lookahead = lexer.lookahead();
+        }
+        let mut close_level = 0usize;
+        loop {
+            close_level = close_level.wrapping_add(1);
+            lexer.advance(false);
+            lookahead = lexer.lookahead();
+            if lookahead != i32::from(delimiter) {
+                break;
+            }
+        }
+        if close_level == level {
+            return true;
         }
     }
 }
@@ -407,6 +397,28 @@ mod tests {
             let mut lexer = TestLexer::new(input);
             assert!(!scanner.scan(&mut lexer, &valid(&[Token::CodeSpanStart])));
             assert!(lexer.calls.borrow().is_empty());
+        }
+    }
+
+    #[test]
+    fn dispatch_rejects_non_delimiters_without_state_or_lexer_effects() {
+        let mut scanner = Scanner::default();
+        let state = [0xfd, 7, 8, 3];
+        scanner.deserialize(&state);
+        let mut valid_symbols = [true; 15];
+        valid_symbols[Token::TriggerError as usize] = false;
+        // Include low-byte aliases of all delimiters, NUL, invalid scalar
+        // values, and non-ASCII scalars. Dispatch must compare full codepoints
+        // before narrowing the matched delimiter to a byte for its handler.
+        for codepoint in (0..=0x2ff).chain([i32::MIN, -1, 0xd800, 0x10ffff, i32::MAX]) {
+            if matches!(codepoint, 0x24 | 0x2a | 0x5f | 0x60 | 0x7e) {
+                continue;
+            }
+            let mut lexer = TestLexer::new("");
+            lexer.input = vec![codepoint];
+            assert!(!scanner.scan(&mut lexer, &valid_symbols), "{codepoint:x}");
+            assert!(lexer.calls.borrow().is_empty(), "{codepoint:x}");
+            assert_eq!(snapshot(&mut scanner), state, "{codepoint:x}");
         }
     }
 
@@ -725,6 +737,30 @@ mod tests {
                                     flags,
                                 );
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn span_content_classes_and_unicode_aliases_match_c() {
+        for delimiter in *b"`$" {
+            for content in (0..=0xff).chain([
+                -1,
+                0x100 + i32::from(delimiter),
+                0x10000 + i32::from(delimiter),
+                0x10ffff,
+            ]) {
+                for opening_count in [1, 2] {
+                    let mut input = vec![i32::from(delimiter); opening_count];
+                    input.extend([i32::from(b'x'), content, i32::from(b' ')]);
+                    input.extend(std::iter::repeat_n(i32::from(delimiter), opening_count));
+                    input.push(content);
+                    for previous_length in [0, 1, 2] {
+                        for flags in 0..8 {
+                            compare_leaf_with_reference(&input, delimiter, previous_length, flags);
                         }
                     }
                 }
