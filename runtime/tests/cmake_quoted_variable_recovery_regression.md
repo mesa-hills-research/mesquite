@@ -42,5 +42,22 @@ Checks rerun at `7fe8128`:
 - `cargo test -p ts_port_cmake`: **22 tests pass**.
 - `cargo clippy -p ts_port_cmake --all-targets -- -D warnings`: passes.
 
-This follow-up records verification only. It adds no runtime changes, deviations
+That follow-up recorded verification only, without runtime changes, deviations
 from C, unsafe code, or clippy warnings.
+
+## End-to-end regression
+
+A subsequent check at `80c0a0a` still passed all four bucket inputs and all
+270 gate / 9878 fresh CMake inputs. `cmake_quoted_variable_recovery.rs` now
+also verifies the two smallest inputs through the public parser API. It checks
+that the quote, dollar sign, and opening brace are direct children of the single
+`ERROR`, alongside the identifier, parenthesis, and recovery content. Assertions
+cover symbol IDs, named/extra/error/missing flags, byte/point ranges, child counts,
+and the zero progress-callback count. Each input is parsed both with a fresh
+scanner and after prior bracket argument/comment parses, exercising scanner reset.
+
+`cargo test -p ts_port --test cmake_quoted_variable_recovery`,
+`cargo check --workspace --all-targets`, and
+`cargo clippy -p ts_port --test cmake_quoted_variable_recovery -- -D warnings`
+pass; only the same pre-existing host-owned YAML warning remains in the workspace
+check. No additional runtime correction was necessary.
