@@ -69,3 +69,15 @@ incremental and query checks), fresh CMake 9,878/9,878, all 24 scanner tests, an
 the extended BOM regression pass. Workspace all-target checking and targeted
 strict clippy pass; the only workspace warning remains the host-owned YAML lexer
 unused assignment noted above.
+
+## Reverification on merged baseline `ddcce0a`
+
+Bucket `548436bf` was already resolved when reassigned on this baseline. Compared
+scanner creation, reset, and bracket-content scanning against the current C source;
+the merged implementation still matches, including consuming embedded NULs until
+actual EOF. Reran the bucket (4/4), all CMake oracle inputs (gate 270/270 with
+incremental/query checks; fresh repository 9,878/9,878), all 24 scanner tests, and
+the parser-level BOM regression. Workspace all-target checking and both targeted
+strict clippy commands above pass; the pre-existing host-owned YAML lexer warning
+is unchanged. This verification-only follow-up adds no behavior changes or duplicate
+tests; the existing correction and regressions already cover the assigned inputs.
