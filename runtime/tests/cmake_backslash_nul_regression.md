@@ -1,6 +1,6 @@
 # CMake backslash/NUL recovery (bucket `9a8ee9c6`)
 
-Reverified at starting revision `f4564e7` (after the latest main merge).
+Reverified at starting revision `4aef6bc` (after the latest main merge).
 The reported 113-byte input,
 `Tests/RunCMake/Syntax/NullAfterBackslash.cmake`, already passes with the merged
 CMake scanner correction; no additional runtime or scanner change is needed.
@@ -24,7 +24,7 @@ progress callback once.
 
 - `runtime/tests/cmake_backslash_nul.rs` checks this exact source, tree shape,
   node flags, byte/point ranges, and progress-callback count with both whole-file
-  and one-byte input chunks. This follow-up also checks symbol IDs and chunk
+  and one-byte input chunks. It also checks symbol IDs and chunk
   boundaries immediately before/after the backslash, NUL, and newline (chunk
   sizes 54, 55, 56, and 57). It reuses the parser after bracket arguments and
   bracket comments to exercise scanner reset.
@@ -35,8 +35,7 @@ progress callback once.
 ## Verification
 
 All checks below were rerun at this revision. The bucket passed before any
-changes, and both the existing scanner tests and strengthened parser regression
-pass.
+changes, and both the existing scanner tests and parser regression pass.
 
 - Bucket oracle: **1/1 passes** (queries enabled).
 - All CMake oracle inputs: **270/270 gate** (incremental and query checks),
@@ -48,6 +47,7 @@ pass.
 - `cargo clippy -p ts_port_cmake -p ts_port --all-targets -- -D warnings`: passes.
 
 The bucket was already passing before this verification; the oracle reported no
-remaining divergence to fix. This follow-up strengthens regression coverage:
-no production behavior changes, C deviations, new unsafe code, or changes to
-host-owned generated files.
+remaining divergence to fix. This follow-up only refreshes the verification
+record: no production behavior changes, C deviations, new unsafe code, or changes
+to host-owned generated files. The existing regression already covers this bucket
+and scanner reset across repeated parses, so no duplicate test was added.
