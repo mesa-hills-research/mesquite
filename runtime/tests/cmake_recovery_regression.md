@@ -181,10 +181,10 @@ lexer warning noted above. This change only strengthens regression coverage;
 there are no runtime changes, C deviations, new unsafe code, or generated-file
 changes.
 
-### ERROR-range revalidation at `9d5d6eb`
+### ERROR-range revalidation at `126e73b`
 
 Rechecked the previously resolved bucket at this starting revision; all checks
-below were rerun, rather than relying on the earlier verification at `efa5e3f`.
+below were rerun, rather than relying on the earlier verification at `9d5d6eb`.
 Bucket `e0b0bff8` already passes on this starting checkout. Comparing the current
 C scanner with Rust confirms the merged zero-valued creation/reset fix remains
 correct: `ts_calloc` initializes both fields, and empty or wrong-length snapshots
@@ -267,7 +267,7 @@ changes are introduced.
 
 ## Unterminated-call bucket `7f8795fb`
 
-Reverified at `5e180ee` (previously at `4ceb957`): all three
+Reverified at `d48f9d2` (previously at `5e180ee`): all three
 reported inputs already pass on the starting checkout with the merged scanner
 initialization/reset correction above. The current C scanner uses
 `ts_calloc` and clears both fields on empty or invalid-length snapshots, matching
@@ -288,7 +288,8 @@ incorrectly described all three callback counts as zero; the existing tests
 already assert the correct counts. No additional behavior change or duplicate
 test is needed.
 
-Validation rerun for this bucket at `5e180ee`:
+Validation rerun for this bucket at `d48f9d2` (all checks below except the
+explicitly marked prior workspace clippy result were rerun in this worktree):
 
 - `run_oracle(inputs = "bucket:7f8795fb")`: 3/3 pass.
 - `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs
