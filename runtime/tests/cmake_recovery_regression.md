@@ -258,7 +258,7 @@ changes are introduced.
 
 ## Unterminated-call bucket `7f8795fb`
 
-Reverified at `256fe11` (previously at `755e745`): all three
+Reverified at `e979ae3` (previously at `256fe11`): all three
 reported inputs already pass on the starting checkout with the merged scanner
 initialization/reset correction above. The current C scanner uses
 `ts_calloc` and clears both fields on empty or invalid-length snapshots, matching
@@ -272,11 +272,14 @@ Existing `cmake_unterminated_call_recovery` integration tests cover all three
 inputs, asserting root/content kinds, flags, byte/point ranges, and exact progress
 callback counts: one for each unterminated-call input and zero for the embedded-NUL
 input. They exercise fresh and reused scanners with both whole-source and one-byte
-input chunks. The earlier verification note incorrectly described all three counts
-as zero; the existing tests already assert the correct counts. No additional
-behavior change or duplicate test is needed.
+input chunks. Each test also repairs the malformed source and undoes the edit
+twice with an edited old tree, checking restoration of the ERROR and recovery
+content (including its zero-width EOF range). The earlier verification note
+incorrectly described all three callback counts as zero; the existing tests
+already assert the correct counts. No additional behavior change or duplicate
+test is needed.
 
-Validation rerun for this bucket at `256fe11`:
+Validation rerun for this bucket at `e979ae3`:
 
 - `run_oracle(inputs = "bucket:7f8795fb")`: 3/3 pass.
 - `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs
