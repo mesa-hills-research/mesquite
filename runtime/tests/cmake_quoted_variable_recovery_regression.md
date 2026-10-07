@@ -93,3 +93,18 @@ passes 4/4, and the full CMake oracle passes 270/270 gate and 9878/9878 fresh
 inputs. Workspace all-targets checking passes (the pre-existing host-owned YAML
 warning remains); all-targets clippy for `ts_port` and `ts_port_cmake` passes with
 `-D warnings`. No runtime changes or new deviations from C were needed.
+
+## Revalidation at `55c2787`
+
+All four bucket inputs already pass at this starting revision. The current C
+scanner still uses zero-initialization and resets both fields on invalid snapshot
+lengths, matching the merged Rust implementation; no further runtime fix is
+needed. Revalidated the bucket (**4/4**), full CMake gate (**270/270**, incremental
+and query checks), and fresh CMake inputs (**9878/9878**, query checks).
+
+Both quoted-variable parser regressions and all 24 CMake scanner tests pass.
+`cargo check --workspace --all-targets` passes with the same pre-existing warning
+in host-owned `grammars/yaml/src/lex.rs:20`.
+`cargo clippy -p ts_port -p ts_port_cmake --all-targets -- -D warnings` passes.
+This follow-up records verification only, with no behavior changes or deviations
+from C and nothing left unresolved in this bucket.
