@@ -4,13 +4,13 @@ The seven reported fresh-CMake inputs had an `ERROR` child of `source_file` in
 C, but a `normal_command` in the port. The smallest was
 `Tests/RunCMake/Syntax/UnterminatedBrace1.cmake` (`set(var "${")`, followed by a
 newline). The bucket already passed at the original verification revision,
-`8fbaaf9`, and still passes at the current starting revision, `c475b12`; no
+`8fbaaf9`, and still passes at the current starting revision, `74741dd`; no
 additional runtime or scanner behavior change is needed.
 
-## Latest revalidation at `c475b12`
+## Latest revalidation at `74741dd`
 
-All checks below were rerun at `c475b12`, rather than relying on the previous
-verification at `f6712da`. Reproducing the assignment found no remaining
+All checks below were rerun at `74741dd`, rather than relying on the previous
+verification at `c475b12`. Reproducing the assignment found no remaining
 divergence. The assigned bucket still passes on the starting checkout: **7/7 bucket**,
 **270/270 gate** (including incremental/query checks), and **9878/9878 fresh**
 inputs match C. Direct comparison with the current C scanner confirms that the
