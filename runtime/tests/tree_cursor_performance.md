@@ -53,41 +53,53 @@ this report, not a parsing optimization.
 
 ## Follow-up: optimize parsing, not the tree walk
 
-After the documentation-only result was rejected, a parse-only driver over the
-same 360-file input list showed approximately 7% self time in reductions and 5%
-in stack popping. The ordinary deterministic reduction cloned child handles,
-created a temporary head, then released the old path and immediately renumbered
-the new head back to the original version.
+After the documentation-only result was rejected, a parser-loop profile over the
+same 360-file input list (no tree walking) showed approximately 7% self time in
+reductions and 5% in stack popping. The ordinary deterministic reduction cloned
+child handles, created a temporary head, then released the old path and
+immediately renumbered the new head back to the original version.
 
-The retained optimization fuses that sequence for a single non-speculative
-reduction on the sole active version. It first verifies that every removed node
-has exactly one graph owner and one predecessor. It then moves, rather than
-clones, the children, preserving extra/null counting and child order, and
-transfers the final predecessor reference back to the original head. Shared or
-branching paths, speculative reductions, multiple versions, and diagnostic
-output retain the original algorithm. No progress checkpoint is skipped.
+An ownership-transfer experiment removed this work for a single non-speculative
+reduction on the sole active version. It first verified that every removed node
+had exactly one graph owner and one predecessor, then moved the children and
+transferred the final predecessor reference back to the original head. Against
+main `af419b8`, this measured about 8.5% less parse time. Main subsequently gained
+an overlapping optimization, so that result is **not** the final incremental
+gain from this branch.
 
-This is an ownership optimization, not a change to recovery costs, parse limits,
-tree semantics, or callback ordering. Arena slots can be recycled earlier, and
-no transient stack version is needed on the fused path. All code is safe Rust.
+### Retained change after merging current main
 
-After merging main's lexer and reduction-header improvements (main `af419b8`),
-three pinned `run_oracle(inputs="benchmark")` runs gave:
+The final change reuses main's ownership-transfer algorithm but lets the common
+reduction take its children directly, instead of staging a `StackSlice` and
+running the general ambiguity-selection loop. The small reduction entry point
+can inline independently of the out-of-line general path. A failed preflight is
+not attempted a second time without intervening mutation. Empty trailing-extra
+buffers avoid drain setup as on main's general reduction path.
+
+The transferred prefix preserves extras/null counting and child order. Shared
+or branching paths, speculative reductions, multiple versions, and diagnostics
+retain the general reduction path. Head scanner state, summary and error
+baseline are unchanged, and no progress checkpoint is skipped. No recovery
+costs, parse limits, tree semantics or callback ordering change. All code is
+safe Rust.
+
+After merging main's overlapping pop-transfer and subtree improvements (main
+`9edb29b`), three pinned `run_oracle(inputs="benchmark")` runs gave:
 
 | | Overall port/C |
 | --- | --- |
-| Main | 1.121 |
-| Candidate run 1 | 1.031 |
-| Candidate run 2 | 1.025 |
-| Candidate run 3 | 1.026 |
+| Main | 1.013 |
+| Candidate run 1 | 0.983 |
+| Candidate run 2 | 0.989 |
+| Candidate run 3 | 0.985 |
 
-The median is **about 8.5% less parse time**, beyond the reported 1.9% noise.
-Every language improved. This does not yet meet the ultimate overall <= 1.00
-port/C goal.
+The median is **about 2.8% less parse time**, beyond the reported 1.9% noise.
+Every language improved in the median, and the measured overall port/C ratio
+is now below 1.00.
 
 Validation: all **4,712 oracle inputs passed**, with incremental seed 7 and
-queries on; **182 runtime unit tests** and the runtime integration tests passed;
-`cargo clippy -p ts_port --all-targets -- -D warnings` was clean. New regression
+queries on; **188 runtime unit tests** and the runtime integration tests passed;
+`cargo clippy --workspace --all-targets -- -D warnings` was clean. New regression
 tests cover child-handle transfer, predecessor reference counts, extras/nulls,
-zero-width reductions, shared/short/branching fallback, and preservation of head
+zero-count reductions, shared/short/branching fallback, and preservation of head
 scanner state, summary, and error baseline compared with pop-then-renumber.

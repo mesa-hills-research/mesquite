@@ -737,6 +737,7 @@ pub(crate) fn ts_stack_pop_count_in_place(
 
 /// Transfer the deterministic prefix directly to the reduction, without staging
 /// it in the general graph walk's slice array.
+#[inline]
 pub(crate) fn ts_stack_take_count_in_place(
     stack: &mut Stack,
     count: u32,

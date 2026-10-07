@@ -1020,6 +1020,7 @@ pub(crate) fn ts_parser__shift(
     }
 }
 
+#[inline]
 pub(crate) fn ts_parser__reduce(
     parser: &mut Parser,
     version: StackVersion,
@@ -1032,15 +1033,15 @@ pub(crate) fn ts_parser__reduce(
     replace_version: bool,
 ) -> StackVersion {
     let language = parser.language.unwrap();
-    let initial_version_count = ts_stack_version_count(&parser.stack);
     // With one action and one version, advance will immediately replace this
     // version with the reduction. Transfer an exclusive path instead of first
     // cloning its children into a temporary head and then releasing it again.
     // Keep the original path for diagnostics, speculation, and shared graphs.
-    if replace_version
+    let take_in_place = replace_version
         && !is_fragile
         && parser.logger.is_none()
-        && parser.dot_graph.is_none()
+        && parser.dot_graph.is_none();
+    if take_in_place
         && let Some(mut children) = ts_stack_take_count_in_place(&mut parser.stack, count)
     {
         ts_subtree_array_remove_trailing_extras(&mut children, &mut parser.trailing_extras);
@@ -1070,20 +1071,43 @@ pub(crate) fn ts_parser__reduce(
             false,
             next_state,
         );
-        for extra in parser.trailing_extras.drain(..) {
-            ts_stack_push(
-                &mut parser.stack,
-                &mut parser.tree_pool,
-                version,
-                extra,
-                false,
-                next_state,
-            );
+        if !parser.trailing_extras.is_empty() {
+            for extra in parser.trailing_extras.drain(..) {
+                ts_stack_push(
+                    &mut parser.stack,
+                    &mut parser.tree_pool,
+                    version,
+                    extra,
+                    false,
+                    next_state,
+                );
+            }
         }
         // Advance's renumber-to-original is now a no-op, but it must still
         // perform the same table lookup and next progress checkpoint.
         return version;
     }
+    // A failed preflight cannot succeed a second time without any intervening
+    // mutation. Go straight to the general walk instead of probing it twice.
+    ts_parser__reduce_general(
+        parser, version, symbol, count, dynamic_precedence, production_id,
+        is_fragile, end_of_non_terminal_extra, replace_version && !take_in_place,
+    )
+}
+
+fn ts_parser__reduce_general(
+    parser: &mut Parser,
+    version: StackVersion,
+    symbol: Symbol,
+    count: u32,
+    dynamic_precedence: i32,
+    production_id: u16,
+    is_fragile: bool,
+    end_of_non_terminal_extra: bool,
+    replace_version: bool,
+) -> StackVersion {
+    let language = parser.language.unwrap();
+    let initial_version_count = ts_stack_version_count(&parser.stack);
     // A sole action on the sole version will immediately replace the original
     // head. Move uniquely owned children instead of cloning them into a new
     // head and then deleting the old one. Shared/branched paths still use C's
