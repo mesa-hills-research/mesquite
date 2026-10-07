@@ -76,12 +76,12 @@ fn quoted_variable_whitespace_keeps_error_children_flat() {
 #[test]
 fn unfinished_commands_keep_zero_width_bracket_content_at_eof() {
     let language = ts_port_cmake::language().into();
-    for warmup in ["", "message([==[prior]==])\n", "#[=[prior]=]\n"] {
-        let mut parser = Parser::new();
-        parser.set_language(&language).unwrap();
-        let tree = parser.parse(warmup, None).unwrap();
-        assert!(!tree.root_node().has_error());
-
+    for warmup in [
+        None,
+        Some(""),
+        Some("message([==[prior]==])\n"),
+        Some("#[=[prior]=]\n"),
+    ] {
         // The smallest EOF cases from bucket f5e2762e, including CommandEOF
         // and unterminated block/while constructs, plus the incomplete message
         // command from bucket 6c68c51b.
@@ -97,53 +97,67 @@ fn unfinished_commands_keep_zero_width_bracket_content_at_eof() {
             ("while(a)\n", Point::new(1, 0), 2, "while_command"),
             ("message(S", Point::new(0, 9), 3, "identifier"),
         ] {
-            let mut progress_calls = 0;
-            let mut progress = |_: &ParseState| {
-                progress_calls += 1;
-                false
-            };
-            let mut read = |byte: usize, _: Point| &source.as_bytes()[byte.min(source.len())..];
-            let options = ParseOptions::new().progress_callback(&mut progress);
-            let tree = parser
-                .parse_with_options(&mut read, None, Some(options))
-                .unwrap();
-            assert_eq!(progress_calls, 0);
+            // Initialize each case independently so None tests a genuinely
+            // fresh scanner; warmups exercise resets after prior external tokens.
+            // A one-byte reader also puts the EOF token at an input boundary.
+            for chunk_size in [source.len(), 1] {
+                let mut parser = Parser::new();
+                parser.set_language(&language).unwrap();
+                if let Some(warmup) = warmup {
+                    assert!(!parser.parse(warmup, None).unwrap().root_node().has_error());
+                }
 
-            let root = tree.root_node();
-            assert_eq!(root.kind(), "source_file");
-            assert_eq!(root.byte_range(), 0..source.len());
-            assert_eq!(root.start_position(), Point::new(0, 0));
-            assert_eq!(root.end_position(), eof);
-            assert_eq!(root.child_count(), 1);
-            assert_eq!(root.named_child_count(), 1);
-            assert!(root.has_error());
+                let mut progress_calls = 0;
+                let mut progress = |_: &ParseState| {
+                    progress_calls += 1;
+                    false
+                };
+                let mut read = |byte: usize, _: Point| {
+                    let start = byte.min(source.len());
+                    &source.as_bytes()[start..(start + chunk_size).min(source.len())]
+                };
+                let options = ParseOptions::new().progress_callback(&mut progress);
+                let tree = parser
+                    .parse_with_options(&mut read, None, Some(options))
+                    .unwrap();
+                assert_eq!(progress_calls, 0);
 
-            let error = root.child(0).unwrap();
-            assert!(error.is_error());
-            assert!(error.is_named());
-            assert!(error.is_extra());
-            assert!(!error.is_missing());
-            assert!(error.has_error());
-            assert_eq!(error.range(), root.range());
-            assert_eq!(error.child_count(), child_count, "{source:?}");
-            assert_eq!(error.named_child_count(), 2);
-            assert_eq!(error.child(0).unwrap().kind(), first_kind);
+                let root = tree.root_node();
+                assert_eq!(root.kind(), "source_file");
+                assert_eq!(root.byte_range(), 0..source.len());
+                assert_eq!(root.start_position(), Point::new(0, 0));
+                assert_eq!(root.end_position(), eof);
+                assert_eq!(root.child_count(), 1);
+                assert_eq!(root.named_child_count(), 1);
+                assert!(root.has_error());
 
-            let content = error.child(child_count - 1).unwrap();
-            assert_eq!(content.kind(), "bracket_argument_content");
-            assert_eq!(content.kind_id(), 37);
-            assert_eq!(content.byte_range(), source.len()..source.len());
-            assert_eq!(content.start_position(), eof);
-            assert_eq!(content.end_position(), eof);
-            assert!(content.is_named());
-            assert!(!content.is_extra());
-            assert!(!content.is_missing());
-            assert!(!content.is_error());
-            assert!(!content.has_error());
-            assert_eq!(content.child_count(), 0);
-            assert_eq!(content.named_child_count(), 0);
-            assert_eq!(error.named_child(1), Some(content));
-            assert!(content.next_sibling().is_none());
+                let error = root.child(0).unwrap();
+                assert!(error.is_error());
+                assert!(error.is_named());
+                assert!(error.is_extra());
+                assert!(!error.is_missing());
+                assert!(error.has_error());
+                assert_eq!(error.range(), root.range());
+                assert_eq!(error.child_count(), child_count, "{source:?}");
+                assert_eq!(error.named_child_count(), 2);
+                assert_eq!(error.child(0).unwrap().kind(), first_kind);
+
+                let content = error.child(child_count - 1).unwrap();
+                assert_eq!(content.kind(), "bracket_argument_content");
+                assert_eq!(content.kind_id(), 37);
+                assert_eq!(content.byte_range(), source.len()..source.len());
+                assert_eq!(content.start_position(), eof);
+                assert_eq!(content.end_position(), eof);
+                assert!(content.is_named());
+                assert!(!content.is_extra());
+                assert!(!content.is_missing());
+                assert!(!content.is_error());
+                assert!(!content.has_error());
+                assert_eq!(content.child_count(), 0);
+                assert_eq!(content.named_child_count(), 0);
+                assert_eq!(error.named_child(1), Some(content));
+                assert!(content.next_sibling().is_none());
+            }
         }
     }
 }
