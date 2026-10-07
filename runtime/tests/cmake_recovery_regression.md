@@ -40,3 +40,30 @@ content at EOF, invalid snapshot lengths, and native-endian state round trips.
 
 This follow-up changes only this verification note; it introduces no deviation
 from C and no new unsafe code.
+
+## ERROR range bucket `e0b0bff8`
+
+Reverified at `6eb07f2`: all five reported inputs already pass with the merged
+scanner initialization/reset correction above. In particular, recovery from
+byte 5 of `E_sleep-no-args-stderr.cmake` emits bracket content through byte 72,
+including the final newline. The enclosing ERROR therefore reaches EOF, rather
+than ending at byte 71 with only the initial identifier as a visible child.
+`PropertiesSources-stdout.cmake` likewise emits one content token through EOF
+instead of splitting the ERROR. No further implementation change is needed.
+
+The scanner test `recovery_content_keeps_multiline_error_ranges_through_eof`
+checks both recovery starting after an identifier and recovery starting at byte
+zero, before and after an empty-snapshot reset. The differential oracle checks
+the complete resulting trees and progress callbacks for all five bucket inputs.
+
+Checks rerun for this bucket:
+
+- `run_oracle(inputs = "bucket:e0b0bff8")`: 5/5 pass.
+- `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs
+  (including incremental and query checks), and 9878/9878 fresh inputs pass.
+- `cargo check --workspace --all-targets`: passes with only the pre-existing
+  host-owned generated YAML lexer warning noted above.
+- `cargo test -p ts_port_cmake`: 21 tests pass.
+- `cargo clippy -p ts_port_cmake --all-targets -- -D warnings`: passes.
+
+This verification adds no C deviations, unsafe code, or generated-file changes.
