@@ -39,6 +39,8 @@ pub(crate) struct Scanner {
     num_emphasis_delimiters_left: u8,
 }
 
+// Keep speculative span lookahead out of the common no-delimiter scan frame.
+#[inline(never)]
 fn parse_leaf_delimiter(
     lexer: &mut dyn Lexer,
     delimiter_length: &mut u8,
@@ -246,16 +248,11 @@ impl ExternalScanner for Scanner {
     }
 
     fn deserialize(&mut self, buffer: &[u8]) {
-        // Check the fixed snapshot width once rather than zeroing the state
-        // and checking each byte separately on every external scan.
-        let &[state, code_span_delimiter_length, latex_span_delimiter_length, num_emphasis_delimiters_left] =
-            if buffer.is_empty() {
-                &[0; 4]
-            } else {
-                buffer
-                    .first_chunk::<4>()
-                    .expect("four-byte scanner snapshot")
-            };
+        // Valid snapshots have four bytes; an empty slice resets the state.
+        // C reads past the buffer on malformed short snapshots. Reset those
+        // safely as well, using the same single fixed-width check.
+        let [state, code_span_delimiter_length, latex_span_delimiter_length, num_emphasis_delimiters_left] =
+            buffer.first_chunk::<4>().copied().unwrap_or_default();
         *self = Self {
             state,
             code_span_delimiter_length,
@@ -371,7 +368,7 @@ mod tests {
     ];
 
     #[test]
-    fn serialization_preserves_all_four_bytes_and_empty_input_resets() {
+    fn serialization_preserves_all_four_bytes_and_short_input_resets() {
         let mut scanner = create();
         assert_eq!(snapshot(&mut *scanner), [0; 4]);
         let state = [0xfd, 0xfe, 0xff, 0x80];
@@ -380,8 +377,11 @@ mod tests {
         assert_eq!(scanner.serialize(&mut buffer), 4);
         assert_eq!(&buffer[..4], &state);
         assert_eq!(&buffer[4..], &[0xaa; 4]);
-        scanner.deserialize(&[]);
-        assert_eq!(snapshot(&mut *scanner), [0; 4]);
+        for length in 0..4 {
+            scanner.deserialize(&state);
+            scanner.deserialize(&state[..length]);
+            assert_eq!(snapshot(&mut *scanner), [0; 4]);
+        }
     }
 
     #[test]
