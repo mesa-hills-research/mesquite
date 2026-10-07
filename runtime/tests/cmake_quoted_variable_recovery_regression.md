@@ -124,7 +124,7 @@ No bucket work remains. The broader oracle was not rerun in this stop-time
 verification; the all-input results above belong to their stated earlier
 revisions. No deviations from C, unsafe code, or generated-file edits were made.
 
-## Current verification at `2f442a8`
+## Current verification at `a7ea279`
 
 Rechecked the reassigned bucket on the current merged baseline against the C
 scanner source. The initialization/reset correction and regression tests are
