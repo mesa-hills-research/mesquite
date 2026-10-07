@@ -143,17 +143,12 @@ with the immediately following replacement of the original head.
 owned and has one predecessor; failure leaves the stack untouched for the normal
 traversal. On success it moves child handles into the slice and transfers the
 last predecessor reference back to head 0, avoiding transient retains, a second
-head, and the subsequent release walk. Preserve the head's scanner token, error
+head, and the subsequent release walk. This committed path returns its child Vec
+directly, without constructing a slice worklist; the parser builds and pushes
+its one parent separately from the general grouping/merging reduction. Preserve
+the head's scanner token, error
 baseline and summary. Never use this path for speculative reductions or multiple
 actions/versions: those still need the original head for alternatives and merges.
-
-The committed single-path reduction can take those children directly instead
-of staging one `StackSlice` and visiting the general ambiguity-selection loop.
-`ts_stack_take_count_in_place` performs the shared preflight/transfer; the normal
-`ts_stack_pop_count_in_place` wrapper still presents slice results to other
-callers. Both clear the traversal scratch buffers only on successful preflight.
-The direct path finishes the fresh header before Arc allocation, keeps the
-original head metadata, and returns the same replacement-version result.
 
 ## Parser, input, lexer, scanner and progress
 

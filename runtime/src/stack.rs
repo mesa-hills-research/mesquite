@@ -270,6 +270,7 @@ pub(crate) fn stack__subtree_node_count(subtree: &Subtree) -> u32 {
     count
 }
 
+#[inline]
 pub(crate) fn stack_node_new(
     arena: &mut StackArena,
     previous_node: Option<StackNodeId>,
@@ -681,6 +682,7 @@ pub(crate) fn ts_stack_node_count_since_error(stack: &mut Stack, version: StackV
     node_count - head.node_count_at_last_error
 }
 
+#[inline]
 pub(crate) fn ts_stack_push(
     stack: &mut Stack,
     _pool: &mut SubtreePool,
@@ -726,19 +728,8 @@ pub(crate) fn ts_stack_pop_count(
 /// be committed to replacing that version (no alternative reduction/shift).
 /// Refuse shared or branching prefixes without changing anything, so the full
 /// graph traversal can handle them with its usual ordering and limits.
-pub(crate) fn ts_stack_pop_count_in_place(
-    stack: &mut Stack,
-    count: u32,
-) -> Option<Vec<StackSlice>> {
-    let subtrees = ts_stack_take_count_in_place(stack, count)?;
-    stack.slices.push(StackSlice { subtrees, version: 0 });
-    Some(std::mem::take(&mut stack.slices))
-}
-
-/// Transfer the deterministic prefix directly to the reduction, without staging
-/// it in the general graph walk's slice array.
 #[inline]
-pub(crate) fn ts_stack_take_count_in_place(
+pub(crate) fn ts_stack_pop_count_in_place(
     stack: &mut Stack,
     count: u32,
 ) -> Option<Vec<Subtree>> {
@@ -1337,7 +1328,7 @@ mod stack2_tests {
         let old_head = stack.heads[0].node;
         assert_eq!(Arc::strong_count(&heap), 2);
         assert_eq!(stack.arena.node(base).ref_count, 2);
-        let children = ts_stack_take_count_in_place(&mut stack, 1).unwrap();
+        let children = ts_stack_pop_count_in_place(&mut stack, 1).unwrap();
         assert_eq!(children.len(), 1);
         assert_eq!(Arc::strong_count(&heap), 2, "the child handle was moved");
         assert_eq!(stack.heads[0].node, base);
@@ -1360,11 +1351,11 @@ mod stack2_tests {
         let extra_head = stack.heads[0].node;
         ts_stack_push(&mut stack, &mut pool, 0, Subtree::Null, false, 0);
         ts_stack_push(&mut stack, &mut pool, 0, leaf(3), true, 3);
-        let top = ts_stack_take_count_in_place(&mut stack, 2).unwrap();
+        let top = ts_stack_pop_count_in_place(&mut stack, 2).unwrap();
         assert_eq!(top.len(), 1, "null counts but is not a child");
         assert_eq!(ts_subtree_size(&top[0]).bytes, 3);
         assert_eq!(stack.heads[0].node, extra_head);
-        let bottom = ts_stack_take_count_in_place(&mut stack, 1).unwrap();
+        let bottom = ts_stack_pop_count_in_place(&mut stack, 1).unwrap();
         assert_eq!(bottom.len(), 2, "extras are children but do not count");
         assert_eq!(ts_subtree_size(&bottom[0]).bytes, 1);
         assert_eq!(ts_subtree_size(&bottom[1]).bytes, 2);
@@ -1382,15 +1373,15 @@ mod stack2_tests {
         let copy = ts_stack_copy_version(&mut stack, 0);
         ts_stack_push(&mut stack, &mut pool, 0, leaf(2), false, 3);
         let original = stack.heads[0].node;
-        assert!(ts_stack_take_count_in_place(&mut stack, 2).is_none());
+        assert!(ts_stack_pop_count_in_place(&mut stack, 2).is_none());
         assert_eq!(stack.heads[0].node, original);
         assert_eq!(stack.arena.node(shared).ref_count, 2);
         assert!(stack.arena.free.is_empty());
         ts_stack_remove_version(&mut stack, &mut pool, copy);
-        assert!(ts_stack_take_count_in_place(&mut stack, 3).is_none());
+        assert!(ts_stack_pop_count_in_place(&mut stack, 3).is_none());
         assert_eq!(stack.heads[0].node, original);
         assert!(stack.arena.free.is_empty());
-        assert_eq!(ts_stack_take_count_in_place(&mut stack, 2).unwrap().len(), 2);
+        assert_eq!(ts_stack_pop_count_in_place(&mut stack, 2).unwrap().len(), 2);
         ts_stack_delete(&mut stack, &mut pool);
     }
 
@@ -1409,12 +1400,12 @@ mod stack2_tests {
             is_pending: false,
         });
         data.link_count = 2;
-        assert!(ts_stack_take_count_in_place(&mut stack, 1).is_none());
+        assert!(ts_stack_pop_count_in_place(&mut stack, 1).is_none());
         assert_eq!(stack.heads[0].node, head);
         assert_eq!(stack.arena.node(head).link_count, 2);
         assert!(stack.arena.free.is_empty());
         // Empty reductions do not remove any prefix, even at a branch.
-        assert!(ts_stack_take_count_in_place(&mut stack, 0).unwrap().is_empty());
+        assert!(ts_stack_pop_count_in_place(&mut stack, 0).unwrap().is_empty());
         assert_eq!(stack.heads[0].node, head);
         ts_stack_delete(&mut stack, &mut pool);
     }
@@ -2167,11 +2158,11 @@ mod stack_1_tests {
                 assert_eq!(optimized.heads[0].node, original_top);
                 assert!(optimized.arena.free.is_empty());
             } else {
-                let fast = fast.unwrap().pop().unwrap();
+                let fast = fast.unwrap();
                 let slow = slow.pop().unwrap();
                 ts_stack_renumber_version(&mut ordinary, &mut pool, slow.version, 0);
-                assert_eq!(symbols(&fast.subtrees), symbols(&slow.subtrees));
-                for (fast, slow) in fast.subtrees.iter().zip(&slow.subtrees) {
+                assert_eq!(symbols(&fast), symbols(&slow.subtrees));
+                for (fast, slow) in fast.iter().zip(&slow.subtrees) {
                     assert!(fast.ptr_eq(slow));
                 }
                 assert_eq!(ts_stack_state(&optimized, 0), ts_stack_state(&ordinary, 0));
@@ -2233,7 +2224,7 @@ mod stack_1_tests {
         assert!(stack.arena.free.is_empty());
         // A branch at the goal, not in the removed prefix, is fine.
         let pop = ts_stack_pop_count_in_place(&mut stack, 1).unwrap();
-        assert_eq!(symbols(&pop[0].subtrees), [2]);
+        assert_eq!(symbols(&pop), [2]);
         assert_eq!(stack.heads[0].node, shared);
         assert_eq!(stack.arena.node(shared).ref_count, 1);
         assert_eq!(stack.arena.node(shared).link_count, 2);
