@@ -211,7 +211,7 @@ new unsafe code, warnings, or generated-file modifications are introduced.
 
 ## Empty recovery-content bucket `f5e2762e`
 
-Reverified at `c2a9bd2` (previously at `5ff1935`):
+Reverified at `1af7157` (previously at `c2a9bd2`):
 all 16 reported inputs already pass on the starting checkout. The merged scanner
 initialization/reset correction above allows `bracket_argument_content` at EOF
 without an opener, including after `a` and after skipping the newline in `if(\n`.
@@ -238,8 +238,10 @@ The current C source was compared directly with the Rust scanner: creation uses
 `ts_calloc`, and empty/wrong-length deserialization clears both state fields.
 The matching implementation and all regression cases were already present at
 this starting revision, so no duplicate test or behavior change was warranted.
+Existing node-navigation assertions also confirm that the EOF token remains
+reachable with a tree cursor even when the preceding sibling ends at EOF.
 
-Checks rerun for this bucket at `c2a9bd2` (not inherited from the earlier
+Checks rerun for this bucket at `1af7157` (not inherited from the earlier
 verification):
 
 - `run_oracle(inputs = "bucket:f5e2762e")`: 16/16 pass.
