@@ -186,7 +186,7 @@ changes are introduced.
 
 ## Unterminated-call bucket `7f8795fb`
 
-Reverified at `76f5685`: all three reported inputs already pass on the starting
+Reverified at `5605c32`: all three reported inputs already pass on the starting
 checkout with the merged scanner initialization/reset correction above. The
 current C scanner uses
 `ts_calloc` and clears both fields on empty or invalid-length snapshots, matching
