@@ -681,8 +681,8 @@ impl Scanner {
 
     // A frozen string has no more schema transitions. Classify content with a
     // compact ASCII role table; only run boundaries need the outer dispatch.
-    // Do not keep a role live across mark_end: leave registers for the lexer
-    // and coordinates in the content run instead.
+    // Use the precomputed block/flow content bit within a run, not the full
+    // role dispatch. Keep the lexer and coordinates in registers across marks.
     #[inline(never)]
     fn scn_pln_string<const BLOCK: bool>(&mut self, lexer: &mut dyn Lexer) -> ScanResult {
         if plain_kind::<BLOCK>(self.lookahead) == 0 {
@@ -691,45 +691,55 @@ impl Scanner {
         if self.lookahead == i32::from(b'#') && plain_kind::<BLOCK>(self.cur_chr) < 2 {
             return ScanResult::Success;
         }
-        loop {
-            match plain_kind::<BLOCK>(self.lookahead) {
-                0 => break,
+        // Nothing observes the temporary cursor until this helper returns.
+        // Keep it local across marks and whitespace as well as content runs;
+        // only the saved token endpoint must be updated at each mark. Frozen
+        // content no longer needs character history: a continuation consumes
+        // a newline before calling this helper again, refreshing cur_chr.
+        let mut col = self.cur_col;
+        let mut lookahead = self.lookahead;
+        let result = loop {
+            match plain_kind::<BLOCK>(lookahead) {
+                0 => break ScanResult::Success,
                 1 => {
-                    self.adv(lexer);
-                    if self.lookahead == i32::from(b'#') {
-                        break;
+                    col = col.wrapping_add(1);
+                    self.cur_chr = lookahead;
+                    lexer.advance(false);
+                    lookahead = lexer.lookahead();
+                    if lookahead == i32::from(b'#') {
+                        break ScanResult::Success;
                     }
                 }
                 2 => {
-                    self.adv(lexer);
-                    if plain_kind::<BLOCK>(self.lookahead) < 2 {
-                        return ScanResult::Fail;
+                    col = col.wrapping_add(1);
+                    self.cur_chr = lookahead;
+                    lexer.advance(false);
+                    lookahead = lexer.lookahead();
+                    if plain_kind::<BLOCK>(lookahead) < 2 {
+                        break ScanResult::Fail;
                     }
-                    self.mrk_end(lexer);
+                    self.end_col = col;
+                    self.end_row = self.cur_row;
+                    lexer.mark_end();
                 }
                 _ => {
-                    // After freezing, the run's last character is not needed
-                    // here or by the caller. A following newline refreshes
-                    // cur_chr before the next content call; otherwise the
-                    // scalar is finished.
-                    let mut col = self.cur_col;
                     loop {
                         col = col.wrapping_add(1);
                         lexer.advance(false);
-                        let next = lexer.lookahead();
-                        // Inside a run, only the stop/content distinction matters.
-                        // Block mode uses a range check instead of an ASCII-table load.
-                        if !is_plain_run(next, BLOCK) {
-                            self.cur_col = col;
-                            self.lookahead = next;
+                        lookahead = lexer.lookahead();
+                        if !is_plain_run(lookahead, BLOCK) {
                             break;
                         }
                     }
-                    self.mrk_end(lexer);
+                    self.end_col = col;
+                    self.end_row = self.cur_row;
+                    lexer.mark_end();
                 }
             }
-        }
-        ScanResult::Success
+        };
+        self.cur_col = col;
+        self.lookahead = lookahead;
+        result
     }
 
     // Keep this character loop separate from the large token dispatcher so
@@ -938,11 +948,8 @@ const ASCII_PLAIN_SAFE: [u8; 128] = {
 
 #[inline(always)]
 fn is_plain_run(c: i32, is_in_blk: bool) -> bool {
-    if is_in_blk {
-        return is_ns_char(c) && c != i32::from(b':');
-    }
     if let Some(&flags) = ASCII_PLAIN_SAFE.get(c as usize) {
-        flags & 8 != 0
+        flags & (if is_in_blk { 4 } else { 8 }) != 0
     } else {
         is_non_ascii_ns_char(c)
     }
@@ -1145,12 +1152,27 @@ impl ExternalScanner for Scanner {
                 self.blk_imp_col.to_ne_bytes(),
                 self.blk_imp_tab.to_ne_bytes(),
             ];
+            // The lengths above are equal. Compare whole native pairs in a
+            // short loop instead of paying for a general byte-slice bcmp call.
             if buffer[..10] == *header.as_flattened()
-                && buffer[10..] == *self.indents.as_flattened()
+                && buffer[10..]
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(&self.indents)
+                    .all(|(a, b)| a == b)
             {
                 return;
             }
         }
+        self.restore(buffer);
+    }
+}
+
+impl Scanner {
+    // Keep copying/allocation setup off the common unchanged-snapshot path.
+    #[inline(never)]
+    fn restore(&mut self, buffer: &[u8]) {
         self.indents.clear();
         if buffer.is_empty() {
             self.row = 0;
