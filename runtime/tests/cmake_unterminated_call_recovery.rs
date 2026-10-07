@@ -239,3 +239,64 @@ fn nul_in_argument_is_recovery_content_not_eof() {
     }
     assert_incremental_repair_and_undo(source, 20..21, b" ", 20..source.len());
 }
+
+#[test]
+fn canceled_unterminated_calls_resume_with_empty_recovery_content() {
+    let language = Language::from(ts_port_cmake::language());
+    for source in [
+        &b"message(\n\n\nmessage(\"Additional message\")\n"[..],
+        &b"set(var \"\\\n\")\nmessage(\n\n\nmessage(\"Additional message\")\n"[..],
+    ] {
+        for chunk_size in [source.len(), 1] {
+            let mut parser = Parser::new();
+            parser.set_language(&language).unwrap();
+            let expected = parser.parse(source, None).unwrap();
+            assert!(expected.root_node().is_error());
+
+            for preceding_source in [None, Some("#[==[comment]==]")] {
+                if let Some(preceding_source) = preceding_source {
+                    let tree = parser.parse(preceding_source, None).unwrap();
+                    assert!(!tree.root_node().has_error());
+                }
+
+                let mut read = |offset, _| {
+                    let remaining = source.get(offset..).unwrap_or_default();
+                    &remaining[..remaining.len().min(chunk_size)]
+                };
+                let mut progress_calls = 0;
+                let mut cancel = |_: &ParseState| {
+                    progress_calls += 1;
+                    true
+                };
+                assert!(
+                    parser
+                        .parse_with_options(
+                            &mut read,
+                            None,
+                            Some(ParseOptions::new().progress_callback(&mut cancel)),
+                        )
+                        .is_none()
+                );
+                assert_eq!(progress_calls, 1);
+
+                // Do not reset: resume the outstanding parse, retaining its
+                // stack and scanner state. It must still produce real empty
+                // content at EOF rather than insert a missing close delimiter.
+                let tree = parser.parse_with_options(&mut read, None, None).unwrap();
+                let root = tree.root_node();
+                assert_eq!(root.kind(), "ERROR");
+                assert!(root.is_error());
+                assert_eq!(root.to_sexp(), expected.root_node().to_sexp());
+                assert_eq!(root.byte_range(), 0..source.len());
+                assert_eq!(root.end_position(), point_at(source, source.len()));
+                let content = root.child(root.child_count() - 1).unwrap();
+                assert_eq!(content.kind(), "bracket_argument_content");
+                assert_eq!(content.byte_range(), source.len()..source.len());
+                assert_eq!(content.start_position(), root.end_position());
+                assert_eq!(content.end_position(), root.end_position());
+                assert!(!content.is_missing());
+                assert!(!content.has_error());
+            }
+        }
+    }
+}

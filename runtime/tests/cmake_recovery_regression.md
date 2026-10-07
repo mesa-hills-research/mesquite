@@ -308,3 +308,20 @@ explicitly marked prior workspace clippy result were rerun in this worktree):
 The bucket and its regression coverage were already resolved at this revision,
 so this follow-up only records verification; no C deviations, unsafe code, or
 host-owned generated-file changes were introduced.
+
+### Cancellation/resume coverage (`9a63e99`)
+
+Bucket `7f8795fb` already passes at this starting revision. The current C scanner
+still uses `ts_calloc` and resets both fields on invalid snapshots, matching the
+merged Rust fix; no additional runtime behavior change is needed. Extended
+`cmake_unterminated_call_recovery` to cancel both unterminated calls at their
+first progress callback and resume without resetting the parser. Whole-source
+and one-byte chunks, including reuse after a bracket comment, retain the expected
+ERROR tree and the real zero-width recovery-content token at EOF.
+
+Revalidation: bucket **3/3**, CMake gate **270/270** (incremental/query checks),
+and fresh CMake **9878/9878** pass. All four unterminated-call regression tests
+and strict all-targets clippy for `ts_port` and `ts_port_cmake` pass. Workspace
+all-targets checking passes with the existing host-owned YAML lexer warning
+noted above. This adds only test coverage, with no C deviations, unsafe code,
+or generated-file changes.
