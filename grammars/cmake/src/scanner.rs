@@ -264,11 +264,15 @@ mod tests {
     }
 
     #[test]
-    fn fresh_scanner_allows_bracket_content_during_recovery() {
+    fn fresh_and_reset_scanners_allow_content_without_an_opener() {
         for reset in [false, true] {
             for input in ["", "text"] {
                 let mut scanner = create();
                 if reset {
+                    // Populate both fields before resetting, just as reuse of a
+                    // scanner across parsing branches can do.
+                    let mut open = TestLexer::new("#[==[");
+                    assert!(scanner.scan(&mut open, &valid(&[BRACKET_COMMENT_OPEN])));
                     scanner.deserialize(&[]);
                 }
                 let mut state = [0xff; STATE_SIZE];
@@ -291,6 +295,9 @@ mod tests {
 
                 // Content changes the token, so a second scan cannot emit it
                 // again without an intervening reset or opening bracket.
+                let mut next = TestLexer::new("tail");
+                assert!(!scanner.scan(&mut next, &[true; 7]));
+                assert!(next.events.is_empty());
                 let mut eof = TestLexer::new("");
                 assert!(!scanner.scan(&mut eof, &[true; 7]));
                 assert!(eof.events.is_empty());

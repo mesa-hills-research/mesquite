@@ -1,4 +1,5 @@
-//! CMake recovery regressions from oracle buckets 1b5a6fb7, f5e2762e, and e0b0bff8.
+//! CMake recovery regressions from oracle buckets
+//! 1b5a6fb7, f5e2762e, 548436bf, 6c68c51b, and e0b0bff8.
 
 use ts_port::{ParseOptions, ParseState, Parser, Point};
 
@@ -81,7 +82,8 @@ fn unfinished_commands_keep_zero_width_bracket_content_at_eof() {
         let tree = parser.parse(warmup, None).unwrap();
         assert!(!tree.root_node().has_error());
 
-        // OneCharacter.cmake and malformedInclude.cmake from bucket f5e2762e.
+        // OneCharacter.cmake and malformedInclude.cmake from bucket f5e2762e,
+        // plus the incomplete message command from bucket 6c68c51b.
         // The scanner's zero token means BRACKET_ARGUMENT_OPEN even without an
         // opener. Recovery accepts its zero-width content at EOF as an ordinary
         // named leaf, NOT as a missing node. Empty-state deserialization must
@@ -89,6 +91,7 @@ fn unfinished_commands_keep_zero_width_bracket_content_at_eof() {
         for (source, eof, child_count, first_kind) in [
             ("a", Point::new(0, 1), 2, "identifier"),
             ("if(\n", Point::new(1, 0), 3, "if"),
+            ("message(S", Point::new(0, 9), 3, "identifier"),
         ] {
             let mut progress_calls = 0;
             let mut progress = |_: &ParseState| {
@@ -137,6 +140,102 @@ fn unfinished_commands_keep_zero_width_bracket_content_at_eof() {
             assert_eq!(content.named_child_count(), 0);
             assert_eq!(error.named_child(1), Some(content));
             assert!(content.next_sibling().is_none());
+        }
+    }
+}
+
+#[test]
+fn non_utf8_bom_input_recovers_as_one_bracket_content_leaf() {
+    let language = ts_port_cmake::language().into();
+    for (width, little_endian, end_column) in
+        [(2, false, 0), (2, true, 1), (4, false, 0), (4, true, 3)]
+    {
+        // Recreate the four BOM-UTF-{16,32}-{BE,LE}.cmake fixtures without
+        // depending on the external corpus. These are deliberately passed to
+        // the UTF-8 parser as raw bytes, not decoded into UTF-8 first.
+        let mut source = Vec::new();
+        for character in "\u{feff}message(STATUS \"message\")\n".chars() {
+            let bytes = if little_endian {
+                (character as u32).to_le_bytes()
+            } else {
+                (character as u32).to_be_bytes()
+            };
+            source.extend_from_slice(if little_endian {
+                &bytes[..width]
+            } else {
+                &bytes[4 - width..]
+            });
+        }
+        assert_eq!(source.len(), 27 * width);
+
+        for warmup in [
+            None,
+            Some("message([==[prior]==])\n"),
+            Some("#[=[prior]=]\n"),
+        ] {
+            let mut parser = Parser::new();
+            parser.set_language(&language).unwrap();
+            if let Some(warmup) = warmup {
+                let tree = parser.parse(warmup, None).unwrap();
+                assert!(!tree.root_node().has_error());
+            }
+
+            for chunk_size in [source.len(), 1] {
+                let mut progress_calls = 0;
+                let mut progress = |_: &ParseState| {
+                    progress_calls += 1;
+                    false
+                };
+                let mut read = |byte: usize, _: Point| {
+                    let start = byte.min(source.len());
+                    let end = (start + chunk_size).min(source.len());
+                    &source[start..end]
+                };
+                let options = ParseOptions::new().progress_callback(&mut progress);
+                let tree = parser
+                    .parse_with_options(&mut read, None, Some(options))
+                    .unwrap();
+                assert_eq!(progress_calls, 0);
+
+                // C's zero scanner token enables content during recovery even
+                // without an opener. Content checks eof(), not lookahead == 0,
+                // and therefore consumes the embedded NULs and malformed UTF-8.
+                let root = tree.root_node();
+                assert_eq!(root.kind(), "source_file");
+                assert_eq!(root.kind_id(), 43);
+                assert_eq!(root.byte_range(), 0..source.len());
+                assert_eq!(root.start_position(), Point::new(0, 0));
+                assert_eq!(root.end_position(), Point::new(1, end_column));
+                assert!(root.is_named());
+                assert!(!root.is_error());
+                assert!(!root.is_extra());
+                assert!(!root.is_missing());
+                assert!(root.has_error());
+                assert_eq!(root.child_count(), 1);
+                assert_eq!(root.named_child_count(), 1);
+
+                let error = root.child(0).unwrap();
+                assert!(error.is_error());
+                assert!(error.is_named());
+                assert!(error.is_extra());
+                assert!(!error.is_missing());
+                assert!(error.has_error());
+                assert_eq!(error.range(), root.range());
+                assert_eq!(error.child_count(), 1);
+                assert_eq!(error.named_child_count(), 1);
+
+                let content = error.child(0).unwrap();
+                assert_eq!(content.kind(), "bracket_argument_content");
+                assert_eq!(content.kind_id(), 37);
+                assert_eq!(content.range(), root.range());
+                assert!(content.is_named());
+                assert!(!content.is_error());
+                assert!(!content.is_extra());
+                assert!(!content.is_missing());
+                assert!(!content.has_error());
+                assert_eq!(content.child_count(), 0);
+                assert_eq!(content.named_child_count(), 0);
+            }
         }
     }
 }
