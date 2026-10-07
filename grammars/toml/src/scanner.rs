@@ -11,52 +11,41 @@ const MULTILINE_LITERAL_STRING_END: Symbol = 4;
 /// The C scanner has no payload or serialized state.
 pub(crate) struct Scanner;
 
-// Keep quote-run callbacks and bookkeeping out of the line-ending scan path.
-// Specialize the two delimiters so their token IDs and code points do not
-// occupy registers across the lexer callbacks. Quote runs are uncommon
-// compared with the scanner's ordinary LF tokens.
-#[cold]
-#[inline(never)]
-fn scan_multiline_string_end<
-    const DELIMITER: i32,
-    const CONTENT_SYMBOL: Symbol,
-    const END_SYMBOL: Symbol,
->(
-    lexer: &mut dyn Lexer,
-) -> bool {
-    // The caller has checked the end token and first delimiter.
+// The cold non-LF dispatch shares the quote loop for both delimiters.
+// Inline it there to avoid a second call frame; only the delimiter needs to
+// survive the lexer callbacks, with token IDs computed at the final position.
+#[inline(always)]
+fn scan_multiline_string_end(lexer: &mut dyn Lexer, delimiter: i32) -> bool {
+    // The caller has checked the first quote and its end-token validity.
     lexer.advance(false);
     lexer.mark_end();
 
-    if lexer.lookahead() != DELIMITER {
-        lexer.set_result_symbol(CONTENT_SYMBOL);
-        return true;
+    let mut is_end = false;
+    if lexer.lookahead() == delimiter {
+        lexer.advance(false);
+        if lexer.lookahead() == delimiter {
+            lexer.advance(false);
+            if lexer.lookahead() != delimiter {
+                lexer.mark_end();
+                is_end = true;
+            }
+        } else {
+            lexer.mark_end();
+        }
     }
 
-    lexer.advance(false);
-
-    if lexer.lookahead() != DELIMITER {
-        lexer.mark_end();
-        lexer.set_result_symbol(CONTENT_SYMBOL);
-        return true;
-    }
-
-    lexer.advance(false);
-
-    if lexer.lookahead() != DELIMITER {
-        lexer.mark_end();
-        lexer.set_result_symbol(END_SYMBOL);
-        return true;
-    }
-
-    // Four or more quotes: keep the mark after the first quote so the
-    // remaining quotes can be scanned again as content or a closing delimiter.
-    lexer.set_result_symbol(CONTENT_SYMBOL);
+    // Four or more quotes retain the mark after the first quote, as in C.
+    let content_symbol = if delimiter == 0x22 {
+        MULTILINE_BASIC_STRING_CONTENT
+    } else {
+        MULTILINE_LITERAL_STRING_CONTENT
+    };
+    lexer.set_result_symbol(content_symbol + Symbol::from(is_end));
     true
 }
 
 // LF takes the direct path in scan. Dispatch the remaining starts only
-// when needed. Marking these helpers cold lets the enabled LF path fall
+// when needed. Marking this helper cold lets the enabled LF path fall
 // through the entry checks instead of branching around failure returns.
 #[cold]
 #[inline(never)]
@@ -70,25 +59,12 @@ fn scan_non_newline(lexer: &mut dyn Lexer, valid_symbols: &[bool; 5], mut lookah
             return false;
         }
     } else {
-        return match lookahead {
-            0x22 => {
-                valid_symbols[MULTILINE_BASIC_STRING_END as usize]
-                    && scan_multiline_string_end::<
-                        0x22,
-                        MULTILINE_BASIC_STRING_CONTENT,
-                        MULTILINE_BASIC_STRING_END,
-                    >(lexer)
-            }
-            0x27 => {
-                valid_symbols[MULTILINE_LITERAL_STRING_END as usize]
-                    && scan_multiline_string_end::<
-                        0x27,
-                        MULTILINE_LITERAL_STRING_CONTENT,
-                        MULTILINE_LITERAL_STRING_END,
-                    >(lexer)
-            }
-            _ => false,
+        let end_symbol = match lookahead {
+            0x22 => MULTILINE_BASIC_STRING_END,
+            0x27 => MULTILINE_LITERAL_STRING_END,
+            _ => return false,
         };
+        return valid_symbols[end_symbol as usize] && scan_multiline_string_end(lexer, lookahead);
     }
 
     while matches!(lookahead, 0x20 | 0x09) {
@@ -260,7 +236,7 @@ mod tests {
     }
 
     #[test]
-    fn quote_specializations_preserve_boundaries_for_every_validity_mask() {
+    fn quote_scans_preserve_boundaries_for_every_validity_mask() {
         for (delimiter, content, end, other_quote) in [
             (
                 '"',
@@ -301,11 +277,80 @@ mod tests {
                                 expected.push(Event::MarkEnd(count));
                             }
                             // Neither content validity nor the other quote's
-                            // end flag can change this specialization's token.
+                            // end flag can change this delimiter's token.
                             expected.push(Event::Symbol(if count == 3 { end } else { content }));
                         }
                         assert_eq!(lexer.events, expected, "{input:?}, mask {mask}");
                         assert_eq!(lexer.position, if enabled { count.min(3) } else { 0 });
+                        assert_eq!(lexer.lookahead_calls.get(), lexer.position + 1);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn quote_runs_compare_full_width_lookahead_after_every_advance() {
+        for (delimiter, content, end) in [
+            (
+                0x22,
+                MULTILINE_BASIC_STRING_CONTENT,
+                MULTILINE_BASIC_STRING_END,
+            ),
+            (
+                0x27,
+                MULTILINE_LITERAL_STRING_CONTENT,
+                MULTILINE_LITERAL_STRING_END,
+            ),
+        ] {
+            // Include both quote bytes with upper bits set: narrowing the
+            // shared delimiter comparison would change the mark or token.
+            for terminator in [
+                -1,
+                i32::MIN,
+                i32::MAX,
+                0,
+                0x0a,
+                0x0d,
+                0x122,
+                0x127,
+                0x10022,
+                0x10027,
+                0x10ff22,
+                0x10ff27,
+            ] {
+                for count in 1..=3 {
+                    for mask in 0..32 {
+                        let valid: [bool; 5] = std::array::from_fn(|i| mask & (1 << i) != 0);
+                        let enabled = valid[end as usize];
+                        let mut lexer = TestLexer::new("");
+                        lexer.input.resize(count, delimiter);
+                        lexer.input.extend([terminator, delimiter, delimiter]);
+                        assert_eq!(Scanner.scan(&mut lexer, &valid), enabled);
+
+                        let mut expected = vec![];
+                        if enabled {
+                            expected.push(Event::Advance {
+                                position: 0,
+                                skip: false,
+                            });
+                            expected.push(Event::MarkEnd(1));
+                            for position in 1..count {
+                                expected.push(Event::Advance {
+                                    position,
+                                    skip: false,
+                                });
+                            }
+                            if count > 1 {
+                                expected.push(Event::MarkEnd(count));
+                            }
+                            expected.push(Event::Symbol(if count == 3 { end } else { content }));
+                        }
+                        assert_eq!(
+                            lexer.events, expected,
+                            "delimiter {delimiter}, terminator {terminator}, count {count}, mask {mask}"
+                        );
+                        assert_eq!(lexer.position, if enabled { count } else { 0 });
                         assert_eq!(lexer.lookahead_calls.get(), lexer.position + 1);
                     }
                 }
