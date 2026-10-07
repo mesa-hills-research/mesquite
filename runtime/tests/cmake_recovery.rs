@@ -1,4 +1,5 @@
-//! CMake recovery regressions from oracle buckets 1b5a6fb7, f5e2762e, and 548436bf.
+//! CMake recovery regressions from oracle buckets
+//! 1b5a6fb7, f5e2762e, 548436bf, and 6c68c51b.
 
 use ts_port::{ParseOptions, ParseState, Parser, Point};
 
@@ -81,7 +82,8 @@ fn unfinished_commands_keep_zero_width_bracket_content_at_eof() {
         let tree = parser.parse(warmup, None).unwrap();
         assert!(!tree.root_node().has_error());
 
-        // OneCharacter.cmake and malformedInclude.cmake from bucket f5e2762e.
+        // OneCharacter.cmake and malformedInclude.cmake from bucket f5e2762e,
+        // plus the incomplete message command from bucket 6c68c51b.
         // The scanner's zero token means BRACKET_ARGUMENT_OPEN even without an
         // opener. Recovery accepts its zero-width content at EOF as an ordinary
         // named leaf, NOT as a missing node. Empty-state deserialization must
@@ -89,6 +91,7 @@ fn unfinished_commands_keep_zero_width_bracket_content_at_eof() {
         for (source, eof, child_count, first_kind) in [
             ("a", Point::new(0, 1), 2, "identifier"),
             ("if(\n", Point::new(1, 0), 3, "if"),
+            ("message(S", Point::new(0, 9), 3, "identifier"),
         ] {
             let mut progress_calls = 0;
             let mut progress = |_: &ParseState| {
