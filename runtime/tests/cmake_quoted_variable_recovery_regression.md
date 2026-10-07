@@ -1,6 +1,6 @@
 # CMake quoted-variable recovery verification (bucket `1b5a6fb7`)
 
-All four reported inputs already pass at the starting revision `8ec6195`:
+All four reported inputs already pass at the starting revision `c3e1474`:
 
 - `Tests/RunCMake/Syntax/NameWithTabsQuoted.cmake`
 - `Tests/RunCMake/Syntax/NameWithSpacesQuoted.cmake`
@@ -47,7 +47,7 @@ parser API, independent of the external fixture checkout:
 
 ## Latest verification
 
-Rechecked the Rust scanner against the current C source and reran at `8ec6195`:
+Rechecked the Rust scanner against the current C source and reran at `c3e1474`:
 
 - `run_oracle(inputs = "bucket:1b5a6fb7")`: **4/4 pass**, queries enabled.
 - `run_oracle(inputs = "all", languages = "cmake")`:
@@ -56,8 +56,9 @@ Rechecked the Rust scanner against the current C source and reran at `8ec6195`:
   - **9878/9878 fresh inputs pass**, queries enabled.
 - `cargo check --workspace --all-targets`: passes. The existing unused-assignment
   warning in host-owned `grammars/yaml/src/lex.rs:20` remains unchanged.
-- `cargo test -p ts_port_cmake`: **24 tests pass**.
-- `cargo test -p ts_port --test cmake_quoted_variable_recovery`: **3 tests pass**.
+- `cargo test -p ts_port_cmake -p ts_port`: **24 CMake scanner unit tests**,
+  **212 runtime unit tests**, and **20 integration tests** pass, including all
+  **3 quoted-variable recovery tests**; doc tests pass as well.
 - `cargo clippy -p ts_port -p ts_port_cmake --all-targets -- -D warnings`: passes.
 
 This assignment records a fresh verification of the merged baseline only: the
