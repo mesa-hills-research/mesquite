@@ -181,10 +181,10 @@ lexer warning noted above. This change only strengthens regression coverage;
 there are no runtime changes, C deviations, new unsafe code, or generated-file
 changes.
 
-### ERROR-range revalidation at `4d7a12c`
+### ERROR-range revalidation at `7fbe30f`
 
 Rechecked the previously resolved bucket at this starting revision; all checks
-below were rerun, rather than relying on the earlier verification at `9106d1d`.
+below were rerun, rather than relying on the earlier verification at `4d7a12c`.
 Bucket `e0b0bff8` already passes on this starting checkout. Comparing the current
 C scanner with Rust confirms the merged zero-valued creation/reset fix remains
 correct: `ts_calloc` initializes both fields, and empty or wrong-length snapshots
@@ -218,7 +218,7 @@ new unsafe code, warnings, or generated-file modifications are introduced.
 
 ## Empty recovery-content bucket `f5e2762e`
 
-Reverified at `5f9a0be` (previously at `6e63bc8`):
+Reverified at `342f3a5` (previously at `5f9a0be`):
 all 16 reported inputs already pass on the starting checkout. The merged scanner
 initialization/reset correction above allows `bracket_argument_content` at EOF
 without an opener, including after `a` and after skipping the newline in `if(\n`.
@@ -248,7 +248,7 @@ this starting revision, so no duplicate test or behavior change was warranted.
 Existing node-navigation assertions also confirm that the EOF token remains
 reachable with a tree cursor even when the preceding sibling ends at EOF.
 
-Checks rerun for this bucket at `5f9a0be` (not inherited from the earlier
+Checks rerun for this bucket at `342f3a5` (not inherited from the earlier
 verification):
 
 - `run_oracle(inputs = "bucket:f5e2762e")`: 16/16 pass.
