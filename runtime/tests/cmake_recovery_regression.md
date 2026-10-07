@@ -127,7 +127,7 @@ checkout; this revalidation changes no scanner or runtime behavior.
 
 ## Empty recovery-content bucket `f5e2762e`
 
-Reverified at `bcc1bc7`: all 16 reported inputs already pass. The merged scanner
+Reverified at `4977a30`: all 16 reported inputs already pass. The merged scanner
 initialization/reset correction above allows `bracket_argument_content` at EOF
 without an opener, including after `a` and after skipping the newline in `if(\n`.
 This zero-width token is a real scanner token, not an inserted missing node.
@@ -139,7 +139,9 @@ both with fresh scanners and after parsing bracket arguments/comments. Scanner
 unit tests additionally check the EOF callback order and snapshot reset behavior.
 The existing parser-level whitespace cases also cover CRLF, lone CR, spaces/tabs,
 and multiple newlines, asserting exact EOF byte and point ranges after skipping
-that whitespace with both fresh and reused scanners.
+that whitespace with both fresh and reused scanners. Both integration tests run
+with whole-source and byte-at-a-time input callbacks, covering whitespace and
+CRLF split across chunks without changing the zero-width token's EOF position.
 
 Checks rerun for this bucket:
 
@@ -159,7 +161,7 @@ changes are introduced.
 
 ## Unterminated-call bucket `7f8795fb`
 
-Reverified at `ad767ee`: all three reported inputs already pass with the merged
+Reverified at `1d2f655`: all three reported inputs already pass with the merged
 scanner initialization/reset correction above. The current C scanner uses
 `ts_calloc` and clears both fields on empty or invalid-length snapshots, matching
 the Rust implementation. This allows recovery content without an opener:
@@ -169,9 +171,12 @@ input in `NullTerminatedArgument.cmake`. An inert initial token instead produced
 `source_file` roots with missing delimiters rather than the reference `ERROR`.
 
 Existing `cmake_unterminated_call_recovery` integration tests cover all three
-inputs, asserting root/content kinds, flags, byte/point ranges, and zero progress
-callbacks. They exercise fresh and reused scanners with both whole-source and
-one-byte input chunks. No additional behavior change or duplicate test is needed.
+inputs, asserting root/content kinds, flags, byte/point ranges, and exact progress
+callback counts: one for each unterminated-call input and zero for the embedded-NUL
+input. They exercise fresh and reused scanners with both whole-source and one-byte
+input chunks. The earlier verification note incorrectly described all three counts
+as zero; the existing tests already assert the correct counts. No additional
+behavior change or duplicate test is needed.
 
 Validation rerun for this bucket:
 
