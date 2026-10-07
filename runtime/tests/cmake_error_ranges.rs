@@ -87,6 +87,7 @@ fn assert_recovery_range(source: &str, identifier_end: usize, eof: Point, chunk_
 fn assert_tree_range(tree: &Tree, source: &str, identifier_end: usize, eof: Point) {
     let root = tree.root_node();
     assert_eq!(root.kind(), "source_file");
+    assert_eq!(root.kind_id(), 43);
     assert_eq!(root.byte_range(), 0..source.len());
     assert_eq!(root.start_position(), Point::new(0, 0));
     assert_eq!(root.end_position(), eof);
@@ -96,6 +97,7 @@ fn assert_tree_range(tree: &Tree, source: &str, identifier_end: usize, eof: Poin
 
     let error = root.child(0).unwrap();
     assert!(error.is_error());
+    assert_eq!(error.kind_id(), u16::MAX);
     assert!(error.is_named());
     assert!(error.is_extra());
     assert!(error.has_error());
@@ -110,6 +112,7 @@ fn assert_tree_range(tree: &Tree, source: &str, identifier_end: usize, eof: Poin
     if identifier_end != 0 {
         let identifier = error.child(0).unwrap();
         assert_eq!(identifier.kind(), "identifier");
+        assert_eq!(identifier.kind_id(), 35);
         assert_eq!(identifier.byte_range(), 0..identifier_end);
         assert_eq!(identifier.start_position(), Point::new(0, 0));
         assert_eq!(identifier.end_position(), Point::new(0, identifier_end));
@@ -120,6 +123,7 @@ fn assert_tree_range(tree: &Tree, source: &str, identifier_end: usize, eof: Poin
     // newline. Previously the ERROR ended before it or split into two nodes.
     let content = error.child(content_index).unwrap();
     assert_eq!(content.kind(), "bracket_argument_content");
+    assert_eq!(content.kind_id(), 37);
     assert_eq!(content.byte_range(), identifier_end..source.len());
     assert_eq!(content.start_position(), Point::new(0, identifier_end));
     assert_eq!(content.end_position(), eof);
@@ -133,6 +137,23 @@ fn assert_tree_range(tree: &Tree, source: &str, identifier_end: usize, eof: Poin
         content.utf8_text(source.as_bytes()).unwrap(),
         &source[identifier_end..]
     );
+
+    // Range-based navigation must also include the content's first and last
+    // bytes. In particular, the final newline must resolve to the content leaf,
+    // not merely the source_file whose extent already reached EOF before the
+    // scanner fix. Repeat these lookups on every incrementally edited tree.
+    for byte in [identifier_end, source.len() - 1] {
+        assert_eq!(root.first_child_for_byte(byte), Some(error));
+        assert_eq!(error.first_child_for_byte(byte), Some(content));
+        assert_eq!(
+            root.descendant_for_byte_range(byte, byte + 1),
+            Some(content)
+        );
+        assert_eq!(
+            root.named_descendant_for_byte_range(byte, byte + 1),
+            Some(content)
+        );
+    }
 }
 
 #[test]
