@@ -267,7 +267,7 @@ changes are introduced.
 
 ## Unterminated-call bucket `7f8795fb`
 
-Reverified at `d48f9d2` (previously at `5e180ee`): all three
+Reverified at `4b7bfa6` (previously at `d48f9d2`): all three
 reported inputs already pass on the starting checkout with the merged scanner
 initialization/reset correction above. The current C scanner uses
 `ts_calloc` and clears both fields on empty or invalid-length snapshots, matching
@@ -288,7 +288,7 @@ incorrectly described all three callback counts as zero; the existing tests
 already assert the correct counts. No additional behavior change or duplicate
 test is needed.
 
-Validation rerun for this bucket at `d48f9d2` (all checks below except the
+Validation rerun for this bucket at `4b7bfa6` (all checks below except the
 explicitly marked prior workspace clippy result were rerun in this worktree):
 
 - `run_oracle(inputs = "bucket:7f8795fb")`: 3/3 pass.
