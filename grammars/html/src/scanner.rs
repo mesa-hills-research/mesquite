@@ -244,15 +244,152 @@ impl<'a> Tag<'a> {
     }
 }
 
+// Most snapshots contain only a handful of builtin tag bytes. Keep the
+// header and entries inline; preserve reusable overflow storage for arbitrary
+// nesting and custom-name lengths.
+const INLINE_STACK_BYTES: usize = 32;
+
+struct StackBytes {
+    inline: [u8; INLINE_STACK_BYTES],
+    spill: Vec<u8>,
+    len: usize,
+}
+
+impl Default for StackBytes {
+    fn default() -> Self {
+        Self {
+            inline: [0; INLINE_STACK_BYTES],
+            spill: Vec::new(),
+            len: 4,
+        }
+    }
+}
+
+impl StackBytes {
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn set_header(&mut self, header: [u8; 4]) {
+        if self.len <= INLINE_STACK_BYTES {
+            self.inline[..4].copy_from_slice(&header);
+        } else {
+            self.spill[..4].copy_from_slice(&header);
+        }
+    }
+
+    #[cfg(test)]
+    fn capacity(&self) -> usize {
+        self.spill.capacity().max(INLINE_STACK_BYTES)
+    }
+
+    fn reserve(&mut self, additional: usize) {
+        if self.len + additional > INLINE_STACK_BYTES {
+            self.spill.reserve(self.len + additional - self.spill.len());
+        }
+    }
+
+    #[inline(never)]
+    fn start_spill(&mut self) {
+        self.spill.clear();
+        self.spill.extend_from_slice(&self.inline[..self.len]);
+    }
+
+    fn push(&mut self, byte: u8) {
+        if self.len < INLINE_STACK_BYTES {
+            self.inline[self.len] = byte;
+        } else {
+            if self.len == INLINE_STACK_BYTES {
+                self.start_spill();
+            }
+            self.spill.push(byte);
+        }
+        self.len += 1;
+    }
+
+    fn extend_from_slice(&mut self, bytes: &[u8]) {
+        let end = self.len + bytes.len();
+        if end <= INLINE_STACK_BYTES {
+            self.inline[self.len..end].copy_from_slice(bytes);
+        } else {
+            if self.len <= INLINE_STACK_BYTES {
+                self.start_spill();
+            }
+            self.spill.extend_from_slice(bytes);
+        }
+        self.len = end;
+    }
+
+    fn truncate(&mut self, len: usize) {
+        if len >= self.len {
+            return;
+        }
+        if self.len > INLINE_STACK_BYTES {
+            if len <= INLINE_STACK_BYTES {
+                self.inline[..len].copy_from_slice(&self.spill[..len]);
+            }
+            self.spill.truncate(len);
+        }
+        self.len = len;
+    }
+
+    fn pop(&mut self) {
+        if self.len != 0 {
+            self.truncate(self.len - 1);
+        }
+    }
+
+    fn resize(&mut self, len: usize, value: u8) {
+        if len <= self.len {
+            self.truncate(len);
+        } else {
+            if len <= INLINE_STACK_BYTES {
+                self.inline[self.len..len].fill(value);
+            } else {
+                if self.len <= INLINE_STACK_BYTES {
+                    self.start_spill();
+                }
+                self.spill.resize(len, value);
+            }
+            self.len = len;
+        }
+    }
+}
+
+impl std::ops::Deref for StackBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        if self.len <= INLINE_STACK_BYTES {
+            &self.inline[..self.len]
+        } else {
+            &self.spill
+        }
+    }
+}
+
+impl PartialEq for StackBytes {
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+impl Eq for StackBytes {}
+
+impl std::fmt::Debug for StackBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&**self, f)
+    }
+}
+
 /// Tags are kept in serialization order after a four-byte native-endian count
 /// header: one byte per builtin and a type, length byte, and spelling for
 /// customs. Long names keep their full spelling here; only serialization
 /// truncates them. A sparse index locates custom names when popping, without
 /// imposing an offset word on every builtin. Keeping the header in the same
 /// buffer lets frequent unchanged restores compare just one byte slice.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Default, Debug, PartialEq, Eq)]
 struct TagStack {
-    bytes: Vec<u8>,
+    bytes: StackBytes,
     custom: Vec<CustomTag>,
     depth: usize,
     // Names that require truncation or strncpy's NUL padding on serialization.
@@ -261,18 +398,6 @@ struct TagStack {
     // type so those reads do not decode the packed tail and custom index again.
     // Push knows the type; pop and restore refresh it after changing the stack.
     top_kind: Option<TagType>,
-}
-
-impl Default for TagStack {
-    fn default() -> Self {
-        Self {
-            bytes: vec![0; 4],
-            custom: Vec::new(),
-            depth: 0,
-            noncanonical_names: 0,
-            top_kind: None,
-        }
-    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -294,7 +419,7 @@ impl TagStack {
 
     fn clear(&mut self) {
         self.bytes.truncate(4);
-        self.bytes[..4].fill(0);
+        self.bytes.set_header([0; 4]);
         self.custom.clear();
         self.depth = 0;
         self.noncanonical_names = 0;
@@ -307,7 +432,7 @@ impl TagStack {
         // Repeating the u16 in a u32 gives the same two native-endian counts on
         // both little- and big-endian hosts.
         let count = self.depth.min(usize::from(u16::MAX)) as u32;
-        self.bytes[..4].copy_from_slice(&(count | (count << 16)).to_ne_bytes());
+        self.bytes.set_header((count | (count << 16)).to_ne_bytes());
     }
 
     fn refresh_top_kind(&mut self) {
@@ -436,15 +561,25 @@ impl TagStack {
     }
 
     fn matches(&self, buffer: &[u8]) -> bool {
-        // A full snapshot is already in our live representation. Comparing it
-        // directly avoids maintaining (and invalidating) a second cached copy.
-        // Long live names have a clamped length byte but retain all bytes. They
-        // are not wire format: their tail can even look like additional tags.
-        // Conservatively rebuild states containing any noncanonical name.
-        if self.noncanonical_names != 0 || self.depth > usize::from(u16::MAX) {
+        if buffer.is_empty() {
+            return self.is_empty();
+        }
+        let len = buffer.len();
+        // Long names retain all their bytes despite the clamped length byte;
+        // NUL-containing names require strncpy padding. Neither is wire format.
+        if len != self.bytes.len() || self.noncanonical_names != 0 {
             return false;
         }
-        (buffer.is_empty() && self.is_empty()) || buffer == self.bytes
+        // A short snapshot bounds the live depth because every tag occupies at
+        // least one byte. Only the spill case needs to check for u16 clamping.
+        // Fixed-size comparisons also keep shallow restores out of memcmp.
+        let live = &self.bytes.inline;
+        match len {
+            8..=16 => (buffer[..8] == live[..8]) & (buffer[len - 8..] == live[len - 8..len]),
+            4..=7 => (buffer[..4] == live[..4]) & (buffer[len - 4..] == live[len - 4..len]),
+            17..=32 => (buffer[..16] == live[..16]) & (buffer[len - 16..] == live[len - 16..len]),
+            _ => self.depth <= usize::from(u16::MAX) && buffer == &*self.bytes,
+        }
     }
 }
 
@@ -851,7 +986,24 @@ impl ExternalScanner for Scanner {
             && self.tags.bytes.len() < SERIALIZATION_BUFFER_SIZE
         {
             let size = self.tags.bytes.len();
-            buffer[..size].copy_from_slice(&self.tags.bytes);
+            // Frequent shallow snapshots use constant-size copies instead of
+            // calling memcpy. Copy only live bytes, never the unused inline tail.
+            match size {
+                4 => buffer[..4].copy_from_slice(&self.tags.bytes.inline[..4]),
+                5 => buffer[..5].copy_from_slice(&self.tags.bytes.inline[..5]),
+                6 => buffer[..6].copy_from_slice(&self.tags.bytes.inline[..6]),
+                7 => buffer[..7].copy_from_slice(&self.tags.bytes.inline[..7]),
+                8 => buffer[..8].copy_from_slice(&self.tags.bytes.inline[..8]),
+                9 => buffer[..9].copy_from_slice(&self.tags.bytes.inline[..9]),
+                10 => buffer[..10].copy_from_slice(&self.tags.bytes.inline[..10]),
+                11 => buffer[..11].copy_from_slice(&self.tags.bytes.inline[..11]),
+                12 => buffer[..12].copy_from_slice(&self.tags.bytes.inline[..12]),
+                13 => buffer[..13].copy_from_slice(&self.tags.bytes.inline[..13]),
+                14 => buffer[..14].copy_from_slice(&self.tags.bytes.inline[..14]),
+                15 => buffer[..15].copy_from_slice(&self.tags.bytes.inline[..15]),
+                16 => buffer[..16].copy_from_slice(&self.tags.bytes.inline[..16]),
+                _ => buffer[..size].copy_from_slice(&self.tags.bytes),
+            }
             return size;
         }
         let tag_count = self.tags.len().min(usize::from(u16::MAX)) as u16;
@@ -1198,7 +1350,7 @@ mod tests {
             assert_eq!(&serialized(&mut scanner), snapshot);
         }
         scanner.deserialize(&[]);
-        assert_eq!(scanner.tags.bytes, [0; 4]);
+        assert_eq!(*scanner.tags.bytes, [0; 4]);
     }
 
     #[test]
@@ -1453,7 +1605,7 @@ mod tests {
             let bytes = serialized(&mut scanner);
             assert_eq!(bytes, reference_serialized(&tags));
             if expected_noncanonical == 0 {
-                assert_eq!(bytes, scanner.tags.bytes);
+                assert_eq!(bytes, &*scanner.tags.bytes);
             }
         }
     }
@@ -1558,6 +1710,85 @@ mod tests {
             assert_eq!(scanner.tags.last().unwrap().custom_tag_name, b"X\0YZ");
             scanner.deserialize(&embedded_nul);
         }
+    }
+
+    #[test]
+    fn inline_stack_storage_matches_vec_across_spills() {
+        let mut actual = StackBytes::default();
+        let mut expected = vec![0; 4];
+        assert_eq!(actual.spill.capacity(), 0);
+        for length in [4, 7, 8, 15, 16, 17, 31, 32, 33, 64, 32, 31, 4, 300, 5, 33, 4] {
+            actual.resize(length, 0xa5);
+            expected.resize(length, 0xa5);
+            assert_eq!(&*actual, expected);
+            for byte in 0..35 {
+                actual.push(byte);
+                expected.push(byte);
+                assert_eq!(&*actual, expected);
+            }
+            actual.set_header([1, 2, 3, 4]);
+            expected[..4].copy_from_slice(&[1, 2, 3, 4]);
+            assert_eq!(&*actual, expected);
+            for _ in 0..35 {
+                actual.pop();
+                expected.pop();
+                assert_eq!(&*actual, expected);
+            }
+            for length in [0, 1, 2, 31, 32, 33, 64] {
+                let bytes = vec![0x5a; length];
+                actual.reserve(length);
+                actual.extend_from_slice(&bytes);
+                expected.extend_from_slice(&bytes);
+                assert_eq!(&*actual, expected);
+            }
+            let capacity = actual.spill.capacity();
+            actual.truncate(4);
+            expected.truncate(4);
+            actual.set_header([0; 4]);
+            expected.fill(0);
+            assert_eq!(&*actual, expected);
+            assert_eq!(actual.spill.capacity(), capacity);
+        }
+    }
+
+    #[test]
+    fn inline_snapshots_compare_every_byte_and_preserve_spill_headers() {
+        let mut scanner = Scanner::default();
+        for depth in (0..65).chain((0..65).rev()) {
+            scanner.tags.clear();
+            for _ in 0..depth {
+                scanner.tags.push(Tag::for_name(b"DIV"));
+            }
+            let snapshot = serialized(&mut scanner);
+            assert_eq!(snapshot.len(), depth + 4);
+            assert!(scanner.tags.matches(&snapshot));
+            for offset in 0..snapshot.len() {
+                let mut different = snapshot.clone();
+                different[offset] ^= 0xff;
+                assert!(!scanner.tags.matches(&different), "depth={depth}, byte={offset}");
+            }
+            let mut restored = Scanner::default();
+            restored.deserialize(&snapshot);
+            assert_eq!(restored.tags, scanner.tags);
+            for _ in 0..depth {
+                scanner.tags.pop();
+                restored.tags.pop();
+                let snapshot = serialized(&mut scanner);
+                assert_eq!(serialized(&mut restored), snapshot);
+                assert!(scanner.tags.matches(&snapshot));
+                assert!(restored.tags.matches(&snapshot));
+            }
+        }
+        let mut shallow = Scanner::default();
+        for _ in 0..INLINE_STACK_BYTES - 4 {
+            shallow.tags.push(Tag::for_name(b"P"));
+        }
+        assert_eq!(shallow.tags.bytes.spill.capacity(), 0);
+        let snapshot = serialized(&mut shallow);
+        shallow.tags.clear();
+        shallow.deserialize(&snapshot);
+        assert_eq!(shallow.tags.bytes.spill.capacity(), 0);
+        assert_eq!(serialized(&mut shallow), snapshot);
     }
 
     #[test]
