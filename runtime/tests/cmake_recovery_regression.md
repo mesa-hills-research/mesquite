@@ -255,7 +255,7 @@ changes are introduced.
 
 ## Unterminated-call bucket `7f8795fb`
 
-Reverified at `24e0c71` (previously at `7586f2b`, `6674d74`, and `9a8563b`): all three
+Reverified at `7212094` (previously at `24e0c71`, `7586f2b`, `6674d74`, and `9a8563b`): all three
 reported inputs already pass on the starting checkout with the merged scanner
 initialization/reset correction above. The current C scanner uses
 `ts_calloc` and clears both fields on empty or invalid-length snapshots, matching
@@ -273,7 +273,7 @@ input chunks. The earlier verification note incorrectly described all three coun
 as zero; the existing tests already assert the correct counts. No additional
 behavior change or duplicate test is needed.
 
-Validation rerun for this bucket at `24e0c71`:
+Validation rerun for this bucket at `7212094`:
 
 - `run_oracle(inputs = "bucket:7f8795fb")`: 3/3 pass.
 - `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs
@@ -281,11 +281,11 @@ Validation rerun for this bucket at `24e0c71`:
 - `cargo check --workspace --all-targets`: passes, with only the existing warning
   in host-owned `grammars/yaml/src/lex.rs:20` noted above.
 - `cargo test -p ts_port_cmake`: 24 tests pass.
-- `cargo test -p ts_port`: all unit and integration tests pass, including the
-  three `cmake_unterminated_call_recovery` tests, which also assert each
-  direct ERROR child's kind, symbol id, range, flags, and child count.
+- `cargo test -p ts_port --test cmake_unterminated_call_recovery`: all three
+  tests pass, asserting each direct ERROR child's kind, symbol id, range,
+  flags, child count, and the exact progress-callback counts.
 - `cargo clippy -p ts_port -p ts_port_cmake --all-targets -- -D warnings`: passes.
-- `cargo clippy --workspace --all-targets -- -D warnings`: blocked by the
+- Prior workspace-wide clippy validation was blocked by the
   pre-existing unused-assignment warning in host-owned `grammars/yaml/src/lex.rs:20`.
   That generated file is outside this bucket and was left unchanged.
 
