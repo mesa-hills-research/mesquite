@@ -63,3 +63,34 @@ Rechecked the Rust scanner against the current C source and reran at `f80975f`:
 This assignment records a fresh verification of the merged baseline only: the existing fix and regressions already resolve the bucket. No
 runtime changes, deviations from C, unsafe code, or new clippy warnings were
 introduced, and no bucket failures remain.
+
+## Registry-query bucket `4d6cc948`
+
+Reverified at `8290ca7`: the assigned
+`Tests/RunCMake/find_package/Registry-query.cmake` already passes on the starting
+checkout. Its malformed `${CMAKE_ CURRENT_SOURCE_DIR}/${FILE_DIR}` reference
+exercised the same incorrect scanner initialization/reset described above:
+retaining an inert or previous token prevented recovery content and changed
+nested `ERROR` grouping. The current Rust scanner matches the current C source's
+zero initialization and reset of both fields, so no further behavior change is
+needed.
+
+Existing coverage includes that exact reference in both the scanner callback-order
+test and the `SOURCES` cases in `cmake_quoted_variable_recovery.rs`. The parser
+regressions check fresh/reused scanners, whole-input and one-byte chunks, two
+incremental repair/restore cycles, tree ranges/flags, and progress counts. No
+duplicate test was added.
+
+Checks rerun for this assignment:
+
+- `run_oracle(inputs = "bucket:4d6cc948")`: **1/1 pass**, queries enabled.
+- `run_oracle(inputs = "all", languages = "cmake")`: **270/270 gate** inputs
+  (including incremental and query checks) and **9878/9878 fresh** inputs pass.
+- `cargo check --workspace --all-targets`: passes with the pre-existing
+  unused-assignment warning in host-owned `grammars/yaml/src/lex.rs:20` unchanged.
+- `cargo test -p ts_port_cmake -p ts_port`: all runtime and CMake unit,
+  integration, and doc tests pass, including the three quoted-variable tests.
+- `cargo clippy -p ts_port -p ts_port_cmake --all-targets -- -D warnings`: passes.
+
+This follow-up records verification only. No scanner/runtime behavior changes,
+C deviations, unsafe code, generated-file edits, or new warnings are introduced.
