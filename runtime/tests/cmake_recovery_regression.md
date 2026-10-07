@@ -54,6 +54,27 @@ All checks below were rerun at `d490ab6`.
 This follow-up changes only this verification note; it introduces no deviation
 from C and no new unsafe code.
 
+
+### Revalidation of `4d6cc948` at `25a84d3`
+
+The assigned Registry-query input still passes before any new changes. Direct
+comparison with the current C scanner confirms that the merged zero-valued
+creation/reset behavior above is the required correction; no additional
+runtime change is warranted.
+
+- Bucket: **1/1 passes**, with query checks.
+- All CMake inputs: **270/270 gate** (including incremental/query checks) and
+  **9878/9878 fresh** pass.
+- `cargo check --workspace --all-targets`: passes; only the pre-existing
+  host-owned YAML lexer unused-assignment warning remains.
+- `cargo test -p ts_port_cmake`: **24 tests pass**, including the reduced
+  Registry-query scanner regression.
+- `cargo test -p ts_port --test cmake_quoted_variable_recovery`: passes.
+- `cargo clippy -p ts_port_cmake -p ts_port --all-targets -- -D warnings`: passes.
+
+This revalidation only updates this note. No behavior changes, C deviations,
+new warnings, unsafe code, or generated-file changes were introduced.
+
 ## ERROR range bucket `e0b0bff8`
 
 Reverified at `5671d20`: all five reported inputs already pass with the merged
@@ -103,7 +124,7 @@ checkout; this revalidation changes no scanner or runtime behavior.
 
 ## Empty recovery-content bucket `f5e2762e`
 
-Reverified at `d835a69`: all 16 reported inputs already pass. The merged scanner
+Reverified at `bcc1bc7`: all 16 reported inputs already pass. The merged scanner
 initialization/reset correction above allows `bracket_argument_content` at EOF
 without an opener, including after `a` and after skipping the newline in `if(\n`.
 This zero-width token is a real scanner token, not an inserted missing node.
@@ -113,7 +134,7 @@ The existing `cmake_empty_recovery_content` integration tests assert the complet
 small recovery trees, content ranges and flags, and zero progress-callback calls,
 both with fresh scanners and after parsing bracket arguments/comments. Scanner
 unit tests additionally check the EOF callback order and snapshot reset behavior.
-The parser-level whitespace cases now also cover CRLF, lone CR, spaces/tabs,
+The existing parser-level whitespace cases also cover CRLF, lone CR, spaces/tabs,
 and multiple newlines, asserting exact EOF byte and point ranges after skipping
 that whitespace with both fresh and reused scanners.
 
@@ -128,5 +149,7 @@ Checks rerun for this bucket:
 - `cargo test -p ts_port --test cmake_empty_recovery_content`: 2 tests pass.
 - `cargo clippy -p ts_port_cmake -p ts_port --all-targets -- -D warnings`: passes.
 
-This follow-up expands regression coverage without changing scanner/runtime
-behavior; it adds no C deviations, unsafe code, or generated-file changes.
+This follow-up only updates the verification record: the implementation and
+regression coverage were already present at the starting revision. No further
+scanner/runtime fix is needed, and no C deviations, unsafe code, or generated-file
+changes are introduced.
