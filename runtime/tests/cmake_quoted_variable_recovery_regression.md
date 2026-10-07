@@ -1,6 +1,6 @@
 # CMake quoted-variable recovery verification (bucket `1b5a6fb7`)
 
-All four reported inputs already pass at the starting revision `9d70057`:
+All four reported inputs already pass at the starting revision `f80975f`:
 
 - `Tests/RunCMake/Syntax/NameWithTabsQuoted.cmake`
 - `Tests/RunCMake/Syntax/NameWithSpacesQuoted.cmake`
@@ -47,7 +47,7 @@ parser API, independent of the external fixture checkout:
 
 ## Latest verification
 
-Rechecked the Rust scanner against the current C source and reran at `9d70057`:
+Rechecked the Rust scanner against the current C source and reran at `f80975f`:
 
 - `run_oracle(inputs = "bucket:1b5a6fb7")`: **4/4 pass**, queries enabled.
 - `run_oracle(inputs = "all", languages = "cmake")`:
@@ -60,7 +60,6 @@ Rechecked the Rust scanner against the current C source and reran at `9d70057`:
 - `cargo test -p ts_port --test cmake_quoted_variable_recovery`: **3 tests pass**.
 - `cargo clippy -p ts_port -p ts_port_cmake --all-targets -- -D warnings`: passes.
 
-This assignment consolidates the prior verification notes and records the latest
-checks only: the existing fix and regressions already resolve the bucket. No
+This assignment records a fresh verification of the merged baseline only: the existing fix and regressions already resolve the bucket. No
 runtime changes, deviations from C, unsafe code, or new clippy warnings were
 introduced, and no bucket failures remain.
