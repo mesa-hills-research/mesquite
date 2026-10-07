@@ -36,7 +36,7 @@ pub(crate) struct Scanner {
 // The reference runs in the default C locale: its wide-character predicates
 // classify ASCII, not Unicode. In particular, iswspace includes vertical tab.
 fn is_space(c: i32) -> bool {
-    matches!(c, 0x09..=0x0d | 0x20)
+    c == 0x20 || matches!(c, 0x09..=0x0d)
 }
 
 fn is_digit(c: i32) -> bool {
@@ -51,8 +51,7 @@ fn is_valid_name_char(c: i32) -> bool {
         || c >= 0x80
 }
 
-fn scan_whitespace(lexer: &mut dyn Lexer) -> Option<i32> {
-    let mut c = lexer.lookahead();
+fn scan_whitespace(lexer: &mut dyn Lexer, mut c: i32) -> Option<i32> {
     loop {
         while is_space(c) {
             lexer.advance(false);
@@ -74,6 +73,29 @@ fn scan_whitespace(lexer: &mut dyn Lexer) -> Option<i32> {
             c = lexer.lookahead();
         }
     }
+}
+
+// Tail-called from the small scanner dispatcher; do not pull the whitespace
+// loop's saved registers into error-recovery and string dispatch.
+#[inline(never)]
+fn scan_automatic_semicolon(lexer: &mut dyn Lexer) -> bool {
+    let c = lexer.lookahead();
+    // With no whitespace/comment to consume, only '?' can begin a match.
+    // A failed scan with no advancement needs no boundary mark: the runtime
+    // finishes at this same position before trying the generated lexer.
+    if !matches!(c, 0x09..=0x0d | 0x20 | 0x2f | 0x3f) {
+        return false;
+    }
+    lexer.mark_end();
+    let Some(c) = scan_whitespace(lexer, c) else {
+        return false;
+    };
+    if c != '?' as i32 {
+        return false;
+    }
+    lexer.set_result_symbol(AUTOMATIC_SEMICOLON as u16);
+    lexer.advance(false);
+    lexer.lookahead() == '>' as i32
 }
 
 fn is_escapable_sequence(lexer: &mut dyn Lexer, c: i32) -> bool {
@@ -100,6 +122,155 @@ fn scan_heredoc_word(lexer: &mut dyn Lexer, word: &mut Vec<i32>) {
 }
 
 impl Scanner {
+    // Keep string/heredoc dispatch, its loop state and allocation paths out of
+    // the common semicolon-only scanner's stack frame and instruction stream.
+    #[cold]
+    #[inline(never)]
+    fn scan_general(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
+        // Preserve the C dispatch order, including the after-variable forms
+        // taking precedence over their corresponding ordinary content forms.
+        for &(symbol, after_variable, heredoc, execution) in &[
+            (ENCAPSED_STRING_CHARS_AFTER_VARIABLE, true, false, false),
+            (ENCAPSED_STRING_CHARS, false, false, false),
+            (EXECUTION_STRING_CHARS_AFTER_VARIABLE, true, false, true),
+            (EXECUTION_STRING_CHARS, false, false, true),
+            (
+                ENCAPSED_STRING_CHARS_AFTER_VARIABLE_HEREDOC,
+                true,
+                true,
+                false,
+            ),
+            (ENCAPSED_STRING_CHARS_HEREDOC, false, true, false),
+        ] {
+            if valid_symbols[symbol] {
+                // The string loop marks every possible token boundary. Only
+                // heredoc recognition can return before entering that loop.
+                if heredoc {
+                    lexer.mark_end();
+                }
+                lexer.set_result_symbol(symbol as u16);
+                return self.scan_encapsed_part_string(lexer, after_variable, heredoc, execution);
+            }
+        }
+
+        lexer.mark_end();
+        if valid_symbols[NOWDOC_STRING] {
+            lexer.set_result_symbol(NOWDOC_STRING as u16);
+            return self.scan_nowdoc_string(lexer);
+        }
+
+        if valid_symbols[HEREDOC_END] {
+            lexer.set_result_symbol(HEREDOC_END as u16);
+            let Some(heredoc) = self.heredocs().last() else {
+                return false;
+            };
+            while is_space(lexer.lookahead()) {
+                lexer.advance(true);
+            }
+            // Compare in place instead of allocating a temporary closing
+            // word. Still consume the complete name on mismatch, as C does.
+            let mut matched = true;
+            let mut length = 0;
+            let mut c = lexer.lookahead();
+            while is_valid_name_char(c) {
+                matched &= heredoc.word.get(length) == Some(&c);
+                length += 1;
+                lexer.advance(false);
+                c = lexer.lookahead();
+            }
+            if !matched || length != heredoc.word.len() {
+                return false;
+            }
+            lexer.mark_end();
+            self.heredoc_count -= 1;
+            return true;
+        }
+
+        let c = lexer.lookahead();
+        let Some(c) = scan_whitespace(lexer, c) else {
+            return false;
+        };
+
+        if valid_symbols[EOF_TOKEN] && c == 0 && lexer.eof() {
+            lexer.set_result_symbol(EOF_TOKEN as u16);
+            return true;
+        }
+
+        if valid_symbols[HEREDOC_START] {
+            lexer.set_result_symbol(HEREDOC_START as u16);
+            while is_space(lexer.lookahead()) {
+                lexer.advance(true);
+            }
+            let heredoc = self.push_heredoc();
+            scan_heredoc_word(lexer, &mut heredoc.word);
+            if heredoc.word.is_empty() {
+                self.heredoc_count -= 1;
+                return false;
+            }
+            lexer.mark_end();
+            return true;
+        }
+
+        if valid_symbols[AUTOMATIC_SEMICOLON] {
+            if c != '?' as i32 {
+                return false;
+            }
+            // Failed scans do not publish a result symbol. Most calls stop
+            // above, so avoid a dynamic setter for ordinary PHP tokens.
+            lexer.set_result_symbol(AUTOMATIC_SEMICOLON as u16);
+            lexer.advance(false);
+            return lexer.lookahead() == '>' as i32;
+        }
+
+        false
+    }
+
+    #[cold]
+    fn serialize_heredocs(&self, buffer: &mut [u8]) -> usize {
+        let mut size = 1;
+        for heredoc in self.heredocs() {
+            let word_size = heredoc.word.len() * size_of::<i32>();
+            // C deliberately rejects a state that would exactly fill the buffer,
+            // and leaves any already-written prefix intact on failure.
+            if size + 5 + word_size >= SERIALIZATION_BUFFER_SIZE {
+                return 0;
+            }
+            buffer[size] = u8::from(heredoc.end_word_indentation_allowed);
+            size += 1;
+            buffer[size..size + 4].copy_from_slice(&(heredoc.word.len() as u32).to_ne_bytes());
+            size += 4;
+            for &c in &heredoc.word {
+                buffer[size..size + 4].copy_from_slice(&c.to_ne_bytes());
+                size += 4;
+            }
+        }
+        size
+    }
+
+    #[cold]
+    fn deserialize_heredocs(&mut self, buffer: &[u8], open_heredoc_count: u8) {
+        let mut size = 1;
+        for _ in 0..open_heredoc_count {
+            let end_word_indentation_allowed = buffer[size] != 0;
+            size += 1;
+            let word_length =
+                u32::from_ne_bytes(buffer[size..size + 4].try_into().unwrap()) as usize;
+            size += 4;
+            let word_size = word_length * size_of::<i32>();
+            let heredoc = self.push_heredoc();
+            heredoc.end_word_indentation_allowed = end_word_indentation_allowed;
+            heredoc.word.extend(
+                buffer[size..size + word_size]
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|bytes| i32::from_ne_bytes(*bytes)),
+            );
+            size += word_size;
+        }
+        assert_eq!(size, buffer.len());
+    }
+
     fn heredocs(&self) -> &[Heredoc] {
         &self.heredoc_slots[..self.heredoc_count]
     }
@@ -297,149 +468,38 @@ impl ExternalScanner for Scanner {
             return false;
         }
 
-        lexer.mark_end();
-
-        // Preserve the C dispatch order, including the after-variable forms
-        // taking precedence over their corresponding ordinary content forms.
-        for (symbol, after_variable, heredoc, execution) in [
-            (ENCAPSED_STRING_CHARS_AFTER_VARIABLE, true, false, false),
-            (ENCAPSED_STRING_CHARS, false, false, false),
-            (EXECUTION_STRING_CHARS_AFTER_VARIABLE, true, false, true),
-            (EXECUTION_STRING_CHARS, false, false, true),
-            (
-                ENCAPSED_STRING_CHARS_AFTER_VARIABLE_HEREDOC,
-                true,
-                true,
-                false,
-            ),
-            (ENCAPSED_STRING_CHARS_HEREDOC, false, true, false),
-        ] {
-            if valid_symbols[symbol] {
-                lexer.set_result_symbol(symbol as u16);
-                return self.scan_encapsed_part_string(lexer, after_variable, heredoc, execution);
-            }
+        // Almost all non-string external lex states accept just the automatic
+        // semicolon. Comparing the flag row as a whole avoids the full token
+        // dispatch on every ordinary PHP token, without assuming that callers
+        // cannot enable several tokens (whose C priority is handled below).
+        if valid_symbols[..=SENTINEL_ERROR]
+            == [
+                true, false, false, false, false, false, false, false, false, false, false, false,
+            ]
+        {
+            return scan_automatic_semicolon(lexer);
         }
 
-        if valid_symbols[NOWDOC_STRING] {
-            lexer.set_result_symbol(NOWDOC_STRING as u16);
-            return self.scan_nowdoc_string(lexer);
-        }
-
-        if valid_symbols[HEREDOC_END] {
-            lexer.set_result_symbol(HEREDOC_END as u16);
-            let Some(heredoc) = self.heredocs().last() else {
-                return false;
-            };
-            while is_space(lexer.lookahead()) {
-                lexer.advance(true);
-            }
-            // Compare in place instead of allocating a temporary closing
-            // word. Still consume the complete name on mismatch, as C does.
-            let mut matched = true;
-            let mut length = 0;
-            let mut c = lexer.lookahead();
-            while is_valid_name_char(c) {
-                matched &= heredoc.word.get(length) == Some(&c);
-                length += 1;
-                lexer.advance(false);
-                c = lexer.lookahead();
-            }
-            if !matched || length != heredoc.word.len() {
-                return false;
-            }
-            lexer.mark_end();
-            self.heredoc_count -= 1;
-            return true;
-        }
-
-        let Some(c) = scan_whitespace(lexer) else {
-            return false;
-        };
-
-        if valid_symbols[EOF_TOKEN] && c == 0 && lexer.eof() {
-            lexer.set_result_symbol(EOF_TOKEN as u16);
-            return true;
-        }
-
-        if valid_symbols[HEREDOC_START] {
-            lexer.set_result_symbol(HEREDOC_START as u16);
-            while is_space(lexer.lookahead()) {
-                lexer.advance(true);
-            }
-            let heredoc = self.push_heredoc();
-            scan_heredoc_word(lexer, &mut heredoc.word);
-            if heredoc.word.is_empty() {
-                self.heredoc_count -= 1;
-                return false;
-            }
-            lexer.mark_end();
-            return true;
-        }
-
-        if valid_symbols[AUTOMATIC_SEMICOLON] {
-            if c != '?' as i32 {
-                return false;
-            }
-            // Failed scans do not publish a result symbol. Most calls stop
-            // above, so avoid a dynamic setter for ordinary PHP tokens.
-            lexer.set_result_symbol(AUTOMATIC_SEMICOLON as u16);
-            lexer.advance(false);
-            return lexer.lookahead() == '>' as i32;
-        }
-
-        false
+        self.scan_general(lexer, valid_symbols)
     }
 
     fn serialize(&mut self, buffer: &mut [u8]) -> usize {
-        let mut size = 0;
-        buffer[size] = self.heredoc_count as u8;
-        size += 1;
-        for heredoc in self.heredocs() {
-            let word_size = heredoc.word.len() * size_of::<i32>();
-            // C deliberately rejects a state that would exactly fill the buffer,
-            // and leaves any already-written prefix intact on failure.
-            if size + 5 + word_size >= SERIALIZATION_BUFFER_SIZE {
-                return 0;
-            }
-            buffer[size] = u8::from(heredoc.end_word_indentation_allowed);
-            size += 1;
-            buffer[size..size + 4].copy_from_slice(&(heredoc.word.len() as u32).to_ne_bytes());
-            size += 4;
-            for &c in &heredoc.word {
-                buffer[size..size + 4].copy_from_slice(&c.to_ne_bytes());
-                size += 4;
-            }
+        buffer[0] = self.heredoc_count as u8;
+        if self.heredoc_count == 0 {
+            return 1;
         }
-        size
+        self.serialize_heredocs(buffer)
     }
 
     fn deserialize(&mut self, buffer: &[u8]) {
         self.heredoc_count = 0;
-        if buffer.is_empty() {
-            return;
+        if let Some(&count) = buffer.first() {
+            if count == 0 {
+                assert_eq!(buffer.len(), 1);
+            } else {
+                self.deserialize_heredocs(buffer, count);
+            }
         }
-
-        let open_heredoc_count = buffer[0];
-        let mut size = 1;
-        for _ in 0..open_heredoc_count {
-            let end_word_indentation_allowed = buffer[size] != 0;
-            size += 1;
-            let word_length =
-                u32::from_ne_bytes(buffer[size..size + 4].try_into().unwrap()) as usize;
-            size += 4;
-            let word_size = word_length * size_of::<i32>();
-            let heredoc = self.push_heredoc();
-            heredoc.end_word_indentation_allowed = end_word_indentation_allowed;
-            heredoc.word.extend(
-                buffer[size..size + word_size]
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .map(|bytes| i32::from_ne_bytes(*bytes)),
-            );
-            size += word_size;
-        }
-        assert_eq!(size, buffer.len());
     }
 }
 
@@ -631,7 +691,6 @@ mod tests {
         assert_eq!(
             lexer.events.into_inner(),
             vec![
-                Event::MarkEnd(0),
                 Event::Symbol(ENCAPSED_STRING_CHARS as u16),
                 Event::Advance(0, false),
                 Event::Advance(1, false),
@@ -750,7 +809,6 @@ mod tests {
         assert_eq!(
             lexer.events.into_inner(),
             vec![
-                Event::MarkEnd(0),
                 Event::Symbol(ENCAPSED_STRING_CHARS as u16),
                 Event::MarkEnd(0),
                 Event::Advance(0, false),
@@ -890,6 +948,39 @@ mod tests {
             );
         }
         assert!(scan_one(&mut Scanner::default(), "\u{b}?>", AUTOMATIC_SEMICOLON).0);
+    }
+
+    #[test]
+    fn semicolon_fast_path_preserves_general_scanner_lookahead() {
+        let mut fast = with_heredoc("OUTER");
+        let mut general = with_heredoc("OUTER");
+        let mut valid = [false; SENTINEL_ERROR + 1];
+        valid[AUTOMATIC_SEMICOLON] = true;
+        let mut inputs = (0..=127)
+            .map(|c| format!("{}?>", char::from_u32(c).unwrap()))
+            .collect::<Vec<_>>();
+        inputs.extend([
+            "".into(),
+            "  \r\n// comment\n?>".into(),
+            "/* comment */?>".into(),
+            "// comment\0?>".into(),
+            "// comment".into(),
+            "é?>".into(),
+        ]);
+        for input in inputs {
+            let mut fast_lexer = TestLexer::new(&input);
+            let mut general_lexer = TestLexer::new(&input);
+            let fast_result = fast.scan(&mut fast_lexer, &valid);
+            let general_result = general.scan_general(&mut general_lexer, &valid);
+            assert_eq!(fast_result, general_result, "{input:?}");
+            assert_eq!(fast_lexer.position, general_lexer.position, "{input:?}");
+            if fast_result {
+                assert_eq!(fast_lexer.end, general_lexer.end, "{input:?}");
+                assert_eq!(fast_lexer.symbol, general_lexer.symbol, "{input:?}");
+            }
+            assert_eq!(fast.heredoc_count, 1);
+            assert_eq!(general.heredoc_count, 1);
+        }
     }
 
     #[test]
