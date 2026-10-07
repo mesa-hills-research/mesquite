@@ -819,10 +819,12 @@ fn find_possible_compiler_directive(lexer: &mut ScanLexer<'_>) -> Token {
     full_match.map_or(HashSymbol, |index| DIRECTIVE_SYMBOLS[index])
 }
 
-/// The scanner's entire persistent payload is one C-width hash count.
+/// The scanner's entire persistent payload is the four serialized hash-count
+/// bytes. Most scans need only a zero test; decode the integer only for raw
+/// strings so ordinary snapshots need no byte-order conversion.
 #[derive(Default)]
 pub(crate) struct Scanner {
-    ongoing_raw_str_hash_count: u32,
+    raw_str_hash_count: [u8; 4],
 }
 
 impl Scanner {
@@ -887,7 +889,7 @@ impl Scanner {
         // Keep this last: even a failed attempt consumes hashes. Without a
         // hash or an active raw string, the helper cannot consume or match.
         if valid_symbols[RawStrPart as usize]
-            && (lexer.lookahead() == 0x23 || self.ongoing_raw_str_hash_count != 0)
+            && (lexer.lookahead() == 0x23 || self.raw_str_hash_count != [0; 4])
             && let Some(token) = self.eat_raw_str_part(lexer, valid_symbols)
         {
             lexer.set_result_symbol(token as u16);
@@ -903,7 +905,7 @@ impl Scanner {
         lexer: &mut ScanLexer<'_>,
         valid_symbols: &[bool; 34],
     ) -> Option<Token> {
-        let mut hash_count = self.ongoing_raw_str_hash_count;
+        let mut hash_count = u32::from_be_bytes(self.raw_str_hash_count);
         if !valid_symbols[RawStrPart as usize] {
             return None;
         } else if hash_count == 0 {
@@ -930,12 +932,21 @@ impl Scanner {
             let mut last_char = 0u8;
             lexer.mark_end();
             while lexer.lookahead() != '#' as i32 && lexer.lookahead() != 0 {
-                // C stores this in uint8_t, including for non-ASCII lookahead.
-                last_char = lexer.lookahead() as u8;
-                lexer.advance(false);
-                if last_char != b'\\' || lexer.lookahead() == '\\' as i32 {
+                let c = lexer.lookahead();
+                // C truncates lookahead into uint8_t. A run of non-ASCII
+                // backslash aliases must retain the mark before its first
+                // alias; only a literal backslash marks within that run.
+                if c as u8 == b'\\' && (last_char != b'\\' || c == 0x5c) {
                     lexer.mark_end();
                 }
+                last_char = c as u8;
+                lexer.advance(false);
+            }
+            // Marks within ordinary content are overwritten before any hash
+            // can finish the token. A trailing backslash retains its earlier
+            // boundary, so interpolation still starts before the escape.
+            if last_char != b'\\' {
+                lexer.mark_end();
             }
             let mut current_hash_count = 0u32;
             while lexer.lookahead() == '#' as i32 && current_hash_count < hash_count {
@@ -944,11 +955,11 @@ impl Scanner {
             }
             if current_hash_count == hash_count {
                 if last_char == b'\\' && lexer.lookahead() == '(' as i32 {
-                    self.ongoing_raw_str_hash_count = hash_count;
+                    self.raw_str_hash_count = hash_count.to_be_bytes();
                     return Some(RawStrPart);
                 } else if last_char == b'"' {
                     lexer.mark_end();
-                    self.ongoing_raw_str_hash_count = 0;
+                    self.raw_str_hash_count = [0; 4];
                     return Some(RawStrEndPart);
                 }
             }
@@ -960,10 +971,11 @@ impl Scanner {
     #[inline(never)]
     fn deserialize_signed_bytes(&mut self, buffer: &[u8]) {
         // C casts signed `char` directly to uint32_t, sign-extending high bytes.
-        self.ongoing_raw_str_hash_count = ((buffer[0] as i8 as u32) << 24)
+        let count = ((buffer[0] as i8 as u32) << 24)
             | ((buffer[1] as i8 as u32) << 16)
             | ((buffer[2] as i8 as u32) << 8)
             | (buffer[3] as i8 as u32);
+        self.raw_str_hash_count = count.to_be_bytes();
     }
 }
 
@@ -979,7 +991,7 @@ impl ExternalScanner for Scanner {
         if !should_treat_as_wspace(c)
             && c != 0x2f
             && c != 0x23
-            && !(self.ongoing_raw_str_hash_count != 0
+            && !(self.raw_str_hash_count != [0; 4]
                 && valid_symbols[RawStrPart as usize]
                 && valid_symbols[RawStrContinuingIndicator as usize])
         {
@@ -1005,21 +1017,20 @@ impl ExternalScanner for Scanner {
     }
 
     fn serialize(&mut self, buffer: &mut [u8]) -> usize {
-        buffer[..4].copy_from_slice(&self.ongoing_raw_str_hash_count.to_be_bytes());
+        buffer[..4].copy_from_slice(&self.raw_str_hash_count);
         4
     }
 
     fn deserialize(&mut self, buffer: &[u8]) {
-        if buffer.len() < 4 {
+        let Some(bytes) = buffer.first_chunk::<4>() else {
             // Unlike most scanners, C leaves the state unchanged on empty input.
             return;
-        }
-        // Almost every snapshot is zero (no raw string) or a small hash count.
-        // Decode all four bytes together when signed-char extension cannot
-        // change them; only the lower three bytes can extend into another byte.
-        let value = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
-        if value & 0x0080_8080 == 0 {
-            self.ongoing_raw_str_hash_count = value;
+        };
+        // Sign extension from the first byte cannot alter later bytes. Any
+        // sign bit in the other three bytes requires the exact C decode path.
+        let value = u32::from_ne_bytes(*bytes);
+        if value & u32::from_ne_bytes([0, 0x80, 0x80, 0x80]) == 0 {
+            self.raw_str_hash_count = *bytes;
             return;
         }
         self.deserialize_signed_bytes(buffer);
@@ -1545,14 +1556,14 @@ mod tests {
                         random ^= random << 5;
                         *symbol = sample == 0 || (sample != 1 && random & 1 != 0);
                     }
-                    for hash_count in [0, 1, 2] {
+                    for hash_count in [0u32, 1, 2] {
                         let mut expected = TestLexer::new(&input);
                         let mut actual = TestLexer::new(&input);
                         let mut expected_scanner = Scanner {
-                            ongoing_raw_str_hash_count: hash_count,
+                            raw_str_hash_count: hash_count.to_be_bytes(),
                         };
                         let mut actual_scanner = Scanner {
-                            ongoing_raw_str_hash_count: hash_count,
+                            raw_str_hash_count: hash_count.to_be_bytes(),
                         };
                         let expected_result = expected_scanner
                             .scan_tokens(&mut ScanLexer::new(&mut expected), &symbols);
@@ -1565,8 +1576,7 @@ mod tests {
                         assert_eq!(actual.end, expected.end, "{input:?}");
                         assert_eq!(actual.calls, expected.calls, "{input:?}");
                         assert_eq!(
-                            actual_scanner.ongoing_raw_str_hash_count,
-                            expected_scanner.ongoing_raw_str_hash_count,
+                            actual_scanner.raw_str_hash_count, expected_scanner.raw_str_hash_count,
                             "{input:?}"
                         );
                     }
@@ -1662,22 +1672,22 @@ mod tests {
     #[test]
     fn serialization_and_signed_char_deserialization() {
         let mut scanner = Scanner {
-            ongoing_raw_str_hash_count: 0x1234_5678,
+            raw_str_hash_count: 0x1234_5678u32.to_be_bytes(),
         };
         let mut buffer = [0; 8];
         assert_eq!(scanner.serialize(&mut buffer), 4);
         assert_eq!(buffer, [0x12, 0x34, 0x56, 0x78, 0, 0, 0, 0]);
         scanner.deserialize(&[]);
         scanner.deserialize(&[0, 0, 0]);
-        assert_eq!(scanner.ongoing_raw_str_hash_count, 0x1234_5678);
+        assert_eq!(u32::from_be_bytes(scanner.raw_str_hash_count), 0x1234_5678);
         scanner.deserialize(&[0, 0, 0, 0x80]);
-        assert_eq!(scanner.ongoing_raw_str_hash_count, 0xffff_ff80);
+        assert_eq!(u32::from_be_bytes(scanner.raw_str_hash_count), 0xffff_ff80);
         scanner.deserialize(&[0, 0, 0x80, 1]);
-        assert_eq!(scanner.ongoing_raw_str_hash_count, 0xffff_8001);
+        assert_eq!(u32::from_be_bytes(scanner.raw_str_hash_count), 0xffff_8001);
         scanner.deserialize(&[0, 0x80, 0, 1]);
-        assert_eq!(scanner.ongoing_raw_str_hash_count, 0xff80_0001);
+        assert_eq!(u32::from_be_bytes(scanner.raw_str_hash_count), 0xff80_0001);
         scanner.deserialize(&[0, 0, 0, 0]);
-        assert_eq!(scanner.ongoing_raw_str_hash_count, 0);
+        assert_eq!(u32::from_be_bytes(scanner.raw_str_hash_count), 0);
     }
 
     #[test]
@@ -1695,7 +1705,11 @@ mod tests {
             let bytes = value.to_be_bytes();
             let expected = bytes.iter().fold(0u32, |n, &b| (n << 8) | (b as i8 as u32));
             scanner.deserialize(&bytes);
-            assert_eq!(scanner.ongoing_raw_str_hash_count, expected, "{value:08x}");
+            assert_eq!(
+                u32::from_be_bytes(scanner.raw_str_hash_count),
+                expected,
+                "{value:08x}"
+            );
         }
     }
 
@@ -1895,6 +1909,147 @@ mod tests {
         assert_eq!(lexer.end, 1);
     }
 
+    fn reference_raw_part(
+        scanner: &mut Scanner,
+        lexer: &mut ScanLexer<'_>,
+        valid_symbols: &[bool; 34],
+    ) -> Option<Token> {
+        let mut hash_count = u32::from_be_bytes(scanner.raw_str_hash_count);
+        if !valid_symbols[RawStrPart as usize] {
+            return None;
+        } else if hash_count == 0 {
+            while lexer.lookahead() == '#' as i32 {
+                hash_count = hash_count.wrapping_add(1);
+                lexer.advance(false);
+            }
+            if hash_count == 0 {
+                return None;
+            }
+            if lexer.lookahead() == '"' as i32 {
+                lexer.advance(false);
+            } else if hash_count == 1 {
+                lexer.mark_end();
+                return Some(find_possible_compiler_directive(lexer));
+            } else {
+                return None;
+            }
+        } else if !valid_symbols[RawStrContinuingIndicator as usize] {
+            return None;
+        }
+
+        while lexer.lookahead() != 0 {
+            let mut last_char = 0u8;
+            lexer.mark_end();
+            while lexer.lookahead() != '#' as i32 && lexer.lookahead() != 0 {
+                // C stores this in uint8_t, including for non-ASCII lookahead.
+                last_char = lexer.lookahead() as u8;
+                lexer.advance(false);
+                if last_char != b'\\' || lexer.lookahead() == '\\' as i32 {
+                    lexer.mark_end();
+                }
+            }
+            let mut current_hash_count = 0u32;
+            while lexer.lookahead() == '#' as i32 && current_hash_count < hash_count {
+                current_hash_count = current_hash_count.wrapping_add(1);
+                lexer.advance(false);
+            }
+            if current_hash_count == hash_count {
+                if last_char == b'\\' && lexer.lookahead() == '(' as i32 {
+                    scanner.raw_str_hash_count = hash_count.to_be_bytes();
+                    return Some(RawStrPart);
+                } else if last_char == b'"' {
+                    lexer.mark_end();
+                    scanner.raw_str_hash_count = [0; 4];
+                    return Some(RawStrEndPart);
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn raw_content_mark_coalescing_matches_c() {
+        for prefix in ["", "#", "#\"", "##\"", "###\"", "#ifdef"] {
+            for content in [
+                "",
+                "a",
+                "\\",
+                "\\\\",
+                "a\\b",
+                "a\u{15c}\u{15c}",
+                "a\u{15c}\\",
+                "a\\\u{15c}",
+                "a\u{122}",
+            ] {
+                for tail in ["", "#(", "##(", "\"#", "\"##", "#x", "##\"#\0z"] {
+                    let input = format!("{prefix}{content}{tail}");
+                    for count in [0u32, 1, 2] {
+                        for enabled in 0..4 {
+                            let mut symbols = [false; 34];
+                            symbols[RawStrPart as usize] = enabled & 1 != 0;
+                            symbols[RawStrContinuingIndicator as usize] = enabled & 2 != 0;
+                            let mut expected_lexer = TestLexer::new(&input);
+                            let mut actual_lexer = TestLexer::new(&input);
+                            let mut expected = Scanner {
+                                raw_str_hash_count: count.to_be_bytes(),
+                            };
+                            let mut actual = Scanner {
+                                raw_str_hash_count: count.to_be_bytes(),
+                            };
+                            let expected_token = reference_raw_part(
+                                &mut expected,
+                                &mut ScanLexer::new(&mut expected_lexer),
+                                &symbols,
+                            );
+                            let actual_token = actual
+                                .eat_raw_str_part(&mut ScanLexer::new(&mut actual_lexer), &symbols);
+                            assert_eq!(actual_token, expected_token, "{input:?}");
+                            assert_eq!(actual_lexer.position, expected_lexer.position, "{input:?}");
+                            assert_eq!(actual_lexer.end, expected_lexer.end, "{input:?}");
+                            assert_eq!(
+                                actual.raw_str_hash_count, expected.raw_str_hash_count,
+                                "{input:?}"
+                            );
+                            let advances = |lexer: TestLexer| {
+                                lexer
+                                    .calls
+                                    .into_iter()
+                                    .filter(|(_, call)| matches!(call, Call::Advance(_)))
+                                    .collect::<Vec<_>>()
+                            };
+                            assert_eq!(
+                                advances(actual_lexer),
+                                advances(expected_lexer),
+                                "{input:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn live_raw_counts_are_encoded_before_signed_restore() {
+        for count in [1u32, 2, 127, 128, 255, 256] {
+            let hashes = "#".repeat(count as usize);
+            let input = format!("{hashes}\"a\\{hashes}(");
+            let mut scanner = Scanner::default();
+            let mut lexer = TestLexer::new(&input);
+            assert!(scanner.scan(&mut lexer, &valid(&[RawStrPart])));
+            assert_eq!(lexer.result, RawStrPart as u16);
+            assert_eq!(lexer.end, count as usize + 2);
+            let mut snapshot = [0; 4];
+            assert_eq!(scanner.serialize(&mut snapshot), 4);
+            assert_eq!(snapshot, count.to_be_bytes());
+            let restored = snapshot
+                .iter()
+                .fold(0u32, |n, &b| (n << 8) | (b as i8 as u32));
+            scanner.deserialize(&snapshot);
+            assert_eq!(scanner.raw_str_hash_count, restored.to_be_bytes());
+        }
+    }
+
     #[test]
     fn raw_string_interpolation_and_continuation() {
         let mut scanner = Scanner::default();
@@ -1903,14 +2058,14 @@ mod tests {
         assert_eq!(lexer.result, RawStrPart as u16);
         assert_eq!(lexer.position, 5);
         assert_eq!(lexer.end, 3);
-        assert_eq!(scanner.ongoing_raw_str_hash_count, 1);
+        assert_eq!(u32::from_be_bytes(scanner.raw_str_hash_count), 1);
         let mut lexer = TestLexer::new("b\"# tail");
         assert!(!scanner.scan(&mut lexer, &valid(&[RawStrPart])));
         assert_eq!(lexer.position, 0);
         assert!(scanner.scan(&mut lexer, &valid(&[RawStrPart, RawStrContinuingIndicator])));
         assert_eq!(lexer.result, RawStrEndPart as u16);
         assert_eq!(lexer.end, 3);
-        assert_eq!(scanner.ongoing_raw_str_hash_count, 0);
+        assert_eq!(u32::from_be_bytes(scanner.raw_str_hash_count), 0);
 
         for (input, expected, end) in [
             ("##\"a\"##x", RawStrEndPart, 7),
@@ -1924,6 +2079,6 @@ mod tests {
         }
         let mut lexer = TestLexer::new("##\"unterminated");
         assert!(!scanner.scan(&mut lexer, &valid(&[RawStrPart])));
-        assert_eq!(scanner.ongoing_raw_str_hash_count, 0);
+        assert_eq!(u32::from_be_bytes(scanner.raw_str_hash_count), 0);
     }
 }
