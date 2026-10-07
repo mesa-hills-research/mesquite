@@ -58,6 +58,7 @@ pub(crate) fn ts_query_cursor__copy_state(
         let old_id = state.capture_list_id as u16;
         let new_id = copy.capture_list_id as u16;
         let count = capture_list_pool_get(&cursor.capture_list_pool, old_id).len();
+        capture_list_pool_get_mut(&mut cursor.capture_list_pool, new_id).reserve(count);
         // Copy each capture value with disjoint, short-lived borrows. No extra
         // capture buffer is allocated, and both pool ids retain C's u16 width.
         for i in 0..count {
@@ -522,5 +523,291 @@ pub(crate) fn ts_query_cursor__advance(
             }
             cursor.ascending = true;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        length::Length,
+        point::{POINT_MAX, POINT_ZERO},
+        subtree::{InlineLeaf, Subtree, SubtreeHeapData, SubtreePayload},
+        tree::Tree,
+        tree_cursor::TreeCursorEntry,
+    };
+    use std::sync::{Arc, LazyLock};
+    use ts_port_tables::LanguageTables;
+
+    fn language() -> Language {
+        static TABLES: LazyLock<LanguageTables> = LazyLock::new(|| {
+            LanguageTables::decode(
+                include_bytes!("../../grammars/c/src/tables.bin"),
+                |_, _| unreachable!("query execution fixtures do not lex"),
+                Some(|_, _| unreachable!("query execution fixtures do not lex keywords")),
+                None,
+            )
+        });
+        Language::from(&*TABLES)
+    }
+
+    fn tree(repetition: bool, symbol: Symbol) -> Tree {
+        Tree {
+            root: Box::new(Subtree::Heap(Arc::new(SubtreeHeapData {
+                symbol,
+                payload: SubtreePayload::Leaf,
+                children: if repetition {
+                    vec![Subtree::Inline(InlineLeaf::default())]
+                } else {
+                    Vec::new()
+                },
+                ..SubtreeHeapData::default()
+            }))),
+            language: language(),
+            included_ranges: Vec::new(),
+        }
+    }
+
+    fn step(depth: u16) -> QueryStep {
+        QueryStep {
+            symbol: 0,
+            supertype_symbol: 0,
+            field: 0,
+            capture_ids: [NONE; MAX_STEP_CAPTURE_COUNT],
+            depth,
+            alternative_index: NONE,
+            negated_field_list_id: 0,
+            is_named: false,
+            is_immediate: false,
+            is_last_child: false,
+            is_pass_through: false,
+            is_dead_end: false,
+            alternative_is_immediate: false,
+            contains_captures: false,
+            root_pattern_guaranteed: false,
+            parent_pattern_guaranteed: false,
+            is_missing: false,
+        }
+    }
+
+    fn query() -> CompiledQuery {
+        CompiledQuery {
+            captures: SymbolTable::default(),
+            predicate_values: SymbolTable::default(),
+            capture_quantifiers: Vec::new(),
+            steps: vec![step(1), step(PATTERN_DONE_MARKER)],
+            pattern_map: Vec::new(),
+            predicate_steps: Vec::new(),
+            patterns: Vec::new(),
+            step_offsets: Vec::new(),
+            negated_fields: Vec::new(),
+            string_buffer: Vec::new(),
+            repeat_symbols_with_rootless_patterns: vec![7],
+            language: language(),
+            wildcard_root_pattern_count: 0,
+        }
+    }
+
+    fn state(step_index: u16) -> QueryState {
+        QueryState {
+            id: 42,
+            capture_list_id: u32::from(NONE),
+            start_depth: 0,
+            step_index,
+            pattern_index: 0,
+            consumed_capture_count: 0,
+            seeking_immediate_match: true,
+            has_in_progress_alternatives: false,
+            dead: false,
+            needs_parent: false,
+        }
+    }
+
+    fn config() -> CursorConfig {
+        CursorConfig {
+            max_capture_list_count: u32::MAX,
+            max_start_depth: u32::MAX,
+            start_byte: 0,
+            end_byte: u32::MAX,
+            start_point: POINT_ZERO,
+            end_point: POINT_MAX,
+            timeout_duration: 0,
+            did_exceed_match_limit: false,
+            allocated_capture_list_count: 0,
+            states: Vec::new(),
+            finished_states: Vec::new(),
+        }
+    }
+
+    // Construct the execution directly so that these tests also run before the
+    // independently translated compiler and cursor initialization units land.
+    fn execution<'query, 'tree: 'query>(
+        config: &'query mut CursorConfig,
+        query: &'query CompiledQuery,
+        tree: &'tree Tree,
+    ) -> QueryExecution<'query, 'tree> {
+        QueryExecution {
+            config,
+            query,
+            cursor: TreeCursor {
+                tree: Some(tree),
+                stack: vec![TreeCursorEntry {
+                    subtree: &tree.root,
+                    position: Length {
+                        bytes: 23,
+                        extent: Point { row: 0, column: 23 },
+                    },
+                    child_index: 0,
+                    structural_child_index: 0,
+                    descendant_index: 0,
+                }],
+                root_alias_symbol: 0,
+            },
+            capture_list_pool: CaptureListPool {
+                list: Vec::new(),
+                empty_list: Vec::new(),
+                max_capture_list_count: u32::MAX,
+                free_capture_list_count: 0,
+            },
+            depth: 0,
+            next_state_id: 0,
+            end_clock: None,
+            query_options: QueryCursorOptions::default(),
+            query_state: QueryCursorState::default(),
+            operation_count: 0,
+            on_visible_node: true,
+            ascending: false,
+            halted: false,
+        }
+    }
+
+    #[test]
+    fn descent_respects_range_and_start_depth_but_preserves_in_progress_matches() {
+        let tree = tree(false, 3);
+        let query = query();
+        let mut config = config();
+        let mut cursor = execution(&mut config, &query, &tree);
+        cursor.depth = 10;
+        cursor.config.max_start_depth = 11;
+        assert!(ts_query_cursor__should_descend(&cursor, true));
+        assert!(!ts_query_cursor__should_descend(&cursor, false));
+        cursor.config.max_start_depth = 10;
+        assert!(!ts_query_cursor__should_descend(&cursor, true));
+
+        cursor.config.states.push(state(0));
+        cursor.config.states[0].start_depth = 10;
+        assert!(ts_query_cursor__should_descend(&cursor, false));
+        cursor.config.states[0].step_index = 1;
+        assert!(!ts_query_cursor__should_descend(&cursor, false));
+
+        // C promotes the two u16 depths before addition; it does not wrap at u16.
+        cursor.depth = u32::from(u16::MAX);
+        cursor.config.states[0].start_depth = u16::MAX;
+        cursor.config.states[0].step_index = 0;
+        assert!(ts_query_cursor__should_descend(&cursor, false));
+    }
+
+    #[test]
+    fn hidden_repetitions_outside_range_require_an_analyzed_rootless_pattern() {
+        let query = query();
+        for (repetition, symbol, should_descend) in
+            [(false, 3, true), (true, 3, false), (true, 7, true)]
+        {
+            let tree = tree(repetition, symbol);
+            let mut config = config();
+            let mut cursor = execution(&mut config, &query, &tree);
+            cursor.on_visible_node = false;
+            assert_eq!(
+                ts_query_cursor__should_descend(&cursor, false),
+                should_descend
+            );
+            cursor.config.max_start_depth = 0;
+            assert!(!ts_query_cursor__should_descend(&cursor, false));
+        }
+    }
+
+    #[test]
+    fn splitting_without_captures_inserts_immediately_after_original() {
+        let tree = tree(false, 3);
+        let query = query();
+        let mut config = config();
+        config.states = vec![state(0), state(1)];
+        config.states[0].consumed_capture_count = 4095;
+        config.states[0].has_in_progress_alternatives = true;
+        config.states[0].needs_parent = true;
+        let mut cursor = execution(&mut config, &query, &tree);
+        assert_eq!(ts_query_cursor__copy_state(&mut cursor, 0), Some(1));
+        assert_eq!(cursor.config.states.len(), 3);
+        let copy = cursor.config.states[1];
+        assert_eq!(copy.id, 42);
+        assert_eq!(copy.step_index, 0);
+        assert_eq!(copy.capture_list_id, u32::from(NONE));
+        assert_eq!(copy.consumed_capture_count, 4095);
+        assert!(copy.has_in_progress_alternatives);
+        assert!(copy.seeking_immediate_match);
+        assert!(copy.needs_parent);
+        assert_eq!(cursor.config.states[2].step_index, 1);
+        assert!(cursor.capture_list_pool.list.is_empty());
+    }
+
+    #[test]
+    fn progress_checkpoint_cancels_before_visiting_the_current_node() {
+        let tree = tree(false, 3);
+        let query = query();
+        let mut config = config();
+        let mut calls = 0;
+        let mut callback = |state: &QueryCursorState| {
+            calls += 1;
+            assert_eq!(state.current_byte_offset, 23);
+            true
+        };
+        let mut cursor = execution(&mut config, &query, &tree);
+        cursor.query_options.progress_callback = Some(&mut callback);
+        cursor.operation_count = OP_COUNT_PER_QUERY_TIMEOUT_CHECK - 1;
+        assert!(!ts_query_cursor__advance(&mut cursor, false));
+        assert_eq!(cursor.operation_count, 0);
+        assert!(!cursor.halted);
+        assert!(!cursor.ascending);
+        assert_eq!(cursor.cursor.stack.len(), 1);
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn halted_cursor_updates_offset_and_counter_without_calling_progress() {
+        let tree = tree(false, 3);
+        let query = query();
+        let mut config = config();
+        let mut callback = |_: &QueryCursorState| panic!("halt short-circuits progress");
+        let mut cursor = execution(&mut config, &query, &tree);
+        cursor.query_options.progress_callback = Some(&mut callback);
+        cursor.halted = true;
+        cursor.operation_count = OP_COUNT_PER_QUERY_TIMEOUT_CHECK - 1;
+        assert!(!ts_query_cursor__advance(&mut cursor, false));
+        assert_eq!(cursor.operation_count, 0);
+        assert_eq!(cursor.query_state.current_byte_offset, 23);
+        assert!(!ts_query_cursor__advance(&mut cursor, false));
+        assert_eq!(cursor.operation_count, 1);
+    }
+
+    #[test]
+    fn ascending_finishes_deferred_patterns_in_order_before_halting() {
+        let tree = tree(false, 3);
+        let query = query();
+        let mut config = config();
+        config.states = vec![state(1), state(1)];
+        config.states[0].has_in_progress_alternatives = true;
+        config.states[1].id = 43;
+        let mut callback = |_: &QueryCursorState| panic!("match short-circuits progress");
+        let mut cursor = execution(&mut config, &query, &tree);
+        cursor.query_options.progress_callback = Some(&mut callback);
+        cursor.ascending = true;
+        cursor.operation_count = OP_COUNT_PER_QUERY_TIMEOUT_CHECK - 2;
+        assert!(ts_query_cursor__advance(&mut cursor, false));
+        assert!(cursor.halted);
+        assert!(cursor.config.states.is_empty());
+        assert_eq!(cursor.operation_count, 0);
+        assert_eq!(cursor.config.finished_states.len(), 2);
+        assert_eq!(cursor.config.finished_states[0].id, 42);
+        assert_eq!(cursor.config.finished_states[1].id, 43);
     }
 }
