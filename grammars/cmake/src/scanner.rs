@@ -557,7 +557,7 @@ mod tests {
     fn fresh_and_reset_scanners_emit_zero_width_content_at_eof() {
         // Recovery after `a` starts at EOF; after `if(\n` it first skips the
         // trailing newline. Both must emit empty content without mark_end.
-        for trailing in ["", "\n", "\r\n", " \t\n"] {
+        for trailing in ["", "\n", "\r\n", " \t\n", " \t\r\n"] {
             let mut scanner = create();
             for reset in [false, true] {
                 if reset {
