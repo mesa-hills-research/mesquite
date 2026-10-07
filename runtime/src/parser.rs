@@ -698,7 +698,7 @@ fn parser2_tree_name(parser: &Parser, tree: &Subtree) -> &'static str {
 fn parser2_log_stack(parser: &mut Parser) {
     if let Some(output) = parser.dot_graph.as_mut() {
         let _ = ts_stack_print_dot_graph(
-            &parser.stack,
+            &mut parser.stack,
             parser.language.as_ref().unwrap(),
             output.as_mut(),
         );
@@ -1331,7 +1331,7 @@ pub(crate) fn ts_parser__recover(
     let mut did_recover = false;
     let previous_version_count = ts_stack_version_count(&parser.stack);
     let position = ts_stack_position(&parser.stack, version);
-    let node_count_since_error = ts_stack_node_count_since_error(&parser.stack, version);
+    let node_count_since_error = ts_stack_node_count_since_error(&mut parser.stack, version);
     let current_error_cost = ts_stack_error_cost(&parser.stack, version);
 
     // First try returning to a previous state that accepts this token. The
