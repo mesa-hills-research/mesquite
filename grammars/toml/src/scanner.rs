@@ -67,12 +67,7 @@ fn scan_non_newline(lexer: &mut dyn Lexer, valid_symbols: &[bool; 5], mut lookah
         return valid_symbols[end_symbol as usize] && scan_multiline_string_end(lexer, lookahead);
     }
 
-    // Keep whitespace recognition a bit test, rather than a jump table
-    // shared with the CR/LF/EOF dispatch below. The unsigned bound is
-    // required before shifting: lookahead can be a decoder error or a
-    // non-ASCII code point whose low bits resemble whitespace.
-    const WHITESPACE: u64 = (1 << 9) | (1 << 32);
-    while lookahead as u32 <= 32 && (WHITESPACE >> lookahead) & 1 != 0 {
+    while matches!(lookahead, 0x20 | 0x09) {
         lexer.advance(true);
         lookahead = lexer.lookahead();
     }
@@ -639,7 +634,7 @@ mod tests {
     }
 
     #[test]
-    fn whitespace_bitset_rejects_modulo_64_aliases_after_skipping() {
+    fn character_dispatch_rejects_modulo_64_aliases_after_skipping() {
         // Machine shifts can mask their count modulo 64. Neither positive
         // code points nor negative decoder errors may alias a set bit when
         // entering or leaving the whitespace loop.
