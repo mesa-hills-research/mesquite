@@ -263,7 +263,7 @@ fn owned_next_supports_capture_loops_and_preserves_streaming_current_match() {
 
     let language = language();
     let tree = Tree {
-        root: Box::new(Subtree::Inline(InlineLeaf {
+        root: Box::new(Subtree::inline(InlineLeaf {
             flags: NAMED | VISIBLE,
             size_bytes: 1,
             ..InlineLeaf::default()

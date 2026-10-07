@@ -66,6 +66,13 @@ Heap children are a contiguous Vec rather than the allocation prefix immediately
 preceding the C header. This adds a child-buffer allocation;
 measure it before proposing a different layout. Do not heap-box every leaf.
 
+The Inline variant stores `PackedInlineLeaf([u8; 8])`, constructed as a packed
+word via safe integer shifts and `to_le_bytes`. `InlineLeaf` is the expanded field
+view; construct fixtures via `Subtree::inline(InlineLeaf { ... })` and match the
+variant normally. This preserves a single-word write in token construction and
+byte loads for field readers; storing a u64 instead slowed cursor traversal.
+The format is internal and endian-independent, not a C-memory reinterpretation.
+
 Inline flag bits are named constants. `padding_rows_and_lookahead` has rows in the
 low nibble and lookahead byte count in the high nibble; padding columns occupy a
 full byte. Symbol fits in u8. Keep **C's** inline eligibility conditions, including
@@ -135,9 +142,14 @@ worklist/pool algorithm; null and inline releases do not clear pool scratch.
 ## Graph-structured stack
 
 The stack is a parser-local arena. `StackNodeId(usize)` indexes
-`StackArena.nodes: Vec<Option<StackNode>>`; links and heads store IDs, never Rust
-references into the reallocating Vec. Nodes have explicit C-style u32 refcounts,
-a `StackLinks` storage and link_count, with the same eight-link limit as C.
+`StackArena.nodes: Vec<StackNode>`; links and heads store IDs, never Rust
+references into the reallocating Vec. A zero refcount marks a vacant slot. Such
+slots own no links, but may retain inert scalar values until reinitialization;
+only live slots may be dereferenced through graph edges or heads. Node accessors
+check this invariant in debug builds. Reusing a slot overwrites every scalar
+header field directly rather than copying an owning temporary node. Nodes have
+explicit C-style u32 refcounts, a `StackLinks` storage and link_count, with the
+same eight-link limit as C.
 `StackLinks` keeps the first `Option<StackLink>` inline and lazily allocates a
 boxed array for the other seven slots only when multiple predecessors are added.
 This keeps single-predecessor nodes compact without a per-push allocation and
@@ -324,6 +336,14 @@ grammar kind. Anonymous, hidden, missing, extra, and ERROR semantics are distinc
 TreeCursor borrows the Tree and maintains a Vec of borrowed TreeCursorEntry slots.
 Entries carry both child and structural-child indices and descendant index; keep
 all three. Hidden-node flattening and aliases must be translated, not approximated.
+Public-cursor entries also cache immutable alias, visibility, and resolved field
+metadata when visited. Fields propagate from an invisible non-extra wrapper only
+when the child's own non-inherited field map has no match; roots have field zero.
+The changed-range walker uses its own visibility rules and ignores these caches.
+Cursor child iterators borrow child slices once; their forward hot-path helpers
+are always inlined so large iterator/entry records need not cross call boundaries.
+Forward sibling traversal skips its already-resolved current edge directly;
+reverse traversal preserves the C int8 sentinel and structural-index rules.
 For changed-range traversal only, cursor.tree may be None; that iterator owns its
 Language separately and operates directly on subtree entries, never constructing
 public Nodes. `current_status` returns a CursorStatus record in place of six out

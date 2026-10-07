@@ -139,6 +139,9 @@ pub(crate) fn iterator_new<'tree>(
         child_index: 0,
         structural_child_index: 0,
         descendant_index: 0,
+        alias: 0,
+        field_id: 0,
+        visible: true,
     });
     RangeIterator {
         cursor,
@@ -262,6 +265,9 @@ pub(crate) fn iterator_descend(iterator: &mut RangeIterator<'_>, goal_position: 
                     child_index: i as u32,
                     structural_child_index,
                     descendant_index: 0,
+                    alias: 0,
+                    field_id: 0,
+                    visible: true,
                 });
 
                 if iterator_tree_is_visible(iterator) {
@@ -335,6 +341,9 @@ pub(crate) fn iterator_advance(iterator: &mut RangeIterator<'_>) {
                 child_index,
                 structural_child_index,
                 descendant_index: 0,
+                alias: 0,
+                field_id: 0,
+                visible: true,
             });
 
             if iterator_tree_is_visible(iterator) {
@@ -737,7 +746,7 @@ mod tests {
     }
 
     fn leaf(symbol: u8, padding: u8, size: u8) -> Subtree {
-        Subtree::Inline(InlineLeaf {
+        Subtree::inline(InlineLeaf {
             symbol,
             parse_state: 1,
             flags: VISIBLE,
@@ -798,8 +807,10 @@ mod tests {
         let old = leaf(1, 0, 4);
         let mut new = old.clone();
         if let Subtree::Inline(data) = &mut new {
-            data.flags |= HAS_CHANGES;
-            data.parse_state = 2;
+            data.update(|data| {
+                data.flags |= HAS_CHANGES;
+                data.parse_state = 2;
+            });
         }
         let old_iter = iterator_new(cursor(), &old, &language());
         let new_iter = iterator_new(cursor(), &new, &language());
@@ -816,7 +827,7 @@ mod tests {
         for state in [ERROR_STATE, TS_TREE_STATE_NONE] {
             let mut new = old.clone();
             if let Subtree::Inline(data) = &mut new {
-                data.parse_state = state;
+                data.update(|data| data.parse_state = state);
             }
             assert_eq!(
                 iterator_compare(&old_iter, &iterator_new(cursor(), &new, &language())),
@@ -860,7 +871,7 @@ mod tests {
         assert_eq!(iterator.visible_depth, 0);
         iterator_ascend(&mut iterator);
 
-        let hidden = Subtree::Inline(InlineLeaf::default());
+        let hidden = Subtree::inline(InlineLeaf::default());
         let hidden_iterator = iterator_new(cursor(), &hidden, &language());
         assert!(iterator_get_visible_state(&hidden_iterator).is_none());
         assert_eq!(

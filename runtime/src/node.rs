@@ -18,6 +18,7 @@ pub(crate) struct NodeChildIterator<'tree> {
     pub alias_sequence: &'static [Symbol],
 }
 
+#[inline]
 pub(crate) fn ts_node_new<'tree>(
     tree: &'tree Tree,
     subtree: &'tree Subtree,
@@ -36,10 +37,12 @@ pub(crate) fn ts_node__null<'tree>() -> Option<Node<'tree>> {
     None
 }
 
+#[inline]
 pub(crate) fn ts_node_start_byte(node: Node<'_>) -> u32 {
     node.position.bytes
 }
 
+#[inline]
 pub(crate) fn ts_node_start_point(node: Node<'_>) -> Point {
     node.position.extent
 }
@@ -400,10 +403,12 @@ pub(crate) fn ts_node__descendant_for_point_range(
 #[path = "node1_tests.rs"]
 mod node1_tests;
 
+#[inline]
 pub(crate) fn ts_node_end_byte(node: Node<'_>) -> u32 {
     ts_node_start_byte(node).wrapping_add(subtree::ts_subtree_size(ts_node__subtree(node)).bytes)
 }
 
+#[inline]
 pub(crate) fn ts_node_end_point(node: Node<'_>) -> Point {
     point::point_add(
         ts_node_start_point(node),
@@ -411,6 +416,7 @@ pub(crate) fn ts_node_end_point(node: Node<'_>) -> Point {
     )
 }
 
+#[inline]
 pub(crate) fn ts_node_symbol(node: Node<'_>) -> Symbol {
     let alias = ts_node__alias(&node);
     let symbol = if alias != 0 {
@@ -436,6 +442,7 @@ pub(crate) fn ts_node_language(node: Node<'_>) -> &Language {
     &node.tree.language
 }
 
+#[inline]
 pub(crate) fn ts_node_grammar_symbol(node: Node<'_>) -> Symbol {
     subtree::ts_subtree_symbol(ts_node__subtree(node))
 }
@@ -465,10 +472,12 @@ pub(crate) fn ts_node_is_null(node: Option<Node<'_>>) -> bool {
     node.is_none()
 }
 
+#[inline]
 pub(crate) fn ts_node_is_extra(node: Node<'_>) -> bool {
     subtree::ts_subtree_extra(ts_node__subtree(node))
 }
 
+#[inline]
 pub(crate) fn ts_node_is_named(node: Node<'_>) -> bool {
     let alias = ts_node__alias(&node);
     if alias != 0 {
@@ -478,18 +487,22 @@ pub(crate) fn ts_node_is_named(node: Node<'_>) -> bool {
     }
 }
 
+#[inline]
 pub(crate) fn ts_node_is_missing(node: Node<'_>) -> bool {
     subtree::ts_subtree_missing(ts_node__subtree(node))
 }
 
+#[inline]
 pub(crate) fn ts_node_has_changes(node: Node<'_>) -> bool {
     subtree::ts_subtree_has_changes(ts_node__subtree(node))
 }
 
+#[inline]
 pub(crate) fn ts_node_has_error(node: Node<'_>) -> bool {
     subtree::ts_subtree_error_cost(ts_node__subtree(node)) > 0
 }
 
+#[inline]
 pub(crate) fn ts_node_is_error(node: Node<'_>) -> bool {
     ts_node_symbol(node) == ts_port_tables::BUILTIN_SYM_ERROR
 }
@@ -498,6 +511,7 @@ pub(crate) fn ts_node_descendant_count(node: Node<'_>) -> u32 {
     subtree::ts_subtree_visible_descendant_count(ts_node__subtree(node)).wrapping_add(1)
 }
 
+#[inline]
 pub(crate) fn ts_node_parse_state(node: Node<'_>) -> StateId {
     subtree::ts_subtree_parse_state(ts_node__subtree(node))
 }
@@ -675,6 +689,7 @@ pub(crate) fn ts_node_child_by_field_name<'tree>(
     ts_node_child_by_field_id(node, field_id)
 }
 
+#[inline]
 pub(crate) fn ts_node_child_count(node: Node<'_>) -> u32 {
     let tree = ts_node__subtree(node);
     if subtree::ts_subtree_child_count(tree) > 0 {
@@ -684,6 +699,7 @@ pub(crate) fn ts_node_child_count(node: Node<'_>) -> u32 {
     }
 }
 
+#[inline]
 pub(crate) fn ts_node_named_child_count(node: Node<'_>) -> u32 {
     let tree = ts_node__subtree(node);
     if subtree::ts_subtree_child_count(tree) > 0 {
@@ -839,7 +855,7 @@ mod node_2_tests {
 
     #[test]
     fn identity_uses_tree_and_slot_not_subtree_value_or_context() {
-        let leaf = Subtree::Inline(subtree::InlineLeaf::default());
+        let leaf = Subtree::inline(subtree::InlineLeaf::default());
         let mut data = subtree::SubtreeHeapData::default();
         data.children = vec![leaf.clone(), leaf];
         let tree = Tree {
