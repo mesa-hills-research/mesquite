@@ -2,7 +2,7 @@
 
 ## Status
 
-The assigned bucket is already fixed on the merged baseline `5b2a610`. Fresh
+The assigned bucket is already fixed on the merged baseline `30246bc`. Fresh
 verification passes all seven reported inputs on the initial reproduction, before
 any edits; no additional runtime/scanner change is needed. Existing regressions
 include incremental repair-and-undo coverage for malformed variable references.
@@ -46,7 +46,7 @@ change source lengths and must produce valid `normal_command` nodes. Undo must
 restore the original top-level ERROR shape and bracket-content byte/point ranges,
 not retain the repaired command or a stale external-scanner snapshot.
 
-## Verification based on `5b2a610`
+## Verification based on `30246bc`
 
 - `run_oracle(inputs = "bucket:6c68c51b")`: **7/7 pass**, with query checks.
 - `run_oracle(languages = "cmake", inputs = "all")`:
@@ -58,6 +58,9 @@ not retain the repaired command or a stale external-scanner snapshot.
   integration/doc tests (including all three command-recovery regressions), and
   **24 CMake tests** pass.
 - `cargo clippy -p ts_port -p ts_port_cmake --all-targets -- -D warnings`: passes.
+- `cargo clippy --workspace --all-targets -- -D warnings`: blocked by the same
+  pre-existing unused assignment in host-owned `grammars/yaml/src/lex.rs:20`.
+  Generated files were not edited or lint-suppressed.
 
 Nothing remains to fix in the assigned bucket. This verification-only revision
 introduces no runtime changes, deviations from C, unsafe code, new warnings, or
