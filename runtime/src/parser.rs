@@ -1028,7 +1028,7 @@ pub(crate) fn ts_parser__select_children(
     let result = ts_parser__select_tree(parser, left, &scratch_tree);
     // C builds a non-owning header at the end of its scratch array. Rust owns
     // these temporary child handles, then recovers the Vec allocation for reuse.
-    parser.scratch_trees = std::mem::take(&mut scratch_tree.heap_mut().unwrap().children);
+    parser.scratch_trees = std::mem::take(&mut scratch_tree.heap_mut().unwrap().children).into_vec();
     parser.scratch_trees.clear();
     result
 }
@@ -2726,7 +2726,7 @@ impl<'tree> BalanceCursor<'tree> {
         matches!(tree, Subtree::Heap(data) if !data.children.is_empty() && Arc::strong_count(data) == 1)
     }
 
-    fn children_mut(tree: &mut Subtree) -> &mut Vec<Subtree> {
+    fn children_mut(tree: &mut Subtree) -> &mut [Subtree] {
         let Subtree::Heap(data) = tree else {
             unreachable!("only heap branches are balanced");
         };
@@ -2820,7 +2820,7 @@ mod parser3_tests {
     fn branch(symbol: Symbol, children: Vec<Subtree>) -> Subtree {
         Subtree::Heap(Arc::new(SubtreeHeapData {
             symbol,
-            children,
+            children: children.into(),
             payload: SubtreePayload::Branch(BranchData::default()),
             ..SubtreeHeapData::default()
         }))
@@ -2847,7 +2847,7 @@ mod parser3_tests {
                 symbol,
                 has_external_tokens: true,
                 payload: SubtreePayload::External(ts_external_scanner_state_init(bytes)),
-                children: Vec::new(),
+                children: Vec::new().into(),
                 ..SubtreeHeapData::default()
             }))
         }
@@ -3380,7 +3380,7 @@ mod parser3_tests {
             }
             let external = Subtree::Heap(Arc::new(SubtreeHeapData {
                 has_external_tokens: true,
-                children: Vec::new(),
+                children: Vec::new().into(),
                 payload: SubtreePayload::External(ExternalScannerState::default()),
                 ..SubtreeHeapData::default()
             }));

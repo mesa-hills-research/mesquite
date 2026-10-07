@@ -560,7 +560,7 @@ mod tests {
                     vec![Subtree::Inline(InlineLeaf::default())]
                 } else {
                     Vec::new()
-                },
+                }.into(),
                 ..SubtreeHeapData::default()
             }))),
             language: language(),

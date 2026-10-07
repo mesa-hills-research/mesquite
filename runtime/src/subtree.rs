@@ -38,6 +38,92 @@ pub(crate) enum Subtree {
     Inline(InlineLeaf),
     Heap(Arc<SubtreeHeapData>),
 }
+/// Immutable child lists usually contain just one edge. Keeping that edge in
+/// the header removes its separate allocation. The enum fits in the same three
+/// words as Vec on 64-bit targets, using Subtree's unused discriminants.
+#[derive(Clone, Debug)]
+pub(crate) enum ChildStorage {
+    One(Subtree),
+    Many(Vec<Subtree>),
+}
+
+impl Default for ChildStorage {
+    fn default() -> Self {
+        Self::Many(Vec::new())
+    }
+}
+
+impl ChildStorage {
+    #[inline]
+    pub fn as_slice(&self) -> &[Subtree] {
+        match self {
+            Self::One(child) => std::slice::from_ref(child),
+            Self::Many(children) => children,
+        }
+    }
+
+    pub fn into_vec(self) -> Vec<Subtree> {
+        match self {
+            Self::One(child) => vec![child],
+            Self::Many(children) => children,
+        }
+    }
+
+    fn append_to(self, pending: &mut Vec<Subtree>) {
+        match self {
+            Self::One(child) => pending.push(child),
+            Self::Many(mut children) => pending.append(&mut children),
+        }
+    }
+
+    fn for_each(self, mut f: impl FnMut(Subtree)) {
+        match self {
+            Self::One(child) => f(child),
+            Self::Many(children) => children.into_iter().for_each(f),
+        }
+    }
+
+    #[cfg(test)]
+    fn push(&mut self, child: Subtree) {
+        *self = match std::mem::take(self) {
+            Self::One(first) => Self::Many(vec![first, child]),
+            Self::Many(mut children) => {
+                children.push(child);
+                Self::Many(children)
+            }
+        };
+    }
+}
+
+impl From<Vec<Subtree>> for ChildStorage {
+    #[inline]
+    fn from(mut children: Vec<Subtree>) -> Self {
+        match children.len() {
+            1 => Self::One(children.pop().unwrap()),
+            _ => Self::Many(children),
+        }
+    }
+}
+
+impl std::ops::Deref for ChildStorage {
+    type Target = [Subtree];
+
+    #[inline]
+    fn deref(&self) -> &[Subtree] {
+        self.as_slice()
+    }
+}
+
+impl std::ops::DerefMut for ChildStorage {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut [Subtree] {
+        match self {
+            Self::One(child) => std::slice::from_mut(child),
+            Self::Many(children) => children,
+        }
+    }
+}
+
 /// A mutable subtree is an owned handle. `Arc::make_mut` before heap mutation.
 pub(crate) type MutableSubtree = Subtree;
 pub(crate) type SubtreeArray = Vec<Subtree>;
@@ -61,7 +147,7 @@ pub(crate) struct SubtreeHeapData {
     pub depends_on_column: bool,
     pub is_missing: bool,
     pub is_keyword: bool,
-    pub children: Vec<Subtree>,
+    pub children: ChildStorage,
     pub payload: SubtreePayload,
 }
 #[derive(Clone, Debug, Default)]
@@ -119,12 +205,13 @@ impl Drop for SubtreeHeapData {
     }
 }
 
-fn drop_subtree_children(mut pending: Vec<Subtree>) {
+fn drop_subtree_children(children: ChildStorage) {
+    let mut pending = children.into_vec();
     while let Some(tree) = pending.pop() {
         if let Subtree::Heap(data) = tree
             && let Ok(mut data) = Arc::try_unwrap(data)
         {
-            pending.append(&mut data.children);
+            std::mem::take(&mut data.children).append_to(&mut pending);
         }
     }
 }
@@ -345,7 +432,7 @@ fn new_heap_leaf(
         has_external_tokens,
         depends_on_column,
         is_keyword,
-        children: Vec::new(),
+        children: Vec::new().into(),
         payload: if has_external_tokens {
             SubtreePayload::External(ExternalScannerState::default())
         } else {
@@ -905,11 +992,12 @@ pub(crate) fn ts_subtree_new_node(
 #[inline]
 pub(crate) fn ts_subtree_new_node_with(
     symbol: Symbol,
-    children: Vec<Subtree>,
+    children: impl Into<ChildStorage>,
     production_id: u32,
     language: &Language,
     initialize: impl FnOnce(&mut SubtreeHeapData),
 ) -> Subtree {
+    let children = children.into();
     let metadata = ts_language_symbol_metadata(language, symbol);
     let fragile = symbol == BUILTIN_SYM_ERROR || symbol == BUILTIN_SYM_ERROR_REPEAT;
     // Finish the non-owning summary first, so the hot loop need not initialize
@@ -1031,9 +1119,9 @@ fn release_heap(pool: &mut SubtreePool, mut data: Arc<SubtreeHeapData>) {
                     pool.free_trees.push(data);
                 }
             } else {
-                for child in std::mem::take(&mut header.children) {
+                std::mem::take(&mut header.children).for_each(|child| {
                     subtree_queue_release(&mut pool.tree_stack, child);
-                }
+                });
                 // C frees branch allocations, and only pools leaf allocations.
             }
         }
@@ -1164,7 +1252,7 @@ pub(crate) fn ts_subtree_edit(
                         extra: data.flags & EXTRA != 0,
                         is_missing: data.flags & MISSING != 0,
                         is_keyword: data.flags & KEYWORD != 0,
-                        children: Vec::new(),
+                        children: Vec::new().into(),
                         payload: SubtreePayload::Leaf,
                         ..SubtreeHeapData::default()
                     };
@@ -1857,7 +1945,7 @@ mod layout_tests {
                 let mut observers = Vec::new();
                 for _ in 0..20_000 {
                     let data = Arc::new(SubtreeHeapData {
-                        children: vec![tree],
+                        children: vec![tree].into(),
                         payload: SubtreePayload::Branch(BranchData::default()),
                         ..SubtreeHeapData::default()
                     });
@@ -2082,7 +2170,7 @@ mod construction_tests {
         let child = Subtree::Heap(Arc::new(SubtreeHeapData {
             has_external_tokens: true,
             payload: SubtreePayload::External(state),
-            children: Vec::new(),
+            children: Vec::new().into(),
             ..SubtreeHeapData::default()
         }));
         let copied_child = ts_subtree_clone(&child);
@@ -2099,7 +2187,7 @@ mod construction_tests {
         );
 
         let parent = Subtree::Heap(Arc::new(SubtreeHeapData {
-            children: vec![child],
+            children: vec![child].into(),
             payload: SubtreePayload::Branch(BranchData::default()),
             ..SubtreeHeapData::default()
         }));
@@ -2127,7 +2215,7 @@ mod construction_tests {
         let tree = Subtree::Heap(Arc::new(SubtreeHeapData {
             symbol: 73,
             parse_state: 12,
-            children: Vec::new(),
+            children: Vec::new().into(),
             payload: SubtreePayload::Branch(BranchData {
                 production_id: 4,
                 dynamic_precedence: 10,
@@ -2162,7 +2250,7 @@ mod subtree_2_tests {
         Subtree::Heap(Arc::new(SubtreeHeapData {
             symbol,
             size,
-            children,
+            children: children.into(),
             visible: true,
             named: true,
             payload: SubtreePayload::Branch(BranchData::default()),
@@ -2296,7 +2384,7 @@ mod subtree_2_tests {
             Subtree::Heap(Arc::new(SubtreeHeapData {
                 has_external_tokens: true,
                 payload: SubtreePayload::External(ts_external_scanner_state_init(bytes)),
-                children: Vec::new(),
+                children: Vec::new().into(),
                 ..SubtreeHeapData::default()
             }))
         };
@@ -2513,7 +2601,7 @@ mod summary_tests {
                         named: metadata.named,
                         fragile_left: fragile,
                         fragile_right: fragile,
-                        children: children[..count].to_vec(),
+                        children: children[..count].to_vec().into(),
                         payload: SubtreePayload::Branch(BranchData {
                             production_id,
                             ..BranchData::default()
@@ -2589,7 +2677,7 @@ mod summary_tests {
                             vec![Subtree::Inline(InlineLeaf::default())]
                         } else {
                             Vec::new()
-                        },
+                        }.into(),
                         payload: SubtreePayload::Branch(BranchData {
                             visible_child_count: 3,
                             named_child_count: 2,
@@ -2686,7 +2774,7 @@ mod summary_tests {
             has_external_tokens: true,
             has_external_scanner_state_change: true,
             depends_on_column: true,
-            children: Vec::new(),
+            children: Vec::new().into(),
             payload: SubtreePayload::External(ExternalScannerState::default()),
             ..SubtreeHeapData::default()
         }));
@@ -2702,7 +2790,7 @@ mod summary_tests {
             },
             lookahead_bytes: 1,
             error_cost: 7,
-            children: vec![missing.clone()],
+            children: vec![missing.clone()].into(),
             payload: SubtreePayload::Branch(BranchData {
                 visible_child_count: 2,
                 named_child_count: 1,
@@ -2721,7 +2809,7 @@ mod summary_tests {
                 extent: Point { row: 0, column: 1 },
             },
             error_cost: 11,
-            children: Vec::new(),
+            children: Vec::new().into(),
             payload: SubtreePayload::Error(0),
             ..SubtreeHeapData::default()
         }));
@@ -2770,7 +2858,7 @@ mod summary_tests {
             symbol: 2,
             parse_state: 23,
             depends_on_column: true,
-            children: Vec::new(),
+            children: Vec::new().into(),
             payload: SubtreePayload::Branch(BranchData {
                 dynamic_precedence: 99,
                 ..BranchData::default()
@@ -2787,7 +2875,7 @@ mod summary_tests {
             fragile_left: true,
             has_external_tokens: true,
             has_external_scanner_state_change: true,
-            children: vec![child],
+            children: vec![child].into(),
             payload: SubtreePayload::Branch(BranchData::default()),
             ..SubtreeHeapData::default()
         };
