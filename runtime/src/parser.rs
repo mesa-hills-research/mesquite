@@ -1033,7 +1033,7 @@ pub(crate) fn ts_parser__reduce(
     let initial_version_count = ts_stack_version_count(&parser.stack);
     let mut slices = ts_stack_pop_count(&mut parser.stack, &mut parser.tree_pool, version, count);
     let pop_size = slices.len();
-    let mut pop = slices.drain(..).peekable();
+    let mut pop = slices.iter_mut().peekable();
     let mut removed_version_count = 0;
     let halted_version_count = ts_stack_halted_version_count(&parser.stack);
 
@@ -1043,7 +1043,7 @@ pub(crate) fn ts_parser__reduce(
         let slice_version = slice.version - removed_version_count;
         if slice_version > MAX_VERSION_COUNT + MAX_VERSION_COUNT_OVERFLOW + halted_version_count {
             ts_stack_remove_version(&mut parser.stack, &mut parser.tree_pool, slice_version);
-            let mut children = slice.subtrees;
+            let mut children = std::mem::take(&mut slice.subtrees);
             ts_subtree_array_delete(&mut parser.tree_pool, &mut children);
             removed_version_count += 1;
             while let Some(next_slice) = pop.peek() {
@@ -1051,49 +1051,57 @@ pub(crate) fn ts_parser__reduce(
                 if next_slice.version != slice.version {
                     break;
                 }
-                let mut next_slice = pop.next().unwrap();
+                let next_slice = pop.next().unwrap();
                 ts_subtree_array_delete(&mut parser.tree_pool, &mut next_slice.subtrees);
             }
             continue;
         }
 
-        let mut children = slice.subtrees;
+        let mut children = std::mem::take(&mut slice.subtrees);
         ts_subtree_array_remove_trailing_extras(&mut children, &mut parser.trailing_extras);
-        let mut parent = ts_subtree_new_node(symbol, children, production_id as u32, &language);
-
-        while pop.peek().is_some_and(|next| next.version == slice.version) {
-            let mut children = pop.next().unwrap().subtrees;
-            ts_subtree_array_remove_trailing_extras(&mut children, &mut parser.trailing_extras2);
-            if ts_parser__select_children(parser, &parent, &children) {
-                ts_subtree_array_clear(&mut parser.tree_pool, &mut parser.trailing_extras);
-                ts_subtree_release(&mut parser.tree_pool, parent);
-                std::mem::swap(&mut parser.trailing_extras, &mut parser.trailing_extras2);
-                parent = ts_subtree_new_node(symbol, children, production_id as u32, &language);
-            } else {
-                // C deletes next_slice.subtrees with its original length,
-                // including the extras. Restore that order before releasing.
-                children.append(&mut parser.trailing_extras2);
-                ts_subtree_array_delete(&mut parser.tree_pool, &mut children);
-            }
-        }
-
         let state = ts_stack_state(&parser.stack, slice_version);
         let next_state = ts_language_next_state(&language, state, symbol);
-        let data = parent.heap_mut().unwrap();
-        if end_of_non_terminal_extra && next_state == state {
-            data.extra = true;
-        }
-        if is_fragile || pop_size > 1 || initial_version_count > 1 {
-            data.fragile_left = true;
-            data.fragile_right = true;
-            data.parse_state = TS_TREE_STATE_NONE;
-        } else {
-            data.parse_state = state;
-        }
-        let SubtreePayload::Branch(branch) = &mut data.payload else {
-            unreachable!("a reduced node has branch data");
+        let initialize = |data: &mut SubtreeHeapData| {
+            if end_of_non_terminal_extra && next_state == state {
+                data.extra = true;
+            }
+            if is_fragile || pop_size > 1 || initial_version_count > 1 {
+                data.fragile_left = true;
+                data.fragile_right = true;
+                data.parse_state = TS_TREE_STATE_NONE;
+            } else {
+                data.parse_state = state;
+            }
+            let SubtreePayload::Branch(branch) = &mut data.payload else {
+                unreachable!("a reduced node has branch data");
+            };
+            branch.dynamic_precedence += dynamic_precedence;
         };
-        branch.dynamic_precedence += dynamic_precedence;
+        let parent = if pop.peek().is_some_and(|next| next.version == slice.version) {
+            let mut parent = ts_subtree_new_node(symbol, children, production_id as u32, &language);
+            while pop.peek().is_some_and(|next| next.version == slice.version) {
+                let mut children = std::mem::take(&mut pop.next().unwrap().subtrees);
+                ts_subtree_array_remove_trailing_extras(&mut children, &mut parser.trailing_extras2);
+                if ts_parser__select_children(parser, &parent, &children) {
+                    ts_subtree_array_clear(&mut parser.tree_pool, &mut parser.trailing_extras);
+                    ts_subtree_release(&mut parser.tree_pool, parent);
+                    std::mem::swap(&mut parser.trailing_extras, &mut parser.trailing_extras2);
+                    parent = ts_subtree_new_node(symbol, children, production_id as u32, &language);
+                } else {
+                    // C deletes next_slice.subtrees with its original length,
+                    // including the extras. Restore that order before releasing.
+                    children.append(&mut parser.trailing_extras2);
+                    ts_subtree_array_delete(&mut parser.tree_pool, &mut children);
+                }
+            }
+
+            initialize(parent.heap_mut().unwrap());
+            parent
+        } else {
+            // A newly reduced node is not shared yet. Finish its header before
+            // wrapping it in Arc, avoiding copy-on-write synchronization.
+            ts_subtree_new_node_with(symbol, children, production_id as u32, &language, initialize)
+        };
 
         ts_stack_push(
             &mut parser.stack,
@@ -1103,15 +1111,17 @@ pub(crate) fn ts_parser__reduce(
             false,
             next_state,
         );
-        for extra in parser.trailing_extras.drain(..) {
-            ts_stack_push(
-                &mut parser.stack,
-                &mut parser.tree_pool,
-                slice_version,
-                extra,
-                false,
-                next_state,
-            );
+        if !parser.trailing_extras.is_empty() {
+            for extra in parser.trailing_extras.drain(..) {
+                ts_stack_push(
+                    &mut parser.stack,
+                    &mut parser.tree_pool,
+                    slice_version,
+                    extra,
+                    false,
+                    next_state,
+                );
+            }
         }
         for j in 0..slice_version {
             if j != version
@@ -1125,7 +1135,7 @@ pub(crate) fn ts_parser__reduce(
     // Return only the drained scratch allocation, never retained tree handles.
     // C keeps this array on the stack; freeing it after every reduce needlessly
     // allocates a new buffer for the next pop.
-    drop(pop);
+    slices.clear();
     parser.stack.slices = slices;
     if ts_stack_version_count(&parser.stack) > initial_version_count {
         initial_version_count
