@@ -139,6 +139,9 @@ pub(crate) fn iterator_new<'tree>(
         child_index: 0,
         structural_child_index: 0,
         descendant_index: 0,
+        alias: 0,
+        field_id: 0,
+        visible: true,
     });
     RangeIterator {
         cursor,
@@ -262,6 +265,9 @@ pub(crate) fn iterator_descend(iterator: &mut RangeIterator<'_>, goal_position: 
                     child_index: i as u32,
                     structural_child_index,
                     descendant_index: 0,
+                    alias: 0,
+                    field_id: 0,
+                    visible: true,
                 });
 
                 if iterator_tree_is_visible(iterator) {
@@ -335,6 +341,9 @@ pub(crate) fn iterator_advance(iterator: &mut RangeIterator<'_>) {
                 child_index,
                 structural_child_index,
                 descendant_index: 0,
+                alias: 0,
+                field_id: 0,
+                visible: true,
             });
 
             if iterator_tree_is_visible(iterator) {
