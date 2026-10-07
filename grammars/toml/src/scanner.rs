@@ -13,15 +13,11 @@ pub(crate) struct Scanner;
 
 fn scan_multiline_string_end(
     lexer: &mut dyn Lexer,
-    valid_symbols: &[bool],
     delimiter: i32,
     content_symbol: Symbol,
     end_symbol: Symbol,
 ) -> bool {
-    if !valid_symbols[end_symbol as usize] || lexer.lookahead() != delimiter {
-        return false;
-    }
-
+    // The caller has checked the end token and first delimiter.
     lexer.advance(false);
     lexer.mark_end();
 
@@ -54,43 +50,48 @@ fn scan_multiline_string_end(
 
 impl ExternalScanner for Scanner {
     fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
-        if scan_multiline_string_end(
-            lexer,
-            valid_symbols,
-            i32::from(b'"'),
-            MULTILINE_BASIC_STRING_CONTENT,
-            MULTILINE_BASIC_STRING_END,
-        ) || scan_multiline_string_end(
-            lexer,
-            valid_symbols,
-            i32::from(b'\''),
-            MULTILINE_LITERAL_STRING_CONTENT,
-            MULTILINE_LITERAL_STRING_END,
-        ) {
-            return true;
+        let Some(valid_symbols) = valid_symbols.first_chunk::<5>() else {
+            return false;
+        };
+        let mut lookahead = lexer.lookahead();
+        match lookahead {
+            0x22 if valid_symbols[MULTILINE_BASIC_STRING_END as usize] => {
+                return scan_multiline_string_end(
+                    lexer,
+                    lookahead,
+                    MULTILINE_BASIC_STRING_CONTENT,
+                    MULTILINE_BASIC_STRING_END,
+                );
+            }
+            0x27 if valid_symbols[MULTILINE_LITERAL_STRING_END as usize] => {
+                return scan_multiline_string_end(
+                    lexer,
+                    lookahead,
+                    MULTILINE_LITERAL_STRING_CONTENT,
+                    MULTILINE_LITERAL_STRING_END,
+                );
+            }
+            _ => {}
         }
 
-        if valid_symbols[LINE_ENDING_OR_EOF as usize] {
-            lexer.set_result_symbol(LINE_ENDING_OR_EOF);
-
-            while lexer.lookahead() == i32::from(b' ') || lexer.lookahead() == i32::from(b'\t') {
-                lexer.advance(true);
-            }
-
-            // Deliberately check lookahead rather than eof(), as in C.
-            if lexer.lookahead() == 0 || lexer.lookahead() == i32::from(b'\n') {
-                return true;
-            }
-
-            if lexer.lookahead() == i32::from(b'\r') {
-                lexer.advance(true);
-                if lexer.lookahead() == i32::from(b'\n') {
-                    return true;
-                }
-            }
+        if !valid_symbols[LINE_ENDING_OR_EOF as usize]
+            || !matches!(lookahead, 0 | 0x09 | 0x0a | 0x0d | 0x20)
+        {
+            // The parser ignores result_symbol when a scanner returns false.
+            // An immediate rejection need not write that unused output.
+            return false;
         }
-
-        false
+        lexer.set_result_symbol(LINE_ENDING_OR_EOF);
+        while matches!(lookahead, 0x20 | 0x09) {
+            lexer.advance(true);
+            lookahead = lexer.lookahead();
+        }
+        if lookahead == 0x0d {
+            lexer.advance(true);
+            return lexer.lookahead() == i32::from(b'\n');
+        }
+        // C treats an embedded NUL as EOF here.
+        matches!(lookahead, 0 | 0x0a)
     }
 
     fn serialize(&mut self, _buffer: &mut [u8]) -> usize {
@@ -108,6 +109,7 @@ pub(crate) fn create() -> Box<dyn ExternalScanner> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     #[derive(Debug, PartialEq, Eq)]
     enum Event {
@@ -121,6 +123,7 @@ mod tests {
         position: usize,
         symbol: Symbol,
         events: Vec<Event>,
+        lookahead_calls: Cell<usize>,
     }
 
     impl TestLexer {
@@ -130,12 +133,14 @@ mod tests {
                 position: 0,
                 symbol: Symbol::MAX,
                 events: Vec::new(),
+                lookahead_calls: Cell::new(0),
             }
         }
     }
 
     impl Lexer for TestLexer {
         fn lookahead(&self) -> i32 {
+            self.lookahead_calls.set(self.lookahead_calls.get() + 1);
             self.input.get(self.position).copied().unwrap_or(0)
         }
 
@@ -262,7 +267,12 @@ mod tests {
                 accepted,
                 "input {input:?}"
             );
-            let mut expected = vec![Event::Symbol(LINE_ENDING_OR_EOF)];
+            // Immediate failures leave the unused result symbol untouched.
+            let mut expected = if accepted || advances != 0 {
+                vec![Event::Symbol(LINE_ENDING_OR_EOF)]
+            } else {
+                vec![]
+            };
             expected.extend((0..advances).map(|position| Event::Advance {
                 position,
                 skip: true,
@@ -290,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn initial_character_dispatch_preserves_c_events_for_every_validity_mask() {
+    fn initial_character_dispatch_preserves_c_tokens_for_every_validity_mask() {
         // Include decoder errors, non-ASCII spaces, and values whose low byte
         // aliases a delimiter. Classification must not truncate code points.
         for first in (0..=127).chain([-1, 0x85, 0xa0, 0x109, 0x122, 0x127, 0x2003, i32::MAX]) {
@@ -322,7 +332,13 @@ mod tests {
                         ],
                     )
                 } else if valid[LINE_ENDING_OR_EOF as usize] {
-                    let mut events = vec![Event::Symbol(LINE_ENDING_OR_EOF)];
+                    // The sole omitted C event is a dead result-symbol write
+                    // on an immediate failure, which the runtime never reads.
+                    let mut events = if matches!(first, 0 | 0x09 | 0x0a | 0x0d | 0x20) {
+                        vec![Event::Symbol(LINE_ENDING_OR_EOF)]
+                    } else {
+                        vec![]
+                    };
                     if matches!(first, 0x09 | 0x0d | 0x20) {
                         events.push(Event::Advance {
                             position: 0,
@@ -335,6 +351,46 @@ mod tests {
                 };
                 assert_eq!(accepted, expected_accepted, "first {first}, mask {mask}");
                 assert_eq!(lexer.events, expected_events, "first {first}, mask {mask}");
+            }
+        }
+    }
+
+    #[test]
+    fn one_lookahead_read_per_visited_position() {
+        for input in [
+            "",
+            "\0x",
+            "\n",
+            " \t\n",
+            " \t\r\n",
+            "\r",
+            "\r\0",
+            " \t\r\rx",
+            " \t#comment",
+            "x",
+            "é",
+            "\u{a0}\n",
+            "\"",
+            "\"\"",
+            "\"\"\"",
+            "\"\"\"\"",
+            "'",
+            "''",
+            "'''",
+            "''''",
+            "\"'",
+            "'\"",
+            " \t\"\"\"",
+        ] {
+            for mask in 0..32 {
+                let valid: [bool; 5] = std::array::from_fn(|i| mask & (1 << i) != 0);
+                let mut lexer = TestLexer::new(input);
+                Scanner.scan(&mut lexer, &valid);
+                assert_eq!(
+                    lexer.lookahead_calls.get(),
+                    lexer.position + 1,
+                    "input {input:?}, mask {mask}"
+                );
             }
         }
     }
