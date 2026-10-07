@@ -78,6 +78,14 @@ inline/heap distinctions throughout the parser. `branch()` provides summary data
 `ptr_eq` means C union-word identity: inline equality by packed value, heap equality
 by `Arc::ptr_eq`, null equal only to null. It is not recursive structural equality.
 
+No-alias, non-error unary summaries may inherit their sole child's extent and
+lookahead instead of running the general child accumulation loop. Preserve the
+parent's old-row column-dependency check, sticky fragility/parse state, and empty
+child reduction semantics when re-summarizing as well as constructing fresh
+headers. Alias/error-parent/empty/multiple-child cases retain the general loop.
+The allocating leaf constructor is kept separate from the common inline-value
+path; this changes neither inline eligibility nor pooling/ownership rules.
+
 Ownership rules for signatures:
 
 * `&Subtree` borrows without retaining; `Subtree` transfers one owning reference.

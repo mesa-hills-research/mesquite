@@ -174,6 +174,7 @@ pub(crate) fn ts_subtree_array_delete(pool: &mut SubtreePool, trees: &mut Vec<Su
     *trees = Vec::new();
 }
 
+#[inline]
 pub(crate) fn ts_subtree_array_remove_trailing_extras(
     trees: &mut Vec<Subtree>,
     destination: &mut Vec<Subtree>,
@@ -505,6 +506,7 @@ pub(crate) fn ts_subtree_summarize_children(tree: &mut Subtree, language: &Langu
 
 // Accumulating a summary does not own the child vector. In particular, fresh
 // reductions can compute it before constructing a header with a Drop impl.
+#[cfg_attr(test, derive(Clone, Debug))]
 struct ChildSummary {
     branch: BranchData,
     padding: Length,
@@ -559,6 +561,125 @@ fn summarize_children(data: &mut SubtreeHeapData, language: &Language) {
 
 #[inline(always)]
 fn summarize_child_slice(data: &mut ChildSummary, children: &[Subtree], language: &Language) {
+    // Apply the unary shortcut to the non-owning accumulator, both before fresh
+    // header construction and when re-summarizing an existing header. No owning
+    // header or child Vec needs to be created or moved during this computation.
+    if children.len() == 1
+        && data.branch.production_id == 0
+        && data.symbol != BUILTIN_SYM_ERROR
+        && data.symbol != BUILTIN_SYM_ERROR_REPEAT
+    {
+        summarize_unary(data, &children[0]);
+    } else {
+        summarize_child_slice_general(data, children, language);
+    }
+}
+
+#[inline(always)]
+fn summarize_unary(data: &mut ChildSummary, child: &Subtree) {
+    // Decode once and finish reading the child before publishing the summary.
+    // Preserve the old-row dependency test and sticky flags on re-summarization.
+    let mut summary = BranchData::default();
+    let mut fragile_left = data.fragile_left;
+    let mut fragile_right = data.fragile_right;
+    let mut parse_state = data.parse_state;
+    let (
+        padding,
+        size,
+        lookahead_bytes,
+        error_cost,
+        depends_on_column,
+        has_external_tokens,
+        has_external_scanner_state_change,
+    ) = match child {
+        Subtree::Inline(leaf) => {
+            summary.first_leaf = FirstLeaf {
+                symbol: leaf.symbol as Symbol,
+                parse_state: leaf.parse_state,
+            };
+            if leaf.flags & VISIBLE != 0 {
+                summary.visible_child_count = 1;
+                summary.named_child_count = u32::from(leaf.flags & NAMED != 0);
+                summary.visible_descendant_count = 1;
+            }
+            let error_cost = if leaf.flags & MISSING != 0 {
+                ERROR_COST_PER_MISSING_TREE + ERROR_COST_PER_RECOVERY
+            } else {
+                0
+            };
+            (
+                ts_subtree_padding(child),
+                ts_subtree_size(child),
+                (leaf.padding_rows_and_lookahead >> 4) as u32,
+                error_cost,
+                false,
+                false,
+                false,
+            )
+        }
+        Subtree::Heap(child) => {
+            let has_children = !child.children.is_empty();
+            summary.first_leaf = FirstLeaf {
+                symbol: child.symbol,
+                parse_state: child.parse_state,
+            };
+            if let SubtreePayload::Branch(branch) = &child.payload {
+                summary.visible_descendant_count = branch.visible_descendant_count;
+                if has_children {
+                    summary.first_leaf = branch.first_leaf;
+                    summary.dynamic_precedence = branch.dynamic_precedence;
+                    if !child.visible {
+                        summary.visible_child_count = branch.visible_child_count;
+                        summary.named_child_count = branch.named_child_count;
+                    }
+                }
+            }
+            if child.visible {
+                summary.visible_child_count = 1;
+                summary.named_child_count = u32::from(child.named);
+                summary.visible_descendant_count = summary.visible_descendant_count.wrapping_add(1);
+            }
+            let error_cost = if child.symbol == BUILTIN_SYM_ERROR_REPEAT {
+                0
+            } else if child.is_missing {
+                ERROR_COST_PER_MISSING_TREE + ERROR_COST_PER_RECOVERY
+            } else {
+                child.error_cost
+            };
+            fragile_left |= child.fragile_left;
+            fragile_right |= child.fragile_right;
+            if child.symbol == BUILTIN_SYM_ERROR {
+                fragile_left = true;
+                fragile_right = true;
+                parse_state = TS_TREE_STATE_NONE;
+            }
+            (
+                child.padding,
+                child.size,
+                child.lookahead_bytes,
+                error_cost,
+                data.size.extent.row == 0 && child.depends_on_column,
+                child.has_external_tokens,
+                child.has_external_scanner_state_change,
+            )
+        }
+        Subtree::Null => (length_zero(), length_zero(), 0, 0, false, false, false),
+    };
+    data.error_cost = error_cost;
+    data.depends_on_column = depends_on_column;
+    data.has_external_tokens = has_external_tokens;
+    data.has_external_scanner_state_change = has_external_scanner_state_change;
+    data.fragile_left = fragile_left;
+    data.fragile_right = fragile_right;
+    data.parse_state = parse_state;
+    data.padding = padding;
+    data.size = size;
+    data.lookahead_bytes = lookahead_bytes;
+    data.branch = summary;
+}
+
+#[inline(always)]
+fn summarize_child_slice_general(data: &mut ChildSummary, children: &[Subtree], language: &Language) {
     let branch = &mut data.branch;
     let mut summary = BranchData {
         production_id: branch.production_id,
@@ -777,6 +898,7 @@ pub(crate) fn ts_subtree_new_node(
 
 /// Initialize a reduction's header while it is exclusively owned, before Arc
 /// introduces the need for copy-on-write uniqueness checks.
+#[inline]
 pub(crate) fn ts_subtree_new_node_with(
     symbol: Symbol,
     children: Vec<Subtree>,
@@ -2314,6 +2436,125 @@ mod summary_tests {
                         format!("{expected:?}"),
                         "count={count}, symbol={symbol}, production_id={production_id}",
                     );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unary_summary_matches_general_for_all_child_representations() {
+        let mut children = vec![Subtree::Null];
+        for flags in [
+            0,
+            VISIBLE,
+            NAMED,
+            VISIBLE | NAMED,
+            EXTRA | VISIBLE,
+            MISSING | VISIBLE,
+        ] {
+            children.push(Subtree::Inline(InlineLeaf {
+                parse_state: 23,
+                symbol: 1,
+                flags,
+                padding_bytes: 11,
+                padding_columns: 3,
+                size_bytes: 7,
+                padding_rows_and_lookahead: 0xe2,
+            }));
+        }
+        for symbol in [0, 1, 2, BUILTIN_SYM_ERROR, BUILTIN_SYM_ERROR_REPEAT] {
+            for flags in 0..32 {
+                for has_children in [false, true] {
+                    children.push(Subtree::Heap(Arc::new(SubtreeHeapData {
+                        symbol,
+                        parse_state: 27,
+                        visible: flags & 1 != 0,
+                        named: flags & 2 != 0,
+                        extra: flags & 4 != 0,
+                        is_missing: flags & 8 != 0,
+                        fragile_left: flags & 16 != 0,
+                        fragile_right: flags & 16 == 0,
+                        depends_on_column: true,
+                        has_external_tokens: true,
+                        has_external_scanner_state_change: true,
+                        padding: Length {
+                            bytes: u32::MAX - 3,
+                            extent: Point { row: 2, column: 4 },
+                        },
+                        size: Length {
+                            bytes: 17,
+                            extent: Point { row: 1, column: 3 },
+                        },
+                        lookahead_bytes: u32::MAX - 7,
+                        error_cost: 97,
+                        children: if has_children {
+                            vec![Subtree::Inline(InlineLeaf::default())]
+                        } else {
+                            Vec::new()
+                        },
+                        payload: SubtreePayload::Branch(BranchData {
+                            visible_child_count: 3,
+                            named_child_count: 2,
+                            visible_descendant_count: u32::MAX,
+                            dynamic_precedence: -11,
+                            repeat_depth: 9,
+                            production_id: 1,
+                            first_leaf: FirstLeaf {
+                                symbol: 2,
+                                parse_state: 13,
+                            },
+                        }),
+                        ..SubtreeHeapData::default()
+                    })));
+                }
+            }
+        }
+        for child in children {
+            for old_rows in [0, 2] {
+                for parent_symbol in [3, BUILTIN_SYM_ERROR, BUILTIN_SYM_ERROR_REPEAT] {
+                    for production_id in [0, 1] {
+                        let mut optimized = ChildSummary {
+                            symbol: parent_symbol,
+                            parse_state: 31,
+                            padding: length_zero(),
+                            size: Length {
+                                bytes: 53,
+                                extent: Point {
+                                    row: old_rows,
+                                    column: 7,
+                                },
+                            },
+                            branch: BranchData {
+                                production_id,
+                                repeat_depth: 5,
+                                ..BranchData::default()
+                            },
+                            lookahead_bytes: 0,
+                            error_cost: 0,
+                            has_external_tokens: false,
+                            has_external_scanner_state_change: false,
+                            depends_on_column: false,
+                            fragile_left: true,
+                            fragile_right: false,
+                            visible: false,
+                            named: false,
+                        };
+                        let mut general = optimized.clone();
+                        // Repeat after the first pass has changed rows/flags.
+                        for _ in 0..2 {
+                            summarize_child_slice(
+                                &mut optimized,
+                                std::slice::from_ref(&child),
+                                &language(),
+                            );
+                            summarize_child_slice_general(
+                                &mut general,
+                                std::slice::from_ref(&child),
+                                &language(),
+                            );
+                            assert_eq!(format!("{optimized:?}"), format!("{general:?}"));
+                        }
+                    }
                 }
             }
         }
