@@ -29,13 +29,13 @@ Existing regression coverage is sufficient and was rerun rather than duplicated:
   inputs, chunk sizes 1 through 3, fresh parsers and reuse after bracket arguments
   and comments, node kinds/ids, ranges, flags, child counts, and progress calls.
 
-## Verification on baseline `276f40c`
+## Verification on baseline `9142da1`
 
-Reassigned bucket `381f9bd4` already passes on merged baseline `276f40c`.
+Reassigned bucket `381f9bd4` already passes on merged baseline `9142da1`.
 Rechecked the current C source and reran the checks below on this baseline;
-all results remain unchanged from the previous verification (`4249e49`). The
-existing tests cover both exact inputs, so no additional behavior change or
-duplicate regression test was needed.
+all results remain unchanged from the previous verifications (`4249e49` and
+`276f40c`). The existing tests cover both exact inputs, so no additional behavior
+change or duplicate regression test was needed.
 
 - `run_oracle(inputs = "bucket:381f9bd4")`: 2/2 pass, query checks enabled.
 - `run_oracle(inputs = "all", languages = "cmake")`: gate 270/270 pass
