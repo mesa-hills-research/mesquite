@@ -59,11 +59,13 @@ This follow-up changes only this verification note; it introduces no deviation
 from C and no new unsafe code.
 
 
-### Revalidation of `4d6cc948` at `8f652b4`
+### Revalidation of `4d6cc948` at `a0b7071`
 
-The assigned Registry-query input already passes on this starting revision.
-Direct comparison with the current C scanner confirms that the merged
-zero-valued creation/reset behavior above is the required correction; no
+The assigned Registry-query input already passes on this starting revision
+(previously verified at `8f652b4`). All checks below were rerun rather than
+relying on that earlier verification. Direct comparison with the current C
+scanner confirms that the merged zero-valued creation/reset behavior above is
+the required correction; no
 additional runtime change is warranted. All checks below were rerun at this
 revision, including the parser regression with fresh and reused scanner state,
 single-byte input chunks, and incremental repair/restoration. The reduced
