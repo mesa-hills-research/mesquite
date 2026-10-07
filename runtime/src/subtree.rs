@@ -650,7 +650,10 @@ pub(crate) fn ts_subtree_release(pool: &mut SubtreePool, tree: Subtree) {
 /// Drop shared references immediately, in child order, just as C decrements each
 /// refcount before pushing the newly unreferenced heaps on its LIFO worklist.
 fn subtree_queue_release(stack: &mut Vec<Subtree>, tree: Subtree) {
+    // Shared references need only their normal Arc drop. Avoid get_mut's weak
+    // counter synchronization unless this could actually be the final owner.
     if let Subtree::Heap(mut data) = tree
+        && Arc::strong_count(&data) == 1
         && Arc::get_mut(&mut data).is_some()
     {
         stack.push(Subtree::Heap(data));
@@ -1123,6 +1126,12 @@ pub(crate) fn ts_subtree_external_scanner_state(tree: &Subtree) -> Option<&Exter
 }
 
 pub(crate) fn ts_subtree_external_scanner_state_eq(tree: &Subtree, other: &Subtree) -> bool {
+    // Stack versions and the token cache commonly share the same snapshot (or
+    // both have no scanner). Their states cannot differ; avoid decoding headers
+    // and comparing byte slices for identical handles.
+    if tree.ptr_eq(other) {
+        return true;
+    }
     // None represents C's static, zero-length scanner state.
     let left =
         ts_subtree_external_scanner_state(tree).map_or(&[][..], ts_external_scanner_state_data);
@@ -1820,6 +1829,28 @@ mod subtree_2_tests {
         assert!(ts_subtree_external_scanner_state(&root).is_none());
         assert!(ts_subtree_external_scanner_state(&last).is_some());
         assert!(ts_subtree_external_scanner_state_eq(&root, &Subtree::Null));
+    }
+
+    #[test]
+    fn scanner_state_equality_handles_identity_distinct_heaps_and_empty_states() {
+        let external = |bytes: &[u8]| {
+            Subtree::Heap(Arc::new(SubtreeHeapData {
+                has_external_tokens: true,
+                payload: SubtreePayload::External(ts_external_scanner_state_init(bytes)),
+                children: Vec::new(),
+                ..SubtreeHeapData::default()
+            }))
+        };
+        let token = external(&[1, 2, 3]);
+        let retained = token.clone();
+        assert!(ts_subtree_external_scanner_state_eq(&token, &retained));
+        assert!(ts_subtree_external_scanner_state_eq(&token, &external(&[1, 2, 3])));
+        assert!(!ts_subtree_external_scanner_state_eq(&token, &external(&[1, 2])));
+        assert!(!ts_subtree_external_scanner_state_eq(&token, &external(&[1, 2, 4])));
+        assert!(!ts_subtree_external_scanner_state_eq(&token, &Subtree::Null));
+        assert!(ts_subtree_external_scanner_state_eq(&external(&[]), &Subtree::Null));
+        assert!(ts_subtree_external_scanner_state_eq(&Subtree::Null, &Subtree::Null));
+        assert!(ts_subtree_external_scanner_state_eq(&leaf(1, 2), &leaf(3, 4)));
     }
 
     #[test]

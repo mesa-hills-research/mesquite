@@ -40,69 +40,72 @@ pub(crate) struct TableEntry {
     pub actions: &'static [ParseActionEntry],
     pub is_reusable: bool,
 }
-const LOOKUP_CACHE_SIZE: usize = 4096;
+const PARSE_TABLE_CACHE_SIZE: usize = 4096;
 
-/// Parser-local memoization of immutable grammar lookups. The full state/symbol
-/// key is checked on every hit, so direct-map collisions only cause a new scan.
-/// Reset this cache whenever the parser's language changes.
-pub(crate) struct LookupCache {
-    entries: Box<[u64; LOOKUP_CACHE_SIZE]>,
+/// Parser-local memoization of immutable compact parse-table entries. Cache
+/// collisions only trigger the original lookup, and changing grammars clears it.
+/// Interior mutability lets independent parser operations borrow the cache along
+/// with stack/token state; the parser remains Send without locks or atomics.
+pub(crate) struct ParseTableCache {
+    entries: Box<[std::cell::Cell<u64>; PARSE_TABLE_CACHE_SIZE]>,
 }
 
-impl Default for LookupCache {
+impl Default for ParseTableCache {
     fn default() -> Self {
         Self {
-            entries: Box::new([u64::MAX; LOOKUP_CACHE_SIZE]),
+            entries: Box::new(std::array::from_fn(|_| std::cell::Cell::new(0))),
         }
     }
 }
 
-impl LookupCache {
+impl ParseTableCache {
     pub fn clear(&mut self) {
-        self.entries.fill(u64::MAX);
+        for entry in self.entries.iter_mut() {
+            *entry.get_mut() = 0;
+        }
     }
 
-    fn lookup(&mut self, language: &Language, state: StateId, symbol: Symbol) -> u16 {
-        // Dense rows are already a single indexed load; cache only compressed rows.
+    #[inline]
+    pub fn lookup(&self, language: &Language, state: StateId, symbol: Symbol) -> u16 {
+        // Dense states are already a single indexed load.
         if u32::from(state) < language.tables.large_state_count {
-            return ts_language_lookup(language, state, symbol);
+            return language.tables.parse_table
+                [state as usize * language.tables.symbol_count as usize + symbol as usize];
         }
-        let key = (u32::from(state) << 16) | u32::from(symbol);
-        let index = (usize::from(state) * 31 + usize::from(symbol) * 17) & (self.entries.len() - 1);
-        let entry = &mut self.entries[index];
-        // Bits 0..16 hold the value and 16..48 the key. The unused high bits
-        // distinguish the empty sentinel from every possible state/symbol pair.
-        if *entry >> 16 == u64::from(key) {
-            return *entry as u16;
+        // The extra tag bit distinguishes cached zero values from empty slots.
+        let key = (1u64 << 32) | (u64::from(state) << 16) | u64::from(symbol);
+        let entry =
+            &self.entries[(state as usize * 31 + symbol as usize) & (PARSE_TABLE_CACHE_SIZE - 1)];
+        let cached = entry.get();
+        if cached >> 16 == key {
+            return cached as u16;
         }
         let value = ts_language_lookup(language, state, symbol);
-        *entry = (u64::from(key) << 16) | u64::from(value);
+        entry.set((key << 16) | u64::from(value));
         value
     }
 
-    pub fn table_entry(
-        &mut self,
-        language: &Language,
-        state: StateId,
-        symbol: Symbol,
-    ) -> TableEntry {
+    #[inline]
+    pub fn table_entry(&self, language: &Language, state: StateId, symbol: Symbol) -> TableEntry {
         if symbol == BUILTIN_SYM_ERROR || symbol == BUILTIN_SYM_ERROR_REPEAT {
-            return TableEntry::default();
-        }
-        ts_assert!(u32::from(symbol) < language.tables.token_count);
-        let index = self.lookup(language, state, symbol);
-        let (is_reusable, actions) = language.tables.action_list(index as usize);
-        TableEntry {
-            actions,
-            is_reusable,
+            TableEntry::default()
+        } else {
+            ts_assert!(u32::from(symbol) < language.tables.token_count);
+            let index = self.lookup(language, state, symbol);
+            let (is_reusable, actions) = language.tables.action_list(index as usize);
+            TableEntry {
+                actions,
+                is_reusable,
+            }
         }
     }
 
-    pub fn next_state(&mut self, language: &Language, state: StateId, symbol: Symbol) -> StateId {
+    #[inline]
+    pub fn next_state(&self, language: &Language, state: StateId, symbol: Symbol) -> StateId {
         if symbol == BUILTIN_SYM_ERROR || symbol == BUILTIN_SYM_ERROR_REPEAT {
             0
         } else if u32::from(symbol) < language.tables.token_count {
-            match self.actions(language, state, symbol).last() {
+            match self.table_entry(language, state, symbol).actions.last() {
                 Some(ParseActionEntry::Action(ParseAction::Shift {
                     state: next_state,
                     extra,
@@ -121,8 +124,12 @@ impl LookupCache {
         }
     }
 
+    pub fn has_actions(&self, language: &Language, state: StateId, symbol: Symbol) -> bool {
+        self.lookup(language, state, symbol) != 0
+    }
+
     pub fn actions(
-        &mut self,
+        &self,
         language: &Language,
         state: StateId,
         symbol: Symbol,
@@ -130,16 +137,7 @@ impl LookupCache {
         self.table_entry(language, state, symbol).actions
     }
 
-    pub fn has_actions(&mut self, language: &Language, state: StateId, symbol: Symbol) -> bool {
-        self.lookup(language, state, symbol) != 0
-    }
-
-    pub fn has_reduce_action(
-        &mut self,
-        language: &Language,
-        state: StateId,
-        symbol: Symbol,
-    ) -> bool {
+    pub fn has_reduce_action(&self, language: &Language, state: StateId, symbol: Symbol) -> bool {
         matches!(
             self.actions(language, state, symbol).first(),
             Some(ParseActionEntry::Action(ParseAction::Reduce { .. }))

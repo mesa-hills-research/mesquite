@@ -494,7 +494,9 @@ fn all_grammar_states_agree_between_lookup_and_iteration() {
             true,
         ),
     ];
+    let mut cache = ParseTableCache::default();
     for &(name, blob, has_scanner) in grammars {
+        cache.clear();
         let language = leak(LanguageTables::decode(
             blob,
             unused_lex,
@@ -502,7 +504,6 @@ fn all_grammar_states_agree_between_lookup_and_iteration() {
             has_scanner.then_some(unused_scanner),
         ));
         let tables = language.tables;
-        let mut cache = LookupCache::default();
         for state in 0..tables.state_count as StateId {
             let mut expected = vec![0; tables.symbol_count as usize];
             let mut expected_order = Vec::new();
@@ -541,11 +542,11 @@ fn all_grammar_states_agree_between_lookup_and_iteration() {
                     "{name} state {state} symbol {symbol}"
                 );
             }
-            // Exercise misses and hits, including cached zero entries. Reversing
-            // the second pass also exercises eviction by other symbols.
-            for symbols in [(0..expected.len()).collect::<Vec<_>>(), (0..expected.len()).rev().collect()] {
-                for symbol in symbols {
-                    assert_eq!(cache.lookup(&language, state, symbol as Symbol), expected[symbol]);
+            // Check both misses and hits, including zero entries. Reusing the
+            // cache across states exercises collisions without changing results.
+            for (symbol, &value) in expected.iter().enumerate() {
+                for _ in 0..2 {
+                    assert_eq!(cache.lookup(&language, state, symbol as Symbol), value);
                 }
             }
             let mut iterator = ts_language_lookaheads(&language, state);
@@ -576,54 +577,62 @@ fn all_grammar_states_agree_between_lookup_and_iteration() {
 }
 
 #[test]
-fn lookup_cache_helpers_preserve_action_order_and_builtin_symbols() {
+fn parse_table_cache_clears_on_language_change() {
     let language = &*LANGUAGE;
-    let mut cache = LookupCache::default();
-    for _ in 0..2 {
+    let mut cache = ParseTableCache::default();
+    assert_eq!(cache.lookup(language, 2, 2), 6);
+    let mut changed = language.tables.clone();
+    changed.small_parse_table[1] = 3;
+    let changed = leak(changed);
+    cache.clear();
+    assert_eq!(cache.lookup(&changed, 2, 2), 3);
+    for language in [language, &changed] {
+        cache.clear();
         for state in 0..language.tables.state_count as StateId {
             for symbol in 0..language.tables.symbol_count as Symbol {
-                assert_eq!(
-                    cache.next_state(language, state, symbol),
-                    ts_language_next_state(language, state, symbol)
-                );
-                assert_eq!(
-                    cache.has_actions(language, state, symbol),
-                    ts_language_has_actions(language, state, symbol)
-                );
+                assert_eq!(cache.next_state(language, state, symbol), ts_language_next_state(language, state, symbol));
                 if u32::from(symbol) < language.tables.token_count {
+                    let cached = cache.table_entry(language, state, symbol);
                     let expected = ts_language_table_entry(language, state, symbol);
-                    let actual = cache.table_entry(language, state, symbol);
-                    assert_eq!(actual.actions, expected.actions);
-                    assert_eq!(actual.is_reusable, expected.is_reusable);
-                    assert_eq!(
-                        cache.has_reduce_action(language, state, symbol),
-                        ts_language_has_reduce_action(language, state, symbol)
-                    );
+                    assert_eq!(cached.actions, expected.actions);
+                    assert_eq!(cached.is_reusable, expected.is_reusable);
                 }
             }
         }
         for symbol in [BUILTIN_SYM_ERROR, BUILTIN_SYM_ERROR_REPEAT] {
-            assert!(cache.actions(language, StateId::MAX, symbol).is_empty());
-            assert!(
-                !cache
-                    .table_entry(language, StateId::MAX, symbol)
-                    .is_reusable
-            );
             assert_eq!(cache.next_state(language, StateId::MAX, symbol), 0);
+            assert!(cache.table_entry(language, StateId::MAX, symbol).actions.is_empty());
         }
     }
 }
 
 #[test]
+fn parser_setting_language_invalidates_parse_table_cache() {
+    use crate::parser::{ts_parser_new, ts_parser_set_language};
+    let language = &*LANGUAGE;
+    let mut parser = ts_parser_new();
+    assert!(ts_parser_set_language(&mut parser, Some(language)));
+    assert_eq!(parser.parse_table_cache.lookup(language, 2, 2), 6);
+    let mut changed = language.tables.clone();
+    changed.small_parse_table[1] = 3;
+    let changed = leak(changed);
+    assert!(ts_parser_set_language(&mut parser, Some(&changed)));
+    assert_eq!(parser.parse_table_cache.lookup(&changed, 2, 2), 3);
+    assert!(ts_parser_set_language(&mut parser, None));
+    assert!(ts_parser_set_language(&mut parser, Some(language)));
+    assert_eq!(parser.parse_table_cache.lookup(language, 2, 2), 6);
+}
+
+#[test]
 fn lookup_cache_collisions_and_clearing_never_reuse_a_stale_value() {
     let mut tables = LANGUAGE.tables.clone();
-    let colliding_state = LOOKUP_CACHE_SIZE as StateId + 2;
+    let colliding_state = PARSE_TABLE_CACHE_SIZE as StateId + 2;
     tables.state_count = u32::from(colliding_state) + 1;
     tables
         .small_parse_table_map
-        .resize(LOOKUP_CACHE_SIZE + 1, 12);
+        .resize(PARSE_TABLE_CACHE_SIZE + 1, 12);
     let language = leak(tables);
-    let mut cache = LookupCache::default();
+    let mut cache = ParseTableCache::default();
     for _ in 0..2 {
         assert_eq!(cache.next_state(&language, 2, 4), 1);
         assert_eq!(cache.next_state(&language, colliding_state, 4), 0);

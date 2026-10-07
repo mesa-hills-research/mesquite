@@ -34,7 +34,7 @@ pub struct Parser {
     pub(crate) stack: Stack,
     pub(crate) tree_pool: SubtreePool,
     pub(crate) language: Option<Language>,
-    lookup_cache: LookupCache,
+    pub(crate) parse_table_cache: ParseTableCache,
     pub(crate) reduce_actions: ReduceActionSet,
     pub(crate) finished_tree: Subtree,
     pub(crate) trailing_extras: Vec<Subtree>,
@@ -221,7 +221,7 @@ pub(crate) fn ts_parser__breakdown_top_of_stack(
                 if ts_subtree_is_error(child) {
                     state = ERROR_STATE;
                 } else if !ts_subtree_extra(child) {
-                    state = parser.lookup_cache.next_state(&language, state, ts_subtree_symbol(child));
+                    state = parser.parse_table_cache.next_state(&language, state, ts_subtree_symbol(child));
                 }
                 ts_stack_push(
                     &mut parser.stack,
@@ -426,16 +426,12 @@ pub(crate) fn ts_parser__external_scanner_serialize(parser: &mut Parser) -> u32 
 }
 
 pub(crate) fn ts_parser__external_scanner_deserialize(
-    parser: &mut Parser,
+    scanner: &mut dyn ExternalScanner,
     external_token: &Subtree,
 ) {
     let data = ts_subtree_external_scanner_state(external_token)
         .map_or(&[][..], ts_external_scanner_state_data);
-    parser
-        .external_scanner
-        .as_mut()
-        .expect("external scanner")
-        .deserialize(data);
+    scanner.deserialize(data);
 }
 
 pub(crate) fn ts_parser__external_scanner_scan(
@@ -503,8 +499,6 @@ pub(crate) fn ts_parser__lex(
         return Subtree::Null;
     }
     let start_position = ts_stack_position(&parser.stack, version);
-    // Retain the handle across mutable parser calls, not a borrow of its stack.
-    let external_token = ts_stack_last_external_token(&parser.stack, version).clone();
     let mut found_external_token = false;
     let mut error_mode = parse_state == ERROR_STATE;
     let mut skipped_error = false;
@@ -529,7 +523,15 @@ pub(crate) fn ts_parser__lex(
                 current_position.extent.column
             );
             ts_lexer_start(&mut parser_lexer(parser, context));
-            ts_parser__external_scanner_deserialize(parser, &external_token);
+            // Lexing does not mutate the stack. Borrow the scanner snapshot
+            // from its head instead of retaining/releasing an Arc per token.
+            ts_parser__external_scanner_deserialize(
+                parser
+                    .external_scanner
+                    .as_deref_mut()
+                    .expect("external scanner"),
+                ts_stack_last_external_token(&parser.stack, version),
+            );
             let mut found_token =
                 ts_parser__external_scanner_scan(parser, context, lex_mode.external_lex_state);
             if parser.has_scanner_error {
@@ -540,7 +542,10 @@ pub(crate) fn ts_parser__lex(
                 external_scanner_state_len = ts_parser__external_scanner_serialize(parser);
                 let bytes = &parser.scanner_buffer[..external_scanner_state_len as usize];
                 external_scanner_state_changed =
-                    !ts_subtree_external_scanner_state(&external_token)
+                    !ts_subtree_external_scanner_state(ts_stack_last_external_token(
+                        &parser.stack,
+                        version,
+                    ))
                         .map_or(bytes.is_empty(), |state| {
                             ts_external_scanner_state_eq(state, bytes)
                         });
@@ -555,7 +560,7 @@ pub(crate) fn ts_parser__lex(
                         .as_ref()
                         .expect("external scanner tables")
                         .symbol_map[parser.lexer.result_symbol as usize];
-                    let next_parse_state = parser.lookup_cache.next_state(&language, parse_state, symbol);
+                    let next_parse_state = parser.parse_table_cache.next_state(&language, parse_state, symbol);
                     let token_is_extra = next_parse_state == parse_state;
                     if error_mode
                         || !ts_stack_has_advanced_since_error(&parser.stack, version)
@@ -652,7 +657,7 @@ pub(crate) fn ts_parser__lex(
             is_keyword = ts_parser__call_keyword_lex_fn(parser, context);
             if is_keyword
                 && parser.lexer.token_end_position.bytes == end_byte
-                && (parser.lookup_cache.has_actions(&language, parse_state, parser.lexer.result_symbol)
+                && (parser.parse_table_cache.has_actions(&language, parse_state, parser.lexer.result_symbol)
                     || ts_language_is_reserved_word(
                         &language,
                         parse_state,
@@ -721,7 +726,7 @@ fn parser2_log_stack(parser: &mut Parser) {
 }
 
 pub(crate) fn ts_parser__get_cached_token(
-    parser: &mut Parser,
+    parser: &Parser,
     state: StateId,
     position: usize,
     last_external_token: &Subtree,
@@ -732,7 +737,7 @@ pub(crate) fn ts_parser__get_cached_token(
         && cache.byte_index as usize == position
         && ts_subtree_external_scanner_state_eq(&cache.last_external_token, last_external_token)
     {
-        *table_entry = parser.lookup_cache.table_entry(
+        *table_entry = parser.parse_table_cache.table_entry(
             parser.language.as_ref().unwrap(),
             state,
             ts_subtree_symbol(&cache.token),
@@ -784,7 +789,6 @@ pub(crate) fn ts_parser__reuse_node(
     version: StackVersion,
     state: &mut StateId,
     position: u32,
-    last_external_token: &Subtree,
     table_entry: &mut TableEntry,
 ) -> Subtree {
     use crate::reusable_node::*;
@@ -822,7 +826,7 @@ pub(crate) fn ts_parser__reuse_node(
         }
         if !ts_subtree_external_scanner_state_eq(
             &parser.reusable_node.last_external_token,
-            last_external_token,
+            ts_stack_last_external_token(&parser.stack, version),
         ) {
             parser2_log!(
                 parser,
@@ -863,7 +867,7 @@ pub(crate) fn ts_parser__reuse_node(
 
         let leaf_symbol = ts_subtree_leaf_symbol(&result);
         *table_entry =
-            parser.lookup_cache.table_entry(parser.language.as_ref().unwrap(), *state, leaf_symbol);
+            parser.parse_table_cache.table_entry(parser.language.as_ref().unwrap(), *state, leaf_symbol);
         if !ts_parser__can_reuse_first_leaf(parser, *state, &result, table_entry) {
             parser2_log!(
                 parser,
@@ -1075,7 +1079,7 @@ pub(crate) fn ts_parser__reduce(
         }
 
         let state = ts_stack_state(&parser.stack, slice_version);
-        let next_state = parser.lookup_cache.next_state(&language, state, symbol);
+        let next_state = parser.parse_table_cache.next_state(&language, state, symbol);
         let data = parent.heap_mut().unwrap();
         if end_of_non_terminal_extra && next_state == state {
             data.extra = true;
@@ -1218,7 +1222,7 @@ pub(crate) fn ts_parser__do_all_potential_reductions(
             (1, language.tables.token_count as Symbol)
         };
         for symbol in first_symbol..end_symbol {
-            let entry = parser.lookup_cache.table_entry(&language, state, symbol);
+            let entry = parser.parse_table_cache.table_entry(&language, state, symbol);
             for action in entry.actions {
                 match *action.action() {
                     ParseAction::Shift {
@@ -1395,7 +1399,7 @@ pub(crate) fn ts_parser__recover(
             if ts_parser__better_version_exists(parser, version, false, new_cost) {
                 break;
             }
-            if parser.lookup_cache.has_actions(&language, entry.state, ts_subtree_symbol(&lookahead))
+            if parser.parse_table_cache.has_actions(&language, entry.state, ts_subtree_symbol(&lookahead))
                 && ts_parser__recover_to_state(parser, version, depth, entry.state)
             {
                 did_recover = true;
@@ -1463,7 +1467,7 @@ pub(crate) fn ts_parser__recover(
     }
 
     // Extra tokens do not contribute to the error cost.
-    let actions = parser.lookup_cache.actions(&language, 1, ts_subtree_symbol(&lookahead));
+    let actions = parser.parse_table_cache.actions(&language, 1, ts_subtree_symbol(&lookahead));
     if actions
         .last()
         .is_some_and(|action| matches!(action.action(), ParseAction::Shift { extra: true, .. }))
@@ -1548,11 +1552,11 @@ pub(crate) fn ts_parser__handle_error(
         if !did_insert_missing_token {
             let state = ts_stack_state(&parser.stack, v);
             for missing_symbol in 1..language.tables.token_count as u16 {
-                let next_state = parser.lookup_cache.next_state(&language, state, missing_symbol);
+                let next_state = parser.parse_table_cache.next_state(&language, state, missing_symbol);
                 if next_state == 0 || next_state == state {
                     continue;
                 }
-                if parser.lookup_cache.has_reduce_action(
+                if parser.parse_table_cache.has_reduce_action(
                     &language,
                     next_state,
                     ts_subtree_leaf_symbol(&lookahead),
@@ -1687,7 +1691,9 @@ pub(crate) fn ts_parser__advance(
     let language = parser.language.expect("parser language");
     let mut state = ts_stack_state(&parser.stack, version);
     let position = ts_stack_position(&parser.stack, version).bytes;
-    let last_external_token = ts_stack_last_external_token(&parser.stack, version).clone();
+    // Reuse, lexing and reductions preserve this head's scanner state; only a
+    // shift/recovery (which returns from advance) installs a new external token.
+    // Borrow from the head when needed, retaining only for the owning cache.
     let mut did_reuse = true;
     let mut lookahead = Subtree::Null;
     let mut table_entry = TableEntry::default();
@@ -1698,7 +1704,6 @@ pub(crate) fn ts_parser__advance(
             version,
             &mut state,
             position,
-            &last_external_token,
             &mut table_entry,
         );
     }
@@ -1708,7 +1713,7 @@ pub(crate) fn ts_parser__advance(
             parser,
             state,
             position as usize,
-            &last_external_token,
+            ts_stack_last_external_token(&parser.stack, version),
             &mut table_entry,
         );
     }
@@ -1724,7 +1729,7 @@ pub(crate) fn ts_parser__advance(
                 ts_parser__set_cached_token(
                     parser,
                     position,
-                    last_external_token.clone(),
+                    ts_stack_last_external_token(&parser.stack, version).clone(),
                     lookahead.clone(),
                 );
                 ts_subtree_symbol(&lookahead)
@@ -1733,7 +1738,7 @@ pub(crate) fn ts_parser__advance(
                 // reduction is stored in the EOF entry. Lex again afterwards.
                 BUILTIN_SYM_END
             };
-            table_entry = parser.lookup_cache.table_entry(&language, state, symbol);
+            table_entry = parser.parse_table_cache.table_entry(&language, state, symbol);
         }
         if !ts_parser__check_progress(parser, context, Some(&mut lookahead), Some(position), 1) {
             return false;
@@ -1761,7 +1766,7 @@ pub(crate) fn ts_parser__advance(
                     if ts_subtree_child_count(&lookahead) > 0 {
                         ts_parser__breakdown_lookahead(parser, &mut lookahead, state);
                         next_state =
-                            parser.lookup_cache.next_state(&language, state, ts_subtree_symbol(&lookahead));
+                            parser.parse_table_cache.next_state(&language, state, ts_subtree_symbol(&lookahead));
                     }
                     ts_parser__shift(parser, version, next_state, lookahead, extra);
                     if did_reuse {
@@ -1833,7 +1838,7 @@ pub(crate) fn ts_parser__advance(
                 needs_lex = true;
             } else {
                 table_entry =
-                    parser.lookup_cache.table_entry(&language, state, ts_subtree_leaf_symbol(&lookahead));
+                    parser.parse_table_cache.table_entry(&language, state, ts_subtree_leaf_symbol(&lookahead));
             }
             continue;
         }
@@ -1850,7 +1855,7 @@ pub(crate) fn ts_parser__advance(
             && ts_subtree_symbol(&lookahead) != word_symbol
             && !ts_language_is_reserved_word(&language, state, ts_subtree_symbol(&lookahead))
         {
-            table_entry = parser.lookup_cache.table_entry(&language, state, word_symbol);
+            table_entry = parser.parse_table_cache.table_entry(&language, state, word_symbol);
             if !table_entry.actions.is_empty() {
                 parser3_log!(
                     parser,
@@ -2065,7 +2070,7 @@ pub(crate) fn ts_parser_new() -> Parser {
         cancellation_flag: None,
         timeout_duration: 0,
         language: None,
-        lookup_cache: LookupCache::default(),
+        parse_table_cache: ParseTableCache::default(),
         has_scanner_error: false,
         has_error: false,
         canceled_balancing: false,
@@ -2113,7 +2118,7 @@ pub(crate) fn ts_parser_language(parser: &Parser) -> Option<&Language> {
 
 pub(crate) fn ts_parser_set_language(parser: &mut Parser, language: Option<&Language>) -> bool {
     ts_parser_reset(parser);
-    parser.lookup_cache.clear();
+    parser.parse_table_cache.clear();
     if let Some(previous) = parser.language.take() {
         ts_language_delete(previous);
     }
@@ -2512,7 +2517,7 @@ mod parser3_tests {
             },
             tree_pool: SubtreePool::default(),
             language: None,
-        lookup_cache: LookupCache::default(),
+            parse_table_cache: ParseTableCache::default(),
             reduce_actions: Vec::new(),
             finished_tree: Subtree::Null,
             trailing_extras: Vec::new(),
@@ -2547,57 +2552,6 @@ mod parser3_tests {
             payload: SubtreePayload::Branch(BranchData::default()),
             ..SubtreeHeapData::default()
         }))
-    }
-
-    #[test]
-    fn changing_language_invalidates_lookup_cache() {
-        fn unused_lex(_: &mut dyn ts_port_tables::Lexer, _: StateId) -> bool {
-            unreachable!()
-        }
-        static FIRST: std::sync::LazyLock<ts_port_tables::LanguageTables> =
-            std::sync::LazyLock::new(|| {
-                ts_port_tables::LanguageTables::decode(
-                    include_bytes!("../../grammars/c/src/tables.bin"),
-                    unused_lex,
-                    Some(unused_lex),
-                    None,
-                )
-            });
-        static SECOND: std::sync::LazyLock<ts_port_tables::LanguageTables> =
-            std::sync::LazyLock::new(|| {
-                let mut tables = FIRST.clone();
-                for &offset in &tables.small_parse_table_map {
-                    let mut index = offset as usize;
-                    let groups = tables.small_parse_table[index];
-                    index += 1;
-                    for _ in 0..groups {
-                        tables.small_parse_table[index] = 0;
-                        index += 2 + tables.small_parse_table[index + 1] as usize;
-                    }
-                }
-                tables
-            });
-        let first = Language::from(&*FIRST);
-        let second = Language::from(&*SECOND);
-        let state = FIRST.large_state_count as StateId;
-        let symbol = (0..FIRST.token_count as Symbol)
-            .find(|&symbol| {
-                !ts_language_table_entry(&first, state, symbol)
-                    .actions
-                    .is_empty()
-            })
-            .unwrap();
-        let mut parser = ts_parser_new();
-        for language in [&first, &second, &first] {
-            assert!(ts_parser_set_language(&mut parser, Some(language)));
-            assert_eq!(
-                parser
-                    .lookup_cache
-                    .table_entry(language, state, symbol)
-                    .actions,
-                ts_language_table_entry(language, state, symbol).actions,
-            );
-        }
     }
 
     #[test]
@@ -2822,6 +2776,43 @@ mod parser3_tests {
                 resumed.push_children(node);
             }
             assert_eq!(symbols, expected[boundary..]);
+        }
+    }
+
+    #[test]
+    fn balancing_cursor_resumes_before_every_child_including_earlier_siblings() {
+        let expected = [1, 5, 7, 6, 4, 2, 3];
+        for stop in 0..expected.len() {
+            let leaf = || Subtree::Inline(InlineLeaf::default());
+            let mut tree = branch(
+                1,
+                vec![
+                    leaf(),
+                    branch(2, vec![branch(3, vec![leaf()])]),
+                    branch(4, vec![leaf()]),
+                    leaf(),
+                    branch(5, vec![branch(6, vec![leaf()]), branch(7, vec![leaf()])]),
+                ],
+            );
+            let mut cursor = BalanceCursor::new(&mut tree, Vec::new());
+            let mut visited = Vec::new();
+            for _ in 0..stop {
+                let node = cursor.next().unwrap();
+                visited.push(ts_subtree_symbol(node));
+                cursor.push_children(node);
+            }
+            assert_eq!(ts_subtree_symbol(cursor.next().unwrap()), expected[stop]);
+            let path = cursor.path;
+            drop(cursor.pending);
+
+            // No restoration step or extra Arc owner is needed on cancellation.
+            assert_eq!(ts_subtree_symbol(&tree), 1);
+            let mut resumed = BalanceCursor::new(&mut tree, path);
+            while let Some(node) = resumed.next() {
+                visited.push(ts_subtree_symbol(node));
+                resumed.push_children(node);
+            }
+            assert_eq!(visited, expected, "resumed at traversal index {stop}");
         }
     }
 

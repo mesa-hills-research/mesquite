@@ -144,16 +144,15 @@ state, scanner, reusable-node path, token cache, old/finished roots and scratch
 buffers. It is automatically Send. `Language` is a Copy/Clone handle to
 `&'static LanguageTables`; conversion from that reference is implemented. Grammar
 strings/action runs can therefore be returned with 'static lifetimes, without
-leaking freshly allocated strings. Actions are the host's header-free slices of
+leaking freshly allocated strings. Parser owns a 4,096-entry direct-mapped cache
+of immutable compact-table lookups (32 KiB). Dense rows bypass it. Each entry
+packs a valid bit, the full state/symbol key, and the u16 value; collisions run
+the original lookup. Clear it whenever setting a language, including rejected
+languages. Ordinary parse resets need not clear it. Cell-backed entries require
+no synchronization because this cache belongs to one Send (not Sync) parser.
+Actions are the host's header-free slices of
 `ParseActionEntry`; use `.action()` on each action entry, do not reinterpret a
 slice or allocate a new action Vec for every lookup. TableEntry count is len().
-
-The parser also owns a bounded 4096-entry lookup cache (32 KiB). It memoizes only
-compressed grammar rows; dense rows still use direct indexing. Each entry stores
-the full state/symbol key and its u16 table value, and collisions fall back to the
-original table scan. `ts_parser_set_language` must clear the cache even when the
-new language is rejected. Ordinary reset can retain it because tables are immutable.
-No cache entry owns grammar data or changes action/progress ordering.
 
 `LexerState` is persistent data, while `Lexer<'a>` is a short-lived adapter
 implementing `ts_port_tables::Lexer`. It borrows state, input, and an optional
@@ -181,6 +180,13 @@ External scanners come from tables.external_scanner.create, as
 `Box<dyn ExternalScanner + Send>` (Send is a trait super-bound). Drop destroys them;
 serialize/deserialize use the parser's 1024-byte scanner buffer and subtree state.
 Respect the exact timing of deserialization, failed scans, retries and keyword lexing.
+
+Lexing and reductions preserve the stack head's last scanner token until a shift
+or recovery installs a new one. Borrow it from the stack for deserialization and
+reuse checks rather than retaining a temporary Arc across the parser call; the
+owning token cache still retains its snapshot. Scanner-state comparison may return
+true immediately for identical Subtree handles, but distinct handles must still
+compare serialized bytes (and absent state must still equal an empty snapshot).
 
 **Progress parity is required.** `operation_count`, 100-operation checkpoint,
 position/has_error updates, scanner/recovery work and balancing's scaled operation
