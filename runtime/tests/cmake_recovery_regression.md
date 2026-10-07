@@ -6,7 +6,7 @@ an exposed `(` in the port, around byte 3335 in a malformed quoted variable
 reference.
 
 The bucket already passed at revision `9b5a105` and was reverified after the
-merged fixes through `d490ab6`. The scanner initialization/reset correction is
+merged fixes through `5a2aac7`. The scanner initialization/reset correction is
 already merged; no additional runtime or scanner behavior change is needed.
 
 ## Root cause and existing correction
@@ -31,7 +31,10 @@ scanners.
 
 ## Verification
 
-All checks below were rerun at `d490ab6`.
+All checks below were rerun at `5a2aac7`; the assigned input passed before
+any changes. Existing scanner and parser regressions already cover the reduced
+Registry-query expression, so no duplicate test or further behavior change was
+needed.
 
 - `run_oracle(inputs = "bucket:4d6cc948")`: 1/1 passes; incremental off,
   queries on.
@@ -45,10 +48,11 @@ All checks below were rerun at `d490ab6`.
 - `cargo test -p ts_port_cmake`: 24 tests pass.
 - `cargo test -p ts_port --test cmake_malformed_closer`: 1 test passes,
   covering recovery tree structure with fresh and reused scanners.
-- `cargo test -p ts_port --test cmake_command_recovery`: 1 test passes,
+- `cargo test -p ts_port --test cmake_command_recovery`: 2 tests pass,
   covering malformed variable references with fresh and reused scanners.
 - `cargo test -p ts_port`: all 212 unit tests and all integration tests pass,
-  including `cmake_quoted_variable_recovery`.
+  including both `cmake_quoted_variable_recovery` tests (also run separately),
+  which cover fresh/reused scanners and incremental repair/restoration.
 - `cargo clippy -p ts_port_cmake -p ts_port --all-targets -- -D warnings`: passes.
 
 This follow-up changes only this verification note; it introduces no deviation
@@ -98,7 +102,7 @@ unsafe code, or generated-file changes are introduced.
 
 ## ERROR range bucket `e0b0bff8`
 
-Reverified at `d80a304`: all five reported inputs already pass with the merged
+Reverified at `adc3fd3`: all five reported inputs already pass with the merged
 scanner initialization/reset correction above. In particular, recovery from
 byte 5 of `E_sleep-no-args-stderr.cmake` emits bracket content through byte 72,
 including the final newline. The enclosing ERROR therefore reaches EOF, rather
@@ -134,14 +138,17 @@ and point ranges through the final newline, and zero progress callbacks. Each
 case also runs after bracket arguments and bracket comments on the same parser
 to exercise scanner reset through the public API, not just scanner unit tests.
 
-Revalidation at `d80a304`: bucket **5/5**, CMake gate **270/270**, and fresh
+Revalidation at `adc3fd3`: bucket **5/5**, CMake gate **270/270**, and fresh
 **9878/9878** pass. `cargo check --workspace --all-targets`,
 `cargo test -p ts_port`, and `cargo test -p ts_port_cmake` pass (24
-scanner/grammar tests). The two `cmake_error_ranges` parser tests also pass
-when run separately. Strict clippy for both packages and all their targets
-passes. Workspace check still reports only the existing host-owned generated
-YAML lexer warning described above. The bucket was already resolved on this
-checkout; this revalidation changes no scanner or runtime behavior.
+scanner/grammar tests). Both `cmake_error_ranges` parser tests pass as part of
+the runtime suite, with whole-source, seven-byte, and byte-at-a-time input
+callbacks. Strict clippy for both packages and all their targets passes.
+Workspace check still reports only the existing host-owned generated YAML
+lexer warning described above. Direct comparison with the current C scanner
+confirms the zero-initialized creation/reset semantics; the bucket and its
+regression tests were already resolved on this checkout. This revalidation
+changes only the verification record, not scanner or runtime behavior.
 
 ## Empty recovery-content bucket `f5e2762e`
 
@@ -179,7 +186,7 @@ changes are introduced.
 
 ## Unterminated-call bucket `7f8795fb`
 
-Reverified at `e6417fb`: all three reported inputs already pass on the starting
+Reverified at `76f5685`: all three reported inputs already pass on the starting
 checkout with the merged scanner initialization/reset correction above. The
 current C scanner uses
 `ts_calloc` and clears both fields on empty or invalid-length snapshots, matching
