@@ -387,39 +387,23 @@ all/any logic. Validate predicate arity/types/regex errors exactly. `set!`, `is?
 are **not** executed automatically. Do not reject them. A text-predicate failure
 skips a match; in captures iteration it also removes that match from the engine.
 
-Two exact public signatures require stable borrowed views that cannot be expressed
-as ordinary self-borrows in owning, lifetime-free structs. The skeleton contains
-no unsafe implementation; query-api owns these **only two** permitted narrowly
-scoped storage adapters, with precise `// SAFETY:` comments required:
+**Owner override (2026-10-07 03:55): all new code must be safe Rust.** This
+supersedes the original skeleton's two lifetime-erasure adapters. The query API
+therefore uses these explicit compatibility deviations instead:
 
-1. `CaptureNames` owns boxed strings and a private Box of lifetime-erased &str
-   views. Create the views only after strings have stable heap storage. Never
-   mutate/free strings while views exist, never leak/intern them process-wide,
-   never expose the private 'static lifetime: `capture_names() -> &[&str]` reborrows
-   **both** layers with the Query borrow. Moving a Query moves boxes, not strings.
-2. `CaptureSnapshots` owns boxed immutable capture lists behind a Mutex, in the
-   **persistent public cursor**, not in the iterator. `store` accepts a typed
-   capture Vec and returns a slice with a lifetime bounded by both the arena
-   borrow and the tree. Its private erased lists must never be read as 'static
-   Nodes, inspected in Debug, cloned or otherwise exposed. Only original typed
-   views may access nodes. Reset/free boxes only under `&mut self`, so no returned
-   view can remain live. Dropping Node/QueryCapture does not dereference a tree;
-   it is safe to discard erased storage after the original tree has gone away.
-   A shared Mutex borrow allows appending boxes without moving earlier buffers;
-   no existing list may ever be mutated, and no reference into the outer Vec
-   may escape the lock. No manual thread-trait implementations are needed.
+* `Query::capture_names()` returns `Vec<&str>` (not const `&[&str]`). The query
+  owns boxed strings and the returned vector owns only safely borrowed views.
+* `QueryMatch.captures` is an owned `Vec<QueryCapture<'tree>>`, rather than a
+  cursor-borrowed slice. Borrow `&m.captures` when iterating a borrowed match;
+  clone the vector or move a match to retain results beyond iterator advancement.
+  There is no cursor-owned snapshot arena or lifetime erasure. The transient
+  engine result vector moves directly into the public match without another copy.
 
-This storage keeps the official `QueryMatch.captures: &'cursor [QueryCapture]`
-and streaming Item lifetimes without a raw mutable cursor alias, dangling
-iterator self-reference, leaked allocations or references to overwritten engine
-buffers. It is stronger than the binding's invalidated-on-advance backing: a caller
-can copy the public slice out of a streamed item, or move an item via get_mut.
-Therefore retain result snapshots until the *next exclusive cursor execution* or
-cursor drop, not merely until advance/iterator drop. The deliberate cost is one
-immutable result snapshot per yielded candidate, additional to the match-limited
-engine pool; do not count it against that pool. Filter before publishing where
-possible. A later optimization may deduplicate immutable snapshots but may not
-weaken these lifetimes or change match/capture order.
+These changes are necessary to avoid self-referential storage, leaked allocations,
+or unsafe lifetime extensions. The repository's compile-contract clients reflect
+the changes; external callers expecting the exact original types must adapt.
+All matching algorithms, text filtering, result ordering and limit accounting
+remain unchanged by this storage decision.
 
 `QueryMatch::remove(&self)` records its id in a cursor-owned Mutex queue; drain ids
 through query-6's remove_match **before every engine advancement**, including

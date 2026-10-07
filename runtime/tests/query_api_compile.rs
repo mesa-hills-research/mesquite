@@ -18,7 +18,7 @@ fn query_and_cursor_are_send_sync_without_unsafe_impls() {
 
 fn metadata(language: &Language) -> Result<(), QueryError> {
     let mut query = Query::new(language, "(identifier) @name")?;
-    let _: &[&str] = query.capture_names();
+    let _: Vec<&str> = query.capture_names();
     let _: &[CaptureQuantifier] = query.capture_quantifiers(0);
     let _: usize = query.pattern_count();
     let _: usize = query.start_byte_for_pattern(0);
@@ -60,7 +60,7 @@ fn matches_and_captures(query: &Query, root: Node<'_>, source: &[u8]) {
         matches.set_point_range(Point::new(0, 0)..Point::new(10, 0));
         while let Some(m) = matches.next() {
             let _: usize = m.pattern_index;
-            let _: &[QueryCapture<'_>] = m.captures;
+            let _: &[QueryCapture<'_>] = &m.captures;
             let _: u32 = m.id();
             let _: Vec<_> = m.nodes_for_capture_index(0).collect();
             let _ = format!("{m:?}");
@@ -125,16 +125,15 @@ fn named_iterator_types<'query, 'tree: 'query, T: TextProvider<I>, I: AsRef<[u8]
     check(captures);
 }
 
-// These compile checks are important: a public slice can outlive the iterator
-// which produced it, but remains bounded by the cursor/tree borrow.
+// Owned captures can outlive their iterator while remaining bounded by the tree.
 fn save_captures<'query, 'tree: 'query>(
     cursor: &'query mut QueryCursor,
     query: &'query Query,
     root: Node<'tree>,
     source: &[u8],
-) -> &'query [QueryCapture<'tree>] {
+) -> Vec<QueryCapture<'tree>> {
     let mut matches = cursor.matches(query, root, source);
-    matches.next().unwrap().captures
+    matches.next().unwrap().captures.clone()
 }
 
 fn move_match<'query, 'tree: 'query>(
@@ -150,7 +149,7 @@ fn cursor_reborrow_after_last_use(query: &Query, root: Node<'_>, source: &[u8]) 
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, root, source);
     while let Some(found) = matches.next() {
-        for capture in found.captures {
+        for capture in &found.captures {
             let _ = capture.node.byte_range();
         }
     }
