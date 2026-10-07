@@ -57,6 +57,8 @@ fn is_space(c: i32) -> bool {
 }
 
 impl Scanner {
+    // Keep the full ordered token scan out of ordinary-code rejection. All
+    // lookahead tests reuse the current position's code point until advance.
     #[inline(never)]
     fn scan_string(
         &mut self,
@@ -493,6 +495,7 @@ pub(crate) fn create() -> Box<dyn ExternalScanner> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     #[derive(Debug, PartialEq, Eq)]
     enum Event {
@@ -508,6 +511,7 @@ mod tests {
         end: Option<usize>,
         symbol: u16,
         events: Vec<Event>,
+        lookahead_calls: Cell<usize>,
     }
 
     impl<'a> TestLexer<'a> {
@@ -519,6 +523,7 @@ mod tests {
                 end: None,
                 symbol: u16::MAX,
                 events: Vec::new(),
+                lookahead_calls: Cell::new(0),
             }
         }
 
@@ -529,6 +534,7 @@ mod tests {
 
     impl Lexer for TestLexer<'_> {
         fn lookahead(&self) -> i32 {
+            self.lookahead_calls.set(self.lookahead_calls.get() + 1);
             self.input[self.position..]
                 .chars()
                 .next()
@@ -604,6 +610,116 @@ mod tests {
                 quote_count,
                 string_type,
             }],
+        }
+    }
+
+    #[test]
+    fn empty_stack_rejection_preserves_whitespace_for_every_flag_set() {
+        let input = " \tname";
+        for mask in 0..(1 << (RAW_STRING_CONTENT + 1)) {
+            let valid = std::array::from_fn::<_, { RAW_STRING_CONTENT + 1 }, _>(|bit| {
+                mask & (1 << bit) != 0
+            });
+            let mut scanner = Scanner {
+                quote_count: 3,
+                ..Scanner::default()
+            };
+            let mut lexer = TestLexer::new(input);
+            let accepted = scanner.scan(&mut lexer, &valid);
+            let mut events = Vec::new();
+            let mut start = 0;
+            let mut position = 0;
+            let expected = if valid[OPT_SEMI] {
+                if valid[INTERPOLATION_REGULAR_START] {
+                    false
+                } else {
+                    events.push(Event::Symbol(OPT_SEMI as u16));
+                    true
+                }
+            } else if valid[RAW_STRING_CONTENT] {
+                for at in 0..input.len() {
+                    events.push(Event::Advance {
+                        at,
+                        skip: valid[RAW_STRING_START] && at < 2,
+                    });
+                }
+                start = if valid[RAW_STRING_START] { 2 } else { 0 };
+                position = input.len();
+                events.push(Event::Mark(position));
+                events.push(Event::Symbol(RAW_STRING_CONTENT as u16));
+                true
+            } else {
+                if valid[RAW_STRING_START]
+                    || valid[INTERPOLATION_REGULAR_START]
+                    || valid[INTERPOLATION_VERBATIM_START]
+                    || valid[INTERPOLATION_RAW_START]
+                {
+                    for at in 0..2 {
+                        events.push(Event::Advance { at, skip: true });
+                    }
+                    start = 2;
+                    position = 2;
+                }
+                false
+            };
+            assert_eq!(accepted, expected, "mask={mask}");
+            assert_eq!(lexer.events, events, "mask={mask}");
+            assert_eq!(lexer.start, start, "mask={mask}");
+            assert_eq!(lexer.position, position, "mask={mask}");
+            assert_eq!(snapshot(&mut scanner), [3, 0]);
+        }
+    }
+
+    #[test]
+    fn failed_prefix_probe_reads_lookahead_once_per_position() {
+        for input in ["identifier", " \t\nidentifier", "\u{2003}identifier"] {
+            let (accepted, lexer) = scan(
+                &mut Scanner::default(),
+                input,
+                &[
+                    RAW_STRING_START,
+                    INTERPOLATION_REGULAR_START,
+                    INTERPOLATION_VERBATIM_START,
+                    INTERPOLATION_RAW_START,
+                ],
+            );
+            assert!(!accepted);
+            assert_eq!(lexer.lookahead_calls.get(), lexer.position + 1);
+        }
+    }
+
+    #[test]
+    fn wrapping_raw_probe_preserves_interpolation_fallthrough() {
+        for count in [0usize, 1, 2, 3, 255, 256, 257, 258, 259] {
+            let mut scanner = Scanner::default();
+            let input = format!("{} \t@$\"x", "\"".repeat(count));
+            let (accepted, lexer) = scan(
+                &mut scanner,
+                &input,
+                &[RAW_STRING_START, INTERPOLATION_REGULAR_START],
+            );
+            match count as u8 {
+                0 => {
+                    assert!(accepted);
+                    assert_eq!(lexer.symbol, INTERPOLATION_VERBATIM_START as u16);
+                    assert_eq!(lexer.position, count + 5);
+                    assert_eq!(lexer.end, Some(count + 4));
+                    assert_eq!(snapshot(&mut scanner), [0, 1, 1, 0, 0, VERBATIM | REGULAR]);
+                }
+                1 | 2 => {
+                    assert!(!accepted);
+                    // Whitespace and @ are still consumed, but the previous
+                    // quote count prevents the following $ from advancing.
+                    assert_eq!(lexer.position, count + 3);
+                    assert_eq!(snapshot(&mut scanner), [0, 0]);
+                }
+                _ => {
+                    assert!(accepted);
+                    assert_eq!(lexer.symbol, RAW_STRING_START as u16);
+                    assert_eq!(lexer.position, count);
+                    assert_eq!(snapshot(&mut scanner), [count as u8, 0]);
+                }
+            }
         }
     }
 
