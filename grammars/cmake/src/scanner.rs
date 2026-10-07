@@ -211,7 +211,8 @@ mod tests {
     }
 
     struct TestLexer {
-        input: Vec<char>,
+        // Include the runtime's -1 lookahead for invalid UTF-8, not only chars.
+        input: Vec<i32>,
         position: usize,
         end: Option<usize>,
         symbol: u16,
@@ -221,7 +222,7 @@ mod tests {
     impl TestLexer {
         fn new(input: &str) -> Self {
             Self {
-                input: input.chars().collect(),
+                input: input.chars().map(|c| c as i32).collect(),
                 position: 0,
                 end: None,
                 symbol: u16::MAX,
@@ -232,7 +233,7 @@ mod tests {
 
     impl Lexer for TestLexer {
         fn lookahead(&self) -> i32 {
-            self.input.get(self.position).copied().unwrap_or('\0') as i32
+            self.input.get(self.position).copied().unwrap_or(0)
         }
 
         fn result_symbol(&self) -> u16 {
@@ -336,6 +337,40 @@ mod tests {
             scanner.deserialize(&[]);
             assert_eq!(scanner.serialize(&mut snapshot), STATE_SIZE);
             assert_eq!(snapshot, [0; STATE_SIZE]);
+        }
+    }
+
+    #[test]
+    fn broken_utf32_boms_are_bracket_content_during_recovery() {
+        // UTF-8 decoding of the truncated UTF-32 BOMs 00 00 FE and FF FE 00
+        // produces these lookaheads. Neither NUL nor DECODE_ERROR means EOF.
+        for input in [[0, 0, -1], [-1, -1, 0]] {
+            let mut scanner = create();
+            for _ in 0..2 {
+                let mut lexer = TestLexer {
+                    input: input.to_vec(),
+                    ..TestLexer::new("")
+                };
+                assert!(scanner.scan(&mut lexer, &[true; 7]));
+                assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
+                assert_eq!(lexer.position, 3);
+                assert_eq!(lexer.end, Some(3));
+                assert_eq!(
+                    lexer.events,
+                    [
+                        Event::Advance(0, false),
+                        Event::MarkEnd(1),
+                        Event::Advance(1, false),
+                        Event::MarkEnd(2),
+                        Event::Advance(2, false),
+                        Event::MarkEnd(3),
+                        Event::Symbol(BRACKET_ARGUMENT_CONTENT as u16),
+                    ]
+                );
+                // An empty snapshot must restore the same zero-token state
+                // used by a fresh scanner, not retain the content token.
+                scanner.deserialize(&[]);
+            }
         }
     }
 
