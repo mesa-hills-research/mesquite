@@ -59,8 +59,11 @@ and unicode.h helpers are assigned to language/lexer respectively.
 `NULL_SUBTREE` and is not an allocated leaf. On 64-bit targets the handle is 16
 bytes versus C's 8; `InlineLeaf` itself is 8 bytes. This is the explicit safe-Rust
 tradeoff: no pointer tagging, unions, provenance tricks, or allocation for the
-common small leaves. Heap children are a contiguous Vec rather than the allocation
-prefix immediately preceding the C header. This adds a child-buffer allocation;
+common small leaves. The enum uses a `u64` tag so that full-handle stack copies
+avoid overlapping narrow-tag stores and wide loads; on 64-bit hosts this fills
+existing padding without increasing the handle or `Option<Subtree>` size.
+Heap children are a contiguous Vec rather than the allocation prefix immediately
+preceding the C header. This adds a child-buffer allocation;
 measure it before proposing a different layout. Do not heap-box every leaf.
 
 Inline flag bits are named constants. `padding_rows_and_lookahead` has rows in the
