@@ -131,3 +131,23 @@ After the operator restarted the workflow, the deferred checks were rerun:
 
 Nothing remains to fix in the assigned bucket on this checkout. This follow-up
 only records verification; it adds no C deviations or unsafe/generated code.
+
+## Stop-time revalidation at `825ce2f`
+
+On the current merged baseline the assigned bucket still passes **7/7 inputs**
+with oracle query checks enabled. Inspection of both scanners confirms the
+existing zero-initialization/whole-state reset correction matches C; no further
+behavior change or duplicate regression is needed.
+
+Before the operator stopped this run, the following checks passed:
+
+- `cargo check --workspace --all-targets` (only the unchanged host-owned YAML
+  unused-assignment warning).
+- `cargo test -p ts_port --test cmake_command_recovery`: **2 tests pass**.
+- `cargo test -p ts_port_cmake`: **24 tests pass**.
+- `cargo clippy -p ts_port -p ts_port_cmake --all-targets -- -D warnings`.
+
+No full oracle sweep was started after the stop request; the broader results
+above are from earlier validations, not this attempt. The bucket has no remaining
+failure in this checkout. This update records verification only and introduces
+no C deviations or runtime/scanner changes.
