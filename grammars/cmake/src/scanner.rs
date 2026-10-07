@@ -14,9 +14,9 @@ const LINE_COMMENT: usize = 6;
 // four-byte TokenType enum, both native-endian, with no padding.
 const STATE_SIZE: usize = 8;
 
-/// The scanner's state (C's `payload`).
-// C uses calloc, so the initial token is BRACKET_ARGUMENT_OPEN (zero),
-// including when error recovery enables content without a preceding opener.
+/// The scanner's state (C's `payload`), zero-initialized by `ts_calloc`.
+// The initial token is BRACKET_ARGUMENT_OPEN (zero), including when error
+// recovery enables content without a preceding opener.
 #[derive(Default)]
 pub(crate) struct Scanner {
     level: u32,
@@ -264,7 +264,7 @@ mod tests {
     fn fresh_and_reset_scanners_allow_bracket_content_during_recovery() {
         let mut scanner = create();
         let mut snapshot = [0xff; STATE_SIZE];
-        scanner.serialize(&mut snapshot);
+        assert_eq!(scanner.serialize(&mut snapshot), STATE_SIZE);
         assert_eq!(snapshot, [0; STATE_SIZE]);
 
         for input in ["text", "", "text"] {
@@ -277,7 +277,7 @@ mod tests {
             // Content changed the token; an empty snapshot must reset it so
             // that the next scan can emit content again, even at EOF.
             scanner.deserialize(&[]);
-            scanner.serialize(&mut snapshot);
+            assert_eq!(scanner.serialize(&mut snapshot), STATE_SIZE);
             assert_eq!(snapshot, [0; STATE_SIZE]);
         }
     }
@@ -452,6 +452,11 @@ mod tests {
             restored.deserialize(&buffer[..length]);
             assert_eq!(restored.level, 0);
             assert_eq!(restored.token, BRACKET_ARGUMENT_OPEN as u32);
+
+            let mut lexer = TestLexer::new("text");
+            assert!(restored.scan(&mut lexer, &[true; 7]));
+            assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
+            assert_eq!(lexer.end, Some(4));
         }
     }
 }
