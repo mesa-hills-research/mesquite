@@ -1484,6 +1484,64 @@ mod tests {
     }
 
     #[test]
+    fn identifier_runs_match_c_control_flow() {
+        // scanner.c tests the first character separately, then keeps testing
+        // both digit and name characters throughout the remaining run. Compare
+        // that control flow with the port's split numeric/name loops, including
+        // their speculative advances when the surrounding token is rejected.
+        fn reference(lexer: &mut TestLexer) -> Option<bool> {
+            let mut is_number = true;
+            if is_digit(lexer.lookahead()) {
+                lexer.advance(false);
+            } else if is_alpha(lexer.lookahead()) || lexer.lookahead() == 0x5f {
+                is_number = false;
+                lexer.advance(false);
+            } else {
+                return None;
+            }
+            loop {
+                if is_digit(lexer.lookahead()) {
+                    lexer.advance(false);
+                } else if is_alpha(lexer.lookahead()) || lexer.lookahead() == 0x5f {
+                    is_number = false;
+                    lexer.advance(false);
+                } else {
+                    return Some(is_number);
+                }
+            }
+        }
+
+        let characters: Vec<i32> = (0..128)
+            .chain([-1, 128, 233, 0x100, 0x10ffff, i32::MAX])
+            .collect();
+        for &first in &characters {
+            for &second in &characters {
+                for prefix in ["", "09", "a_"] {
+                    let mut expected = TestLexer::new(prefix);
+                    expected.input.extend([first, second]);
+                    expected.input.extend("8A_0=".chars().map(|c| c as i32));
+                    let mut actual = TestLexer::new("");
+                    actual.input.clone_from(&expected.input);
+                    let expected_result = reference(&mut expected);
+                    let mut cursor = ScannerLexer::new(&mut actual);
+                    assert_eq!(
+                        cursor.scan_identifier(),
+                        expected_result,
+                        "prefix={prefix:?}, first={first}, second={second}"
+                    );
+                    assert_eq!(cursor.lookahead(), expected.lookahead());
+                    assert_eq!(cursor.class, character_class(expected.lookahead()));
+                    assert_eq!(actual.position, expected.position);
+                    assert_eq!(actual.events, expected.events);
+                    assert_eq!(actual.end, expected.end);
+                    assert_eq!(actual.symbol, expected.symbol);
+                    assert_eq!(actual.lookahead_calls.get(), actual.position + 1);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn whitespace_runs_preserve_skip_flags_and_newline_boundary() {
         let mut inner = TestLexer::new(" \t\r\n x");
         let mut lexer = ScannerLexer::new(&mut inner);
