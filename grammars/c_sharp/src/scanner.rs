@@ -56,11 +56,24 @@ fn is_space(c: i32) -> bool {
     matches!(c, 0x09..=0x0d | 0x20)
 }
 
-impl ExternalScanner for Scanner {
-    fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
-        let valid_symbols = valid_symbols
-            .first_chunk::<{ RAW_STRING_CONTENT + 1 }>()
-            .expect("C# external token flags");
+// Ordinary expressions request these four starts, without any string content
+// or closing tokens. Specialize the same C-ordered algorithm for that state.
+const STRING_STARTS: [bool; RAW_STRING_CONTENT + 1] = [
+    false, true, true, true, false, false, false, false, false, true, false, false,
+];
+
+impl Scanner {
+    #[inline(never)]
+    fn scan_tokens<const STARTS_ONLY: bool>(
+        &mut self,
+        lexer: &mut dyn Lexer,
+        valid_symbols: &[bool; RAW_STRING_CONTENT + 1],
+    ) -> bool {
+        let valid_symbols = if STARTS_ONLY {
+            &STRING_STARTS
+        } else {
+            valid_symbols
+        };
         let mut brace_advanced = 0u8;
         let mut quote_count = 0u8;
         let mut did_advance = false;
@@ -410,6 +423,19 @@ impl ExternalScanner for Scanner {
 
         false
     }
+}
+
+impl ExternalScanner for Scanner {
+    fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
+        let valid_symbols = valid_symbols
+            .first_chunk::<{ RAW_STRING_CONTENT + 1 }>()
+            .expect("C# external token flags");
+        if valid_symbols == &STRING_STARTS {
+            self.scan_tokens::<true>(lexer, valid_symbols)
+        } else {
+            self.scan_tokens::<false>(lexer, valid_symbols)
+        }
+    }
 
     fn serialize(&mut self, buffer: &mut [u8]) -> usize {
         if self.interpolation_stack.len() * 4 + 2 > SERIALIZATION_BUFFER_SIZE {
@@ -431,17 +457,23 @@ impl ExternalScanner for Scanner {
 
     fn deserialize(&mut self, buffer: &[u8]) {
         self.interpolation_stack.clear();
-        let Some((&[quote_count, count], entries)) = buffer.split_first_chunk::<2>() else {
-            assert!(buffer.is_empty(), "C# snapshot header");
-            self.quote_count = 0;
-            return;
-        };
+        match buffer {
+            [] => self.quote_count = 0,
+            [quote_count, 0] => self.quote_count = *quote_count,
+            _ => self.restore_interpolations(buffer),
+        }
+    }
+}
+
+impl Scanner {
+    // Empty-state restoration is a leaf callback. Only interpolated strings
+    // need the allocation-path frame and four-byte entry decoding.
+    #[inline(never)]
+    fn restore_interpolations(&mut self, buffer: &[u8]) {
+        let (&[quote_count, count], entries) =
+            buffer.split_first_chunk::<2>().expect("C# snapshot header");
         self.quote_count = quote_count;
         assert_eq!(entries.len(), usize::from(count) * 4);
-
-        // Each entry is exactly four unsigned bytes. Extending from the
-        // exact-sized iterator reserves once and reuses the stack's capacity,
-        // rather than checking for growth on every restored interpolation.
         self.interpolation_stack
             .extend(
                 entries
@@ -690,6 +722,43 @@ mod tests {
                     assert_eq!(lexer.symbol, RAW_STRING_START as u16);
                     assert_eq!(lexer.position, count);
                     assert_eq!(snapshot(&mut scanner), [count as u8, 0]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn prefix_specialization_preserves_wrapping_and_callback_order() {
+        let states: &[&[u8]] = &[&[], &[3, 0], &[5, 2, 2, 0, 3, RAW, 1, 1, 255, REGULAR]];
+        for quotes in [0, 1, 2, 3, 255, 256, 257, 258, 259] {
+            for dollars in [0, 1, 2, 255, 256, 257] {
+                for suffix in ["@\"x", "\"x", "\"\"x", "\"\"\"x", "{x"] {
+                    let input = format!(
+                        " \t{} \r{}{}",
+                        "\"".repeat(quotes),
+                        "$".repeat(dollars),
+                        suffix
+                    );
+                    for state in states {
+                        let mut general = Scanner::default();
+                        let mut specialized = Scanner::default();
+                        general.deserialize(state);
+                        specialized.deserialize(state);
+                        let mut lhs = TestLexer::new(&input);
+                        let mut rhs = TestLexer::new(&input);
+                        assert_eq!(
+                            general.scan_tokens::<false>(&mut lhs, &STRING_STARTS),
+                            specialized.scan(&mut rhs, &STRING_STARTS),
+                            "quotes={quotes} dollars={dollars} suffix={suffix:?} state={state:?}",
+                        );
+                        assert_eq!(lhs.events, rhs.events);
+                        assert_eq!(lhs.position, rhs.position);
+                        assert_eq!(lhs.start, rhs.start);
+                        assert_eq!(lhs.end, rhs.end);
+                        assert_eq!(lhs.symbol, rhs.symbol);
+                        assert_eq!(lhs.lookahead_calls.get(), rhs.lookahead_calls.get());
+                        assert_eq!(snapshot(&mut general), snapshot(&mut specialized));
+                    }
                 }
             }
         }
