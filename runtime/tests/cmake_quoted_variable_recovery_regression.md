@@ -68,7 +68,7 @@ bucket failures remain.
 
 ## Registry-query bucket `4d6cc948`
 
-Reverified at `b130253` (latest assigned baseline): the assigned
+Reverified again at `b34de06` (latest assigned baseline, after `b130253`): the assigned
 `Tests/RunCMake/find_package/Registry-query.cmake` already passes on the starting
 checkout. Its malformed `${CMAKE_ CURRENT_SOURCE_DIR}/${FILE_DIR}` reference
 exercised the same incorrect scanner initialization/reset described above:
@@ -90,8 +90,9 @@ Checks rerun for this assignment:
   (including incremental and query checks) and **9878/9878 fresh** inputs pass.
 - `cargo check --workspace --all-targets`: passes with the pre-existing
   unused-assignment warning in host-owned `grammars/yaml/src/lex.rs:20` unchanged.
-- `cargo test -p ts_port_cmake -p ts_port`: all runtime and CMake unit,
-  integration, and doc tests pass, including the three quoted-variable tests.
+- `cargo test -p ts_port_cmake -p ts_port`: **212 runtime unit tests**,
+  **24 CMake unit tests**, and all integration and doc tests pass, including
+  the three quoted-variable tests.
 - `cargo clippy -p ts_port -p ts_port_cmake --all-targets -- -D warnings`: passes.
 
 This follow-up records verification only. No scanner/runtime behavior changes,
