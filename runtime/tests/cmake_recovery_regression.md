@@ -181,10 +181,10 @@ lexer warning noted above. This change only strengthens regression coverage;
 there are no runtime changes, C deviations, new unsafe code, or generated-file
 changes.
 
-### ERROR-range revalidation at `9106d1d`
+### ERROR-range revalidation at `4d7a12c`
 
 Rechecked the previously resolved bucket at this starting revision; all checks
-below were rerun, rather than relying on the earlier verification at `1cb9a86`.
+below were rerun, rather than relying on the earlier verification at `9106d1d`.
 Bucket `e0b0bff8` already passes on this starting checkout. Comparing the current
 C scanner with Rust confirms the merged zero-valued creation/reset fix remains
 correct: `ts_calloc` initializes both fields, and empty or wrong-length snapshots
@@ -218,7 +218,7 @@ new unsafe code, warnings, or generated-file modifications are introduced.
 
 ## Empty recovery-content bucket `f5e2762e`
 
-Reverified at `6e63bc8` (previously at `17d58a8`):
+Reverified at `5f9a0be` (previously at `6e63bc8`):
 all 16 reported inputs already pass on the starting checkout. The merged scanner
 initialization/reset correction above allows `bracket_argument_content` at EOF
 without an opener, including after `a` and after skipping the newline in `if(\n`.
@@ -248,7 +248,7 @@ this starting revision, so no duplicate test or behavior change was warranted.
 Existing node-navigation assertions also confirm that the EOF token remains
 reachable with a tree cursor even when the preceding sibling ends at EOF.
 
-Checks rerun for this bucket at `6e63bc8` (not inherited from the earlier
+Checks rerun for this bucket at `5f9a0be` (not inherited from the earlier
 verification):
 
 - `run_oracle(inputs = "bucket:f5e2762e")`: 16/16 pass.
@@ -260,8 +260,8 @@ verification):
   unit tests, and all integration/doc tests pass, including the four
   `cmake_empty_recovery_content` tests.
 - `cargo clippy -p ts_port_cmake -p ts_port --all-targets -- -D warnings`: passes.
-- Prior `cargo clippy --workspace --all-targets -- -D warnings` validation
-  was blocked by the same pre-existing unused-assignment warning in host-owned
+- `cargo clippy --workspace --all-targets -- -D warnings` was rerun and
+  remains blocked by the same pre-existing unused-assignment warning in host-owned
   `grammars/yaml/src/lex.rs:20`. That generated file was left unchanged.
 
 This follow-up only updates the verification record: the implementation and
@@ -312,3 +312,20 @@ explicitly marked prior workspace clippy result were rerun in this worktree):
 The bucket and its regression coverage were already resolved at this revision,
 so this follow-up only records verification; no C deviations, unsafe code, or
 host-owned generated-file changes were introduced.
+
+### Cancellation/resume coverage (`9a63e99`)
+
+Bucket `7f8795fb` already passes at this starting revision. The current C scanner
+still uses `ts_calloc` and resets both fields on invalid snapshots, matching the
+merged Rust fix; no additional runtime behavior change is needed. Extended
+`cmake_unterminated_call_recovery` to cancel both unterminated calls at their
+first progress callback and resume without resetting the parser. Whole-source
+and one-byte chunks, including reuse after a bracket comment, retain the expected
+ERROR tree and the real zero-width recovery-content token at EOF.
+
+Revalidation: bucket **3/3**, CMake gate **270/270** (incremental/query checks),
+and fresh CMake **9878/9878** pass. All four unterminated-call regression tests
+and strict all-targets clippy for `ts_port` and `ts_port_cmake` pass. Workspace
+all-targets checking passes with the existing host-owned YAML lexer warning
+noted above. This adds only test coverage, with no C deviations, unsafe code,
+or generated-file changes.
