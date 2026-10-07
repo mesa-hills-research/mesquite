@@ -59,7 +59,7 @@ This follow-up changes only this verification note; it introduces no deviation
 from C and no new unsafe code.
 
 
-### Revalidation of `4d6cc948` at `b332424`
+### Revalidation of `4d6cc948` at `deff2cd`
 
 The assigned Registry-query input still passes before any new changes. Direct
 comparison with the current C scanner confirms that the merged zero-valued
@@ -102,8 +102,11 @@ unsafe code, or generated-file changes are introduced.
 
 ## ERROR range bucket `e0b0bff8`
 
-Reverified at `adc3fd3`: all five reported inputs already pass with the merged
-scanner initialization/reset correction above. In particular, recovery from
+Reverified at `6a480c1`: all five reported inputs already pass with the merged
+scanner initialization/reset correction above. Direct comparison with the
+current C scanner confirms that no additional implementation change is needed.
+All checks listed below were rerun, including the parser regressions with
+chunked input, reused scanners, and incremental EOF edits. In particular, recovery from
 byte 5 of `E_sleep-no-args-stderr.cmake` emits bracket content through byte 72,
 including the final newline. The enclosing ERROR therefore reaches EOF, rather
 than ending at byte 71 with only the initial identifier as a visible child.
@@ -171,7 +174,7 @@ changes.
 
 ## Empty recovery-content bucket `f5e2762e`
 
-Reverified at `4977a30`: all 16 reported inputs already pass. The merged scanner
+Reverified at `a08dab1`: all 16 reported inputs already pass. The merged scanner
 initialization/reset correction above allows `bracket_argument_content` at EOF
 without an opener, including after `a` and after skipping the newline in `if(\n`.
 This zero-width token is a real scanner token, not an inserted missing node.
@@ -183,9 +186,12 @@ both with fresh scanners and after parsing bracket arguments/comments. Scanner
 unit tests additionally check the EOF callback order and snapshot reset behavior.
 The existing parser-level whitespace cases also cover CRLF, lone CR, spaces/tabs,
 and multiple newlines, asserting exact EOF byte and point ranges after skipping
-that whitespace with both fresh and reused scanners. Both integration tests run
+that whitespace with both fresh and reused scanners. All three integration tests run
 with whole-source and byte-at-a-time input callbacks, covering whitespace and
 CRLF split across chunks without changing the zero-width token's EOF position.
+The block/while cases additionally verify that a complete header remains a sibling
+of the empty recovery content when its terminating command is missing. Tree
+cursor assertions confirm that the empty token remains traversable at EOF.
 
 Checks rerun for this bucket:
 
@@ -195,7 +201,7 @@ Checks rerun for this bucket:
 - `cargo check --workspace --all-targets`: passes with the pre-existing warning
   in host-owned `grammars/yaml/src/lex.rs:20` noted above.
 - `cargo test -p ts_port_cmake`: 24 tests pass.
-- `cargo test -p ts_port --test cmake_empty_recovery_content`: 2 tests pass.
+- `cargo test -p ts_port --test cmake_empty_recovery_content`: 3 tests pass.
 - `cargo clippy -p ts_port_cmake -p ts_port --all-targets -- -D warnings`: passes.
 
 This follow-up only updates the verification record: the implementation and
