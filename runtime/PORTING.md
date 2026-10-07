@@ -96,7 +96,10 @@ Ownership rules for signatures:
 * Heap Drop already drains uniquely owned descendants with an explicit worklist.
   Preserve this: deeply nested trees must not recurse through Rust destructors.
   The subtree-2 release algorithm may use its pool/worklist as well. No recursive
-  deep clones, recursive parent storage, or reference cycles.
+  deep clones, recursive parent storage, or reference cycles. Because the heap
+  header implements Drop, move its Vec/payload out with mem::take/replace, not
+  destructuring moves out of an owned header. Defaults are inert storage values;
+  runtime initialization must still use the translated C constructors.
 
 `ExternalScannerState` stores up to 24 bytes inline, larger states in `Arc<[u8]>`.
 State comparison is byte equality with length checks, not allocation identity.
@@ -266,8 +269,8 @@ clippy::ptr_arg allowance is temporary: stub bodies cannot demonstrate that Vec
 and String out-buffers grow. Remove unnecessary allowances once units are filled.
 
 The skeleton's C oracle dumper compiles; all 824 C inputs currently stop at
-`api: Parser::new`, as expected. Six support/layout/thread-trait tests passed before
-handoff. No parse behavior has been claimed or validated yet. Translator units
+`api: Parser::new`, as expected. Nine support/layout/sharing/deep-drop/thread-trait tests pass, together with
+compile-only external API clients checking callback and iterator lifetimes. No parse behavior has been claimed or validated yet. Translator units
 must progressively eliminate their tagged stubs and run the differential oracle.
 
 ## Complete stub inventory

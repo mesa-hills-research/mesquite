@@ -581,6 +581,44 @@ mod layout_tests {
         assert_eq!(std::mem::size_of::<Subtree>(), 16);
     }
     #[test]
+    fn heap_mutation_is_shallow_copy_on_write() {
+        let child = Subtree::Heap(Arc::new(SubtreeHeapData::default()));
+        let mut data = SubtreeHeapData::default();
+        data.children.push(child);
+        data.payload = SubtreePayload::Branch(BranchData::default());
+        let original = Subtree::Heap(Arc::new(data));
+        let mut edited = original.clone();
+        assert!(edited.ptr_eq(&original));
+        edited.heap_mut().unwrap().symbol = 17;
+        assert!(!edited.ptr_eq(&original));
+        assert_eq!(ts_subtree_symbol(&original), 0);
+        assert_eq!(ts_subtree_symbol(&edited), 17);
+        assert!(ts_subtree_children(&original)[0].ptr_eq(&ts_subtree_children(&edited)[0]));
+    }
+
+    #[test]
+    fn deeply_nested_heap_drop_is_iterative() {
+        std::thread::Builder::new()
+            .stack_size(128 * 1024)
+            .spawn(|| {
+                let leaf = Arc::new(SubtreeHeapData::default());
+                let weak = Arc::downgrade(&leaf);
+                let mut tree = Subtree::Heap(leaf);
+                for _ in 0..50_000 {
+                    let mut data = SubtreeHeapData::default();
+                    data.children.push(tree);
+                    data.payload = SubtreePayload::Branch(BranchData::default());
+                    tree = Subtree::Heap(Arc::new(data));
+                }
+                drop(tree);
+                assert!(weak.upgrade().is_none());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
     fn small_leaf_extents() {
         let tree = Subtree::Inline(InlineLeaf {
             padding_bytes: 21,
