@@ -66,6 +66,11 @@ fn scan_comment(lexer: &mut dyn Lexer) -> Option<bool> {
 
 impl ExternalScanner for Scanner {
     fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
+        // The grammar supplies three flags. Validate that shape once, without
+        // retaining a bounds-panic path in this frequently called function.
+        let Some(valid_symbols) = valid_symbols.first_chunk::<3>() else {
+            return false;
+        };
         if valid_symbols[ERROR_RECOVERY] {
             return false;
         }
@@ -287,6 +292,16 @@ mod tests {
         for flags in [[true, true, true], [false, false, false]] {
             let (accepted, lexer) = scan(" :hover {", flags);
             assert!(!accepted);
+            assert!(lexer.events.into_inner().is_empty());
+        }
+    }
+
+    #[test]
+    fn short_flag_slices_are_rejected_without_lexer_calls() {
+        for flags in [&[][..], &[true][..], &[true, true][..]] {
+            let mut lexer = TestLexer::new(vec![0x20, 0x3a, 0x78, 0x7b]);
+            assert!(!Scanner.scan(&mut lexer, flags));
+            assert_eq!(lexer.lookahead_calls.get(), 0);
             assert!(lexer.events.into_inner().is_empty());
         }
     }
