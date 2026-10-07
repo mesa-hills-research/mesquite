@@ -172,7 +172,9 @@ impl ExternalScanner for Scanner {
             self.level = u32::from_ne_bytes(buffer[..4].try_into().unwrap());
             self.token = u32::from_ne_bytes(buffer[4..STATE_SIZE].try_into().unwrap());
         } else {
-            // Empty or invalid snapshots reset both fields, just like calloc.
+            // Empty or invalid snapshots reset both fields. Token zero is
+            // BRACKET_ARGUMENT_OPEN, allowing content during recovery even
+            // without an opening token.
             *self = Self::default();
         }
     }
@@ -267,6 +269,8 @@ mod tests {
         assert_eq!(scanner.serialize(&mut snapshot), STATE_SIZE);
         assert_eq!(snapshot, [0; STATE_SIZE]);
 
+        // Recovery enables every external symbol. C's zero token allows a
+        // content token even when there has not been an opening bracket.
         for input in ["text", "", "text"] {
             let mut lexer = TestLexer::new(input);
             assert!(scanner.scan(&mut lexer, &[true; 7]));
@@ -300,6 +304,25 @@ mod tests {
                 [Event::Symbol(BRACKET_ARGUMENT_CONTENT as u16)]
             );
         }
+    }
+
+    #[test]
+    fn empty_snapshot_clears_bracket_comment_state_during_recovery() {
+        let mut scanner = create();
+        let mut comment = TestLexer::new("#[=[");
+        assert!(scanner.scan(&mut comment, &valid(&[BRACKET_COMMENT_OPEN])));
+        scanner.deserialize(&[]);
+
+        let mut snapshot = [0xff; STATE_SIZE];
+        assert_eq!(scanner.serialize(&mut snapshot), STATE_SIZE);
+        assert_eq!(snapshot, [0; STATE_SIZE]);
+
+        // Resetting a nonzero bracket level and comment token must restore
+        // BRACKET_ARGUMENT_OPEN, even without scanning an argument opener.
+        let mut lexer = TestLexer::new("text");
+        assert!(scanner.scan(&mut lexer, &[true; 7]));
+        assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
+        assert_eq!(lexer.end, Some(4));
     }
 
     #[test]
