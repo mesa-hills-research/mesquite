@@ -198,14 +198,22 @@ impl Block {
     }
 }
 
+const STATE: usize = 0;
+const MATCHED: usize = 1;
+const INDENTATION: usize = 2;
+const COLUMN: usize = 3;
+const FENCE_LENGTH: usize = 4;
+const HEADER_SIZE: usize = 5;
+const INLINE_BLOCKS: usize = 4;
+
 #[derive(Default)]
 pub(crate) struct Scanner {
-    open_blocks: Vec<Block>,
-    state: u8,
-    matched: u8,
-    indentation: u8,
-    column: u8,
-    fenced_code_block_delimiter_length: u8,
+    // A header and four native-endian blocks: all snapshots small enough for
+    // the runtime's short external-token state stay inline here as well.
+    snapshot: [u8; HEADER_SIZE + 4 * INLINE_BLOCKS],
+    spilled_blocks: Vec<[u8; 4]>,
+    // 0..=4 is the inline block count; 5 means use spilled_blocks.len().
+    inline_count: u8,
     simulate: bool,
 }
 
@@ -242,38 +250,63 @@ impl ExternalScanner for Scanner {
     }
 
     fn serialize(&mut self, buffer: &mut [u8]) -> usize {
-        buffer[..5].copy_from_slice(&[
-            self.state,
-            self.matched,
-            self.indentation,
-            self.column,
-            self.fenced_code_block_delimiter_length,
-        ]);
-        let mut size = 5;
-        for block in &self.open_blocks {
-            buffer[size..size + 4].copy_from_slice(&block.0.to_ne_bytes());
-            size += 4;
+        // Fixed-size copies keep these frequent, shallow snapshots inlined;
+        // a variable-length copy would call memcpy even for the five-byte state.
+        if self.inline_count == 0 {
+            buffer[..5].copy_from_slice(&self.snapshot[..5]);
+            return 5;
         }
-        size
+        if self.inline_count == 1 {
+            buffer[..9].copy_from_slice(&self.snapshot[..9]);
+            return 9;
+        }
+        match self.inline_count {
+            2 => {
+                buffer[..13].copy_from_slice(&self.snapshot[..13]);
+                13
+            }
+            3 => {
+                buffer[..17].copy_from_slice(&self.snapshot[..17]);
+                17
+            }
+            4 => {
+                buffer[..21].copy_from_slice(&self.snapshot[..21]);
+                21
+            }
+            _ => self.serialize_spilled(buffer),
+        }
     }
 
     fn deserialize(&mut self, buffer: &[u8]) {
-        self.open_blocks.clear();
-        self.state = 0;
-        self.matched = 0;
-        self.indentation = 0;
-        self.column = 0;
-        self.fenced_code_block_delimiter_length = 0;
         // simulate is neither serialized nor reset by C's deserialize.
-        if !buffer.is_empty() {
-            self.state = buffer[0];
-            self.matched = buffer[1];
-            self.indentation = buffer[2];
-            self.column = buffer[3];
-            self.fenced_code_block_delimiter_length = buffer[4];
-            for &bytes in buffer[5..].as_chunks::<4>().0 {
-                self.open_blocks.push(Block(u32::from_ne_bytes(bytes)));
+        if buffer.len() == 5 {
+            self.snapshot[..5].copy_from_slice(buffer);
+            self.inline_count = 0;
+            return;
+        }
+        if buffer.len() == 9 {
+            self.snapshot[..9].copy_from_slice(buffer);
+            self.inline_count = 1;
+            return;
+        }
+        match buffer.len() {
+            0 => {
+                self.snapshot[..HEADER_SIZE].fill(0);
+                self.inline_count = 0;
             }
+            13 => {
+                self.snapshot[..13].copy_from_slice(buffer);
+                self.inline_count = 2;
+            }
+            17 => {
+                self.snapshot[..17].copy_from_slice(buffer);
+                self.inline_count = 3;
+            }
+            21 => {
+                self.snapshot[..21].copy_from_slice(buffer);
+                self.inline_count = 4;
+            }
+            _ => self.deserialize_spilled(buffer),
         }
     }
 }
@@ -323,6 +356,92 @@ impl<'a> ScanLexer<'a> {
 }
 
 impl Scanner {
+    #[cold]
+    fn serialize_spilled(&self, buffer: &mut [u8]) -> usize {
+        buffer[..HEADER_SIZE].copy_from_slice(&self.snapshot[..HEADER_SIZE]);
+        let blocks = self.spilled_blocks.as_flattened();
+        let size = HEADER_SIZE + blocks.len();
+        buffer[HEADER_SIZE..size].copy_from_slice(blocks);
+        size
+    }
+
+    #[cold]
+    fn deserialize_spilled(&mut self, buffer: &[u8]) {
+        let (_, blocks) = buffer.split_at(HEADER_SIZE);
+        let blocks = blocks.as_chunks::<4>().0;
+        if blocks.len() <= INLINE_BLOCKS {
+            let size = HEADER_SIZE + 4 * blocks.len();
+            self.snapshot[..size].copy_from_slice(&buffer[..size]);
+            self.inline_count = blocks.len() as u8;
+        } else {
+            self.snapshot
+                .copy_from_slice(&buffer[..HEADER_SIZE + 4 * INLINE_BLOCKS]);
+            self.spilled_blocks.clear();
+            self.spilled_blocks.extend_from_slice(blocks);
+            self.inline_count = INLINE_BLOCKS as u8 + 1;
+        }
+    }
+
+    fn block_count(&self) -> usize {
+        if self.inline_count <= INLINE_BLOCKS as u8 {
+            usize::from(self.inline_count)
+        } else {
+            self.spilled_blocks.len()
+        }
+    }
+
+    fn block_at(&self, index: usize) -> Block {
+        let blocks = if self.inline_count <= INLINE_BLOCKS as u8 {
+            &self.snapshot[HEADER_SIZE..].as_chunks::<4>().0[..usize::from(self.inline_count)]
+        } else {
+            &self.spilled_blocks
+        };
+        Block(u32::from_ne_bytes(blocks[index]))
+    }
+
+    fn push_block(&mut self, block: Block) {
+        if self.inline_count < INLINE_BLOCKS as u8 {
+            self.snapshot[HEADER_SIZE..].as_chunks_mut::<4>().0[usize::from(self.inline_count)] =
+                block.0.to_ne_bytes();
+            self.inline_count += 1;
+        } else {
+            if self.inline_count == INLINE_BLOCKS as u8 {
+                self.spilled_blocks.clear();
+                self.spilled_blocks
+                    .extend_from_slice(self.snapshot[HEADER_SIZE..].as_chunks::<4>().0);
+                self.inline_count += 1;
+            }
+            self.spilled_blocks.push(block.0.to_ne_bytes());
+        }
+    }
+
+    fn pop_block(&mut self) {
+        // The inline prefix is retained while spilled: these immutable entries
+        // are still correct when the stack becomes shallow again.
+        if self.inline_count <= INLINE_BLOCKS as u8 {
+            self.inline_count = self.inline_count.saturating_sub(1);
+        } else {
+            self.spilled_blocks.pop();
+            if self.spilled_blocks.len() == INLINE_BLOCKS {
+                self.inline_count = INLINE_BLOCKS as u8;
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn with_blocks(blocks: impl IntoIterator<Item = Block>) -> Self {
+        let mut scanner = Self::default();
+        for block in blocks {
+            scanner.push_block(block);
+        }
+        scanner
+    }
+
+    #[cfg(test)]
+    fn blocks(&self) -> Vec<Block> {
+        (0..self.block_count()).map(|i| self.block_at(i)).collect()
+    }
+
     fn mark_end(&self, lexer: &mut ScanLexer<'_>) {
         if !self.simulate {
             lexer.mark_end();
@@ -332,11 +451,11 @@ impl Scanner {
     /// Advance while tracking a column modulo four for tab expansion.
     fn advance(&mut self, lexer: &mut ScanLexer<'_>) -> u8 {
         let size = if lexer.lookahead() == i32::from(b'\t') {
-            let size = 4 - self.column;
-            self.column = 0;
+            let size = 4 - self.snapshot[COLUMN];
+            self.snapshot[COLUMN] = 0;
             size
         } else {
-            self.column = ((u16::from(self.column) + 1) % 4) as u8;
+            self.snapshot[COLUMN] = ((u16::from(self.snapshot[COLUMN]) + 1) % 4) as u8;
             1
         };
         lexer.advance(false);
@@ -345,7 +464,8 @@ impl Scanner {
 
     fn consume_indentation(&mut self, lexer: &mut ScanLexer<'_>) {
         while is_space(lexer.lookahead()) {
-            self.indentation = self.indentation.wrapping_add(self.advance(lexer));
+            self.snapshot[INDENTATION] =
+                self.snapshot[INDENTATION].wrapping_add(self.advance(lexer));
         }
     }
 
@@ -363,32 +483,34 @@ impl Scanner {
     fn match_block(&mut self, lexer: &mut ScanLexer<'_>, block: Block) -> bool {
         match block {
             Block::INDENTED_CODE => {
-                while self.indentation < 4 {
+                while self.snapshot[INDENTATION] < 4 {
                     if is_space(lexer.lookahead()) {
-                        self.indentation = self.indentation.wrapping_add(self.advance(lexer));
+                        self.snapshot[INDENTATION] =
+                            self.snapshot[INDENTATION].wrapping_add(self.advance(lexer));
                     } else {
                         break;
                     }
                 }
-                if self.indentation >= 4 && !is_line_end(lexer.lookahead()) {
-                    self.indentation -= 4;
+                if self.snapshot[INDENTATION] >= 4 && !is_line_end(lexer.lookahead()) {
+                    self.snapshot[INDENTATION] -= 4;
                     return true;
                 }
             }
             block if block.is_list_item() => {
-                while self.indentation < block.list_item_indentation() {
+                while self.snapshot[INDENTATION] < block.list_item_indentation() {
                     if is_space(lexer.lookahead()) {
-                        self.indentation = self.indentation.wrapping_add(self.advance(lexer));
+                        self.snapshot[INDENTATION] =
+                            self.snapshot[INDENTATION].wrapping_add(self.advance(lexer));
                     } else {
                         break;
                     }
                 }
-                if self.indentation >= block.list_item_indentation() {
-                    self.indentation -= block.list_item_indentation();
+                if self.snapshot[INDENTATION] >= block.list_item_indentation() {
+                    self.snapshot[INDENTATION] -= block.list_item_indentation();
                     return true;
                 }
                 if is_line_end(lexer.lookahead()) {
-                    self.indentation = 0;
+                    self.snapshot[INDENTATION] = 0;
                     return true;
                 }
             }
@@ -396,9 +518,10 @@ impl Scanner {
                 self.consume_indentation(lexer);
                 if lexer.lookahead() == i32::from(b'>') {
                     self.advance(lexer);
-                    self.indentation = 0;
+                    self.snapshot[INDENTATION] = 0;
                     if is_space(lexer.lookahead()) {
-                        self.indentation = self.indentation.wrapping_add(self.advance(lexer) - 1);
+                        self.snapshot[INDENTATION] =
+                            self.snapshot[INDENTATION].wrapping_add(self.advance(lexer) - 1);
                     }
                     return true;
                 }
@@ -430,14 +553,14 @@ impl Scanner {
             (FENCED_CODE_BLOCK_START_TILDE, FENCED_CODE_BLOCK_END_TILDE)
         };
         if valid_symbols[end]
-            && self.indentation < 4
-            && level >= self.fenced_code_block_delimiter_length
+            && self.snapshot[INDENTATION] < 4
+            && level >= self.snapshot[FENCE_LENGTH]
         {
             while is_space(lexer.lookahead()) {
                 self.advance(lexer);
             }
             if is_line_end(lexer.lookahead()) {
-                self.fenced_code_block_delimiter_length = 0;
+                self.snapshot[FENCE_LENGTH] = 0;
                 lexer.set_result_symbol(end as u16);
                 return true;
             }
@@ -456,10 +579,10 @@ impl Scanner {
             if !info_string_has_backtick {
                 lexer.set_result_symbol(start as u16);
                 if !self.simulate {
-                    self.open_blocks.push(Block::FENCED_CODE);
+                    self.push_block(Block::FENCED_CODE);
                 }
-                self.fenced_code_block_delimiter_length = level;
-                self.indentation = 0;
+                self.snapshot[FENCE_LENGTH] = level;
+                self.snapshot[INDENTATION] = 0;
                 return true;
             }
         }
@@ -471,10 +594,10 @@ impl Scanner {
     fn list_extra_indentation(&mut self, extra_indentation: u8) -> u8 {
         let mut extra = extra_indentation - 1;
         if extra <= 3 {
-            extra = extra.wrapping_add(self.indentation);
-            self.indentation = 0;
+            extra = extra.wrapping_add(self.snapshot[INDENTATION]);
+            self.snapshot[INDENTATION] = 0;
         } else {
-            std::mem::swap(&mut self.indentation, &mut extra);
+            std::mem::swap(&mut self.snapshot[INDENTATION], &mut extra);
         }
         extra
     }
@@ -505,14 +628,14 @@ impl Scanner {
         let mut dont_interrupt = false;
         if star_count == 1 && line_end {
             extra_indentation = 1;
-            dont_interrupt = usize::from(self.matched) == self.open_blocks.len();
+            dont_interrupt = usize::from(self.snapshot[MATCHED]) == self.block_count();
         }
         let thematic_break = star_count >= 3 && line_end;
         let list_marker_star = star_count >= 1 && extra_indentation >= 1;
-        if valid_symbols[THEMATIC_BREAK] && thematic_break && self.indentation < 4 {
+        if valid_symbols[THEMATIC_BREAK] && thematic_break && self.snapshot[INDENTATION] < 4 {
             lexer.set_result_symbol(THEMATIC_BREAK as u16);
             self.mark_end(lexer);
-            self.indentation = 0;
+            self.snapshot[INDENTATION] = 0;
             return true;
         }
         let symbol = if dont_interrupt {
@@ -526,8 +649,7 @@ impl Scanner {
             }
             extra_indentation = self.list_extra_indentation(extra_indentation);
             if !self.simulate {
-                self.open_blocks
-                    .push(Block::list_item(usize::from(extra_indentation)));
+                self.push_block(Block::list_item(usize::from(extra_indentation)));
             }
             lexer.set_result_symbol(symbol as u16);
             return true;
@@ -557,7 +679,7 @@ impl Scanner {
         {
             lexer.set_result_symbol(THEMATIC_BREAK as u16);
             self.mark_end(lexer);
-            self.indentation = 0;
+            self.snapshot[INDENTATION] = 0;
             return true;
         }
         false
@@ -566,13 +688,14 @@ impl Scanner {
     fn parse_block_quote(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool]) -> bool {
         if valid_symbols[BLOCK_QUOTE_START] {
             self.advance(lexer);
-            self.indentation = 0;
+            self.snapshot[INDENTATION] = 0;
             if is_space(lexer.lookahead()) {
-                self.indentation = self.indentation.wrapping_add(self.advance(lexer) - 1);
+                self.snapshot[INDENTATION] =
+                    self.snapshot[INDENTATION].wrapping_add(self.advance(lexer) - 1);
             }
             lexer.set_result_symbol(BLOCK_QUOTE_START as u16);
             if !self.simulate {
-                self.open_blocks.push(Block::QUOTE);
+                self.push_block(Block::QUOTE);
             }
             return true;
         }
@@ -580,7 +703,7 @@ impl Scanner {
     }
 
     fn parse_atx_heading(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool]) -> bool {
-        if valid_symbols[ATX_H1_MARKER] && self.indentation <= 3 {
+        if valid_symbols[ATX_H1_MARKER] && self.snapshot[INDENTATION] <= 3 {
             self.mark_end(lexer);
             let mut level = 0u16;
             while lexer.lookahead() == i32::from(b'#') && level <= 6 {
@@ -589,7 +712,7 @@ impl Scanner {
             }
             if level <= 6 && (is_space(lexer.lookahead()) || is_line_end(lexer.lookahead())) {
                 lexer.set_result_symbol(ATX_H1_MARKER as u16 + level - 1);
-                self.indentation = 0;
+                self.snapshot[INDENTATION] = 0;
                 self.mark_end(lexer);
                 return true;
             }
@@ -597,8 +720,13 @@ impl Scanner {
         false
     }
 
-    fn parse_setext_underline(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool]) -> bool {
-        if valid_symbols[SETEXT_H1_UNDERLINE] && usize::from(self.matched) == self.open_blocks.len()
+    fn parse_setext_underline(
+        &mut self,
+        lexer: &mut ScanLexer<'_>,
+        valid_symbols: &[bool],
+    ) -> bool {
+        if valid_symbols[SETEXT_H1_UNDERLINE]
+            && usize::from(self.snapshot[MATCHED]) == self.block_count()
         {
             self.mark_end(lexer);
             while lexer.lookahead() == i32::from(b'=') {
@@ -618,7 +746,12 @@ impl Scanner {
 
     /// The metadata branches for `+++` and `---` have identical line scanning.
     /// Called at the newline after the opening marker (never at EOF).
-    fn parse_metadata_body(&mut self, lexer: &mut ScanLexer<'_>, delimiter: u8, symbol: usize) -> bool {
+    fn parse_metadata_body(
+        &mut self,
+        lexer: &mut ScanLexer<'_>,
+        delimiter: u8,
+        symbol: usize,
+    ) -> bool {
         loop {
             self.consume_newline(lexer);
             let mut count = 0usize;
@@ -648,7 +781,7 @@ impl Scanner {
     }
 
     fn parse_plus(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool]) -> bool {
-        if self.indentation <= 3
+        if self.snapshot[INDENTATION] <= 3
             && (valid_symbols[LIST_MARKER_PLUS]
                 || valid_symbols[LIST_MARKER_PLUS_DONT_INTERRUPT]
                 || valid_symbols[PLUS_METADATA])
@@ -678,7 +811,7 @@ impl Scanner {
                     dont_interrupt = true;
                 }
                 dont_interrupt =
-                    dont_interrupt && usize::from(self.matched) == self.open_blocks.len();
+                    dont_interrupt && usize::from(self.snapshot[MATCHED]) == self.block_count();
                 let symbol = if dont_interrupt {
                     LIST_MARKER_PLUS_DONT_INTERRUPT
                 } else {
@@ -688,8 +821,7 @@ impl Scanner {
                     lexer.set_result_symbol(symbol as u16);
                     extra_indentation = self.list_extra_indentation(extra_indentation);
                     if !self.simulate {
-                        self.open_blocks
-                            .push(Block::list_item(usize::from(extra_indentation)));
+                        self.push_block(Block::list_item(usize::from(extra_indentation)));
                     }
                     return true;
                 }
@@ -698,8 +830,12 @@ impl Scanner {
         false
     }
 
-    fn parse_ordered_list_marker(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool]) -> bool {
-        if self.indentation <= 3
+    fn parse_ordered_list_marker(
+        &mut self,
+        lexer: &mut ScanLexer<'_>,
+        valid_symbols: &[bool],
+    ) -> bool {
+        if self.snapshot[INDENTATION] <= 3
             && (valid_symbols[LIST_MARKER_PARENTHESIS]
                 || valid_symbols[LIST_MARKER_DOT]
                 || valid_symbols[LIST_MARKER_PARENTHESIS_DONT_INTERRUPT]
@@ -734,7 +870,7 @@ impl Scanner {
                         dont_interrupt = true;
                     }
                     dont_interrupt =
-                        dont_interrupt && usize::from(self.matched) == self.open_blocks.len();
+                        dont_interrupt && usize::from(self.snapshot[MATCHED]) == self.block_count();
                     let symbol = if dot {
                         if dont_interrupt {
                             LIST_MARKER_DOT_DONT_INTERRUPT
@@ -756,8 +892,9 @@ impl Scanner {
                         } as u16);
                         extra_indentation = self.list_extra_indentation(extra_indentation);
                         if !self.simulate {
-                            self.open_blocks
-                                .push(Block::list_item(usize::from(extra_indentation) + digits));
+                            self.push_block(Block::list_item(
+                                usize::from(extra_indentation) + digits,
+                            ));
                         }
                         return true;
                     }
@@ -768,7 +905,7 @@ impl Scanner {
     }
 
     fn parse_minus(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool]) -> bool {
-        if self.indentation <= 3
+        if self.snapshot[INDENTATION] <= 3
             && (valid_symbols[LIST_MARKER_MINUS]
                 || valid_symbols[LIST_MARKER_MINUS_DONT_INTERRUPT]
                 || valid_symbols[SETEXT_H2_UNDERLINE]
@@ -805,12 +942,13 @@ impl Scanner {
                 extra_indentation = 1;
                 dont_interrupt = true;
             }
-            dont_interrupt = dont_interrupt && usize::from(self.matched) == self.open_blocks.len();
+            dont_interrupt =
+                dont_interrupt && usize::from(self.snapshot[MATCHED]) == self.block_count();
             let thematic_break = minus_count >= 3 && line_end;
             let underline = minus_count >= 1
                 && !minus_after_whitespace
                 && line_end
-                && usize::from(self.matched) == self.open_blocks.len();
+                && usize::from(self.snapshot[MATCHED]) == self.block_count();
             let list_marker_minus = minus_count >= 1 && extra_indentation >= 1;
             let symbol = if dont_interrupt {
                 LIST_MARKER_MINUS_DONT_INTERRUPT
@@ -821,12 +959,12 @@ impl Scanner {
             if valid_symbols[SETEXT_H2_UNDERLINE] && underline {
                 lexer.set_result_symbol(SETEXT_H2_UNDERLINE as u16);
                 self.mark_end(lexer);
-                self.indentation = 0;
+                self.snapshot[INDENTATION] = 0;
                 success = true;
             } else if valid_symbols[THEMATIC_BREAK] && thematic_break {
                 lexer.set_result_symbol(THEMATIC_BREAK as u16);
                 self.mark_end(lexer);
-                self.indentation = 0;
+                self.snapshot[INDENTATION] = 0;
                 success = true;
             } else if valid_symbols[symbol] && list_marker_minus {
                 if minus_count == 1 {
@@ -834,8 +972,7 @@ impl Scanner {
                 }
                 extra_indentation = self.list_extra_indentation(extra_indentation);
                 if !self.simulate {
-                    self.open_blocks
-                        .push(Block::list_item(usize::from(extra_indentation)));
+                    self.push_block(Block::list_item(usize::from(extra_indentation)));
                 }
                 lexer.set_result_symbol(symbol as u16);
                 return true;
@@ -872,7 +1009,7 @@ impl Scanner {
             self.advance(lexer);
             lexer.set_result_symbol(HTML_BLOCK_3_START as u16);
             if !self.simulate {
-                self.open_blocks.push(Block::ANONYMOUS);
+                self.push_block(Block::ANONYMOUS);
             }
             return true;
         }
@@ -884,7 +1021,7 @@ impl Scanner {
                     self.advance(lexer);
                     lexer.set_result_symbol(HTML_BLOCK_2_START as u16);
                     if !self.simulate {
-                        self.open_blocks.push(Block::ANONYMOUS);
+                        self.push_block(Block::ANONYMOUS);
                     }
                     return true;
                 }
@@ -894,7 +1031,7 @@ impl Scanner {
                 self.advance(lexer);
                 lexer.set_result_symbol(HTML_BLOCK_4_START as u16);
                 if !self.simulate {
-                    self.open_blocks.push(Block::ANONYMOUS);
+                    self.push_block(Block::ANONYMOUS);
                 }
                 return true;
             } else if lexer.lookahead() == i32::from(b'[') {
@@ -914,7 +1051,7 @@ impl Scanner {
                     self.advance(lexer);
                     lexer.set_result_symbol(HTML_BLOCK_5_START as u16);
                     if !self.simulate {
-                        self.open_blocks.push(Block::ANONYMOUS);
+                        self.push_block(Block::ANONYMOUS);
                     }
                     return true;
                 }
@@ -955,7 +1092,7 @@ impl Scanner {
                         } else if valid_symbols[HTML_BLOCK_1_START] {
                             lexer.set_result_symbol(HTML_BLOCK_1_START as u16);
                             if !self.simulate {
-                                self.open_blocks.push(Block::ANONYMOUS);
+                                self.push_block(Block::ANONYMOUS);
                             }
                             return true;
                         }
@@ -974,7 +1111,7 @@ impl Scanner {
                     if name == tag && valid_symbols[HTML_BLOCK_6_START] {
                         lexer.set_result_symbol(HTML_BLOCK_6_START as u16);
                         if !self.simulate {
-                            self.open_blocks.push(Block::ANONYMOUS);
+                            self.push_block(Block::ANONYMOUS);
                         }
                         return true;
                     }
@@ -1076,7 +1213,7 @@ impl Scanner {
         if is_line_end(lexer.lookahead()) {
             lexer.set_result_symbol(HTML_BLOCK_7_START as u16);
             if !self.simulate {
-                self.open_blocks.push(Block::ANONYMOUS);
+                self.push_block(Block::ANONYMOUS);
             }
             return true;
         }
@@ -1129,13 +1266,13 @@ impl Scanner {
         } else {
             return false;
         }
-        self.indentation = 0;
-        self.column = 0;
+        self.snapshot[INDENTATION] = 0;
+        self.snapshot[COLUMN] = 0;
         self.consume_indentation(lexer);
         self.simulate = true;
         let mut matched_temp = 0u8;
-        while matched_temp < self.open_blocks.len() as u8 {
-            if self.match_block(lexer, self.open_blocks[usize::from(matched_temp)]) {
+        while matched_temp < self.block_count() as u8 {
+            if self.match_block(lexer, self.block_at(usize::from(matched_temp))) {
                 matched_temp = matched_temp.wrapping_add(1);
             } else {
                 return false;
@@ -1203,7 +1340,7 @@ impl Scanner {
             return true;
         }
         if valid_symbols[CLOSE_BLOCK] {
-            self.state |= STATE_CLOSE_BLOCK;
+            self.snapshot[STATE] |= STATE_CLOSE_BLOCK;
             lexer.set_result_symbol(CLOSE_BLOCK as u16);
             return true;
         }
@@ -1212,27 +1349,27 @@ impl Scanner {
                 lexer.set_result_symbol(TOKEN_EOF as u16);
                 return true;
             }
-            if !self.open_blocks.is_empty() {
+            if self.inline_count != 0 {
                 lexer.set_result_symbol(BLOCK_CLOSE as u16);
                 if !self.simulate {
-                    self.open_blocks.pop();
+                    self.pop_block();
                 }
                 return true;
             }
             return false;
         }
-        if self.state & STATE_MATCHING == 0 {
+        if self.snapshot[STATE] & STATE_MATCHING == 0 {
             self.consume_indentation(lexer);
             if valid_symbols[INDENTED_CHUNK_START]
                 && !valid_symbols[NO_INDENTED_CHUNK]
-                && self.indentation >= 4
+                && self.snapshot[INDENTATION] >= 4
                 && !is_line_end(lexer.lookahead())
             {
                 lexer.set_result_symbol(INDENTED_CHUNK_START as u16);
                 if !self.simulate {
-                    self.open_blocks.push(Block::INDENTED_CODE);
+                    self.push_block(Block::INDENTED_CODE);
                 }
-                self.indentation -= 4;
+                self.snapshot[INDENTATION] -= 4;
                 return true;
             }
             // Match the full code point, not its low byte.
@@ -1261,38 +1398,38 @@ impl Scanner {
             }
         } else {
             let mut partial_success = false;
-            while self.matched < self.open_blocks.len() as u8 {
+            while self.snapshot[MATCHED] < self.block_count() as u8 {
                 // C promotes the cast u8 to int before subtracting one.
-                if i32::from(self.matched) == i32::from(self.open_blocks.len() as u8) - 1
-                    && self.state & STATE_CLOSE_BLOCK != 0
+                if i32::from(self.snapshot[MATCHED]) == i32::from(self.block_count() as u8) - 1
+                    && self.snapshot[STATE] & STATE_CLOSE_BLOCK != 0
                 {
                     if !partial_success {
-                        self.state &= !STATE_CLOSE_BLOCK;
+                        self.snapshot[STATE] &= !STATE_CLOSE_BLOCK;
                     }
                     break;
                 }
-                if self.match_block(lexer, self.open_blocks[usize::from(self.matched)]) {
+                if self.match_block(lexer, self.block_at(usize::from(self.snapshot[MATCHED]))) {
                     partial_success = true;
-                    self.matched = self.matched.wrapping_add(1);
+                    self.snapshot[MATCHED] = self.snapshot[MATCHED].wrapping_add(1);
                 } else {
-                    if self.state & STATE_WAS_SOFT_LINE_BREAK != 0 {
-                        self.state &= !STATE_MATCHING;
+                    if self.snapshot[STATE] & STATE_WAS_SOFT_LINE_BREAK != 0 {
+                        self.snapshot[STATE] &= !STATE_MATCHING;
                     }
                     break;
                 }
             }
             if partial_success {
-                if usize::from(self.matched) == self.open_blocks.len() {
-                    self.state &= !STATE_MATCHING;
+                if usize::from(self.snapshot[MATCHED]) == self.block_count() {
+                    self.snapshot[STATE] &= !STATE_MATCHING;
                 }
                 lexer.set_result_symbol(BLOCK_CONTINUATION as u16);
                 return true;
             }
-            if self.state & STATE_WAS_SOFT_LINE_BREAK == 0 {
+            if self.snapshot[STATE] & STATE_WAS_SOFT_LINE_BREAK == 0 {
                 lexer.set_result_symbol(BLOCK_CLOSE as u16);
-                self.open_blocks.pop();
-                if usize::from(self.matched) == self.open_blocks.len() {
-                    self.state &= !STATE_MATCHING;
+                self.pop_block();
+                if usize::from(self.snapshot[MATCHED]) == self.block_count() {
+                    self.snapshot[STATE] &= !STATE_MATCHING;
                 }
                 return true;
             }
@@ -1303,36 +1440,36 @@ impl Scanner {
             && is_line_end(lexer.lookahead())
         {
             self.consume_newline(lexer);
-            self.indentation = 0;
-            self.column = 0;
-            if self.state & STATE_CLOSE_BLOCK == 0
+            self.snapshot[INDENTATION] = 0;
+            self.snapshot[COLUMN] = 0;
+            if self.snapshot[STATE] & STATE_CLOSE_BLOCK == 0
                 && (valid_symbols[SOFT_LINE_ENDING] || valid_symbols[PIPE_TABLE_LINE_ENDING])
             {
                 // Unlike the helper, C calls mark_end even during simulation.
                 lexer.mark_end();
                 self.consume_indentation(lexer);
                 self.simulate = true;
-                let matched_temp = self.matched;
-                self.matched = 0;
+                let matched_temp = self.snapshot[MATCHED];
+                self.snapshot[MATCHED] = 0;
                 let mut one_will_be_matched = false;
-                while self.matched < self.open_blocks.len() as u8 {
-                    if self.match_block(lexer, self.open_blocks[usize::from(self.matched)]) {
-                        self.matched = self.matched.wrapping_add(1);
+                while self.snapshot[MATCHED] < self.block_count() as u8 {
+                    if self.match_block(lexer, self.block_at(usize::from(self.snapshot[MATCHED]))) {
+                        self.snapshot[MATCHED] = self.snapshot[MATCHED].wrapping_add(1);
                         one_will_be_matched = true;
                     } else {
                         break;
                     }
                 }
-                let all_will_be_matched = usize::from(self.matched) == self.open_blocks.len();
+                let all_will_be_matched = usize::from(self.snapshot[MATCHED]) == self.block_count();
                 if !lexer.eof() && !self.scan_inner(lexer, &PARAGRAPH_INTERRUPT_SYMBOLS) {
                     // C restores matched_temp here, then immediately resets it.
-                    self.matched = 0;
-                    self.indentation = 0;
-                    self.column = 0;
+                    self.snapshot[MATCHED] = 0;
+                    self.snapshot[INDENTATION] = 0;
+                    self.snapshot[COLUMN] = 0;
                     if one_will_be_matched {
-                        self.state |= STATE_MATCHING;
+                        self.snapshot[STATE] |= STATE_MATCHING;
                     } else {
-                        self.state &= !STATE_MATCHING;
+                        self.snapshot[STATE] &= !STATE_MATCHING;
                     }
                     if valid_symbols[PIPE_TABLE_LINE_ENDING] {
                         if all_will_be_matched {
@@ -1341,23 +1478,23 @@ impl Scanner {
                         }
                     } else {
                         lexer.set_result_symbol(SOFT_LINE_ENDING as u16);
-                        self.state |= STATE_WAS_SOFT_LINE_BREAK;
+                        self.snapshot[STATE] |= STATE_WAS_SOFT_LINE_BREAK;
                         return true;
                     }
                 } else {
-                    self.matched = matched_temp;
+                    self.snapshot[MATCHED] = matched_temp;
                 }
-                self.indentation = 0;
-                self.column = 0;
+                self.snapshot[INDENTATION] = 0;
+                self.snapshot[COLUMN] = 0;
             }
             if valid_symbols[LINE_ENDING] {
-                self.matched = 0;
-                if !self.open_blocks.is_empty() {
-                    self.state |= STATE_MATCHING;
+                self.snapshot[MATCHED] = 0;
+                if self.inline_count != 0 {
+                    self.snapshot[STATE] |= STATE_MATCHING;
                 } else {
-                    self.state &= !STATE_MATCHING;
+                    self.snapshot[STATE] &= !STATE_MATCHING;
                 }
-                self.state &= !STATE_WAS_SOFT_LINE_BREAK;
+                self.snapshot[STATE] &= !STATE_WAS_SOFT_LINE_BREAK;
                 lexer.set_result_symbol(LINE_ENDING as u16);
                 return true;
             }
@@ -1482,7 +1619,11 @@ mod tests {
                 valid(&[PIPE_TABLE_START]),
                 PIPE_TABLE_START,
             ),
-            ("a\\ż | c\n- | -\n", valid(&[PIPE_TABLE_START]), PIPE_TABLE_START),
+            (
+                "a\\ż | c\n- | -\n",
+                valid(&[PIPE_TABLE_START]),
+                PIPE_TABLE_START,
+            ),
             (
                 "\ncontinued text\n",
                 valid(&[LINE_ENDING, SOFT_LINE_ENDING]),
@@ -1501,16 +1642,86 @@ mod tests {
     }
 
     #[test]
+    fn inline_snapshots_spill_restore_and_pop_without_changing_wire_bytes() {
+        assert!(std::mem::size_of::<Scanner>() <= 64);
+        let mut scanner = Scanner::default();
+        let mut capacity = 0;
+        for count in [0, 1, 2, 3, 4, 5, 21, 254, 3, 0] {
+            let mut expected = vec![STATE_MATCHING, 1, 255, 3, 255];
+            for i in 0..count {
+                expected.extend_from_slice(&(u32::MAX - i).to_ne_bytes());
+            }
+            scanner.simulate = true;
+            scanner.deserialize(&expected);
+            assert_eq!(scanner.block_count(), count as usize);
+            assert_eq!(serialized(&mut scanner), expected);
+            assert!(scanner.simulate);
+            assert!(scanner.spilled_blocks.capacity() >= capacity);
+            capacity = scanner.spilled_blocks.capacity();
+
+            // The header remains mutable when the blocks are on the heap.
+            scanner.snapshot[STATE] = STATE_CLOSE_BLOCK;
+            expected[STATE] = STATE_CLOSE_BLOCK;
+            for remaining in (0..count).rev() {
+                scanner.pop_block();
+                expected.truncate(HEADER_SIZE + 4 * remaining as usize);
+                assert_eq!(serialized(&mut scanner), expected);
+            }
+            scanner.pop_block();
+            assert_eq!(serialized(&mut scanner), expected);
+            scanner.deserialize(&[]);
+            assert_eq!(serialized(&mut scanner), [0; HEADER_SIZE]);
+            assert_eq!(scanner.spilled_blocks.capacity(), capacity);
+            assert!(scanner.simulate);
+        }
+    }
+
+    #[test]
+    fn snapshot_restoration_ignores_incomplete_trailing_blocks() {
+        for count in 0..=6 {
+            for trailing in 1..=3 {
+                let mut scanner = Scanner::with_blocks((0..count).map(Block));
+                let expected = serialized(&mut scanner);
+                let mut input = expected.clone();
+                input.extend(std::iter::repeat_n(0xff, trailing));
+                scanner.deserialize(&input);
+                assert_eq!(serialized(&mut scanner), expected);
+                for _ in 0..count {
+                    scanner.pop_block();
+                }
+                assert_eq!(scanner.inline_count, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn pushing_after_pop_preserves_the_inline_prefix_and_reuses_spill_storage() {
+        let mut scanner = Scanner::default();
+        let mut expected = vec![0; HEADER_SIZE];
+        for round in 0..3 {
+            for i in 0..12 {
+                let block = Block(0x12345600 + round * 12 + i);
+                scanner.push_block(block);
+                expected.extend_from_slice(&block.0.to_ne_bytes());
+                assert_eq!(scanner.block_at(i as usize), block);
+                assert_eq!(serialized(&mut scanner), expected);
+                if i < INLINE_BLOCKS as u32 && round == 0 {
+                    assert_eq!(scanner.spilled_blocks.capacity(), 0);
+                }
+            }
+            for count in (0..12).rev() {
+                scanner.pop_block();
+                expected.truncate(HEADER_SIZE + 4 * count);
+                assert_eq!(serialized(&mut scanner), expected);
+            }
+        }
+    }
+
+    #[test]
     fn serialization_has_five_state_bytes_and_native_u32_blocks() {
-        let mut scanner = Scanner {
-            open_blocks: (0..=20).map(Block).collect(),
-            state: STATE_MATCHING | STATE_CLOSE_BLOCK,
-            matched: 3,
-            indentation: 255,
-            column: 2,
-            fenced_code_block_delimiter_length: 4,
-            simulate: true,
-        };
+        let mut scanner = Scanner::with_blocks((0..=20).map(Block));
+        scanner.snapshot[..5].copy_from_slice(&[STATE_MATCHING | STATE_CLOSE_BLOCK, 3, 255, 2, 4]);
+        scanner.simulate = true;
         let mut expected = vec![17, 3, 255, 2, 4];
         for block in 0u32..=20 {
             expected.extend_from_slice(&block.to_ne_bytes());
@@ -1531,9 +1742,9 @@ mod tests {
         let mut scanner = Scanner::default();
         let mut lexer = TestLexer::new(">\ttext");
         assert!(scanner.scan(&mut lexer, &valid(&[BLOCK_QUOTE_START])));
-        assert_eq!(scanner.indentation, 2);
-        assert_eq!(scanner.column, 0);
-        assert_eq!(scanner.open_blocks, [Block::QUOTE]);
+        assert_eq!(scanner.snapshot[INDENTATION], 2);
+        assert_eq!(scanner.snapshot[COLUMN], 0);
+        assert_eq!(scanner.blocks(), [Block::QUOTE]);
         assert_eq!(
             lexer.events,
             [
@@ -1561,7 +1772,7 @@ mod tests {
                 Event::Symbol(LIST_MARKER_STAR),
             ]
         );
-        assert_eq!(scanner.open_blocks, [Block::LIST_ITEM]);
+        assert_eq!(scanner.blocks(), [Block::LIST_ITEM]);
     }
 
     #[test]
@@ -1585,7 +1796,7 @@ mod tests {
             let mut lexer = TestLexer::new(input);
             assert!(scanner.scan(&mut lexer, &valid(&[allowed])));
             assert_eq!(usize::from(lexer.symbol), emitted);
-            assert_eq!(scanner.open_blocks, [block]);
+            assert_eq!(scanner.blocks(), [block]);
             assert_eq!(lexer.end, None);
         }
     }
@@ -1597,8 +1808,8 @@ mod tests {
         assert!(scanner.scan(&mut lexer, &valid(&[FENCED_CODE_BLOCK_START_BACKTICK])));
         assert_eq!(lexer.end, Some(4));
         assert_eq!(lexer.position, 8);
-        assert_eq!(scanner.fenced_code_block_delimiter_length, 4);
-        assert_eq!(scanner.open_blocks, [Block::FENCED_CODE]);
+        assert_eq!(scanner.snapshot[FENCE_LENGTH], 4);
+        assert_eq!(scanner.blocks(), [Block::FENCED_CODE]);
 
         let mut lexer = TestLexer::new("`````   \r\n");
         assert!(scanner.scan(
@@ -1611,9 +1822,9 @@ mod tests {
         assert_eq!(usize::from(lexer.symbol), FENCED_CODE_BLOCK_END_BACKTICK);
         assert_eq!(lexer.end, Some(5));
         assert_eq!(lexer.position, 8);
-        assert_eq!(scanner.fenced_code_block_delimiter_length, 0);
+        assert_eq!(scanner.snapshot[FENCE_LENGTH], 0);
         // Ending the delimiter does not itself pop the block.
-        assert_eq!(scanner.open_blocks, [Block::FENCED_CODE]);
+        assert_eq!(scanner.blocks(), [Block::FENCED_CODE]);
     }
 
     #[test]
@@ -1621,13 +1832,13 @@ mod tests {
         let mut scanner = Scanner::default();
         let mut lexer = TestLexer::new(&format!("{}\n", "`".repeat(259)));
         assert!(scanner.scan(&mut lexer, &valid(&[FENCED_CODE_BLOCK_START_BACKTICK])));
-        assert_eq!(scanner.fenced_code_block_delimiter_length, 3);
+        assert_eq!(scanner.snapshot[FENCE_LENGTH], 3);
         assert_eq!(lexer.end, Some(259));
         scanner.deserialize(&[]);
         let mut lexer = TestLexer::new(&format!("{}text", " ".repeat(260)));
         assert!(scanner.scan(&mut lexer, &valid(&[INDENTED_CHUNK_START])));
-        assert_eq!(scanner.indentation, 0);
-        assert_eq!(scanner.open_blocks, [Block::INDENTED_CODE]);
+        assert_eq!(scanner.snapshot[INDENTATION], 0);
+        assert_eq!(scanner.blocks(), [Block::INDENTED_CODE]);
         scanner.deserialize(&[]);
         let mut lexer = TestLexer::new(&format!("+{}text", " ".repeat(256)));
         assert!(!scanner.scan(&mut lexer, &valid(&[LIST_MARKER_PLUS])));
@@ -1642,7 +1853,7 @@ mod tests {
             assert!(scanner.scan(&mut lexer, &valid(&[symbol])));
             assert_eq!(usize::from(lexer.symbol), symbol);
             assert_eq!(lexer.end, Some(source.len() - 5));
-            assert!(scanner.open_blocks.is_empty());
+            assert!(scanner.blocks().is_empty());
             let mut scanner = Scanner::default();
             let mut lexer = TestLexer::new(&format!("{marker}\nkey = value\n{marker}"));
             assert!(!scanner.scan(&mut lexer, &valid(&[symbol])));
@@ -1687,7 +1898,7 @@ mod tests {
             assert_eq!(lexer.position, position, "{input}");
             assert_eq!(lexer.end, None);
             assert_eq!(
-                scanner.open_blocks.len(),
+                scanner.blocks().len(),
                 usize::from(symbol != HTML_BLOCK_1_END)
             );
         }
@@ -1712,7 +1923,7 @@ mod tests {
             assert_eq!(lexer.position, input.len() - 1);
             assert_eq!(usize::from(lexer.symbol), PIPE_TABLE_START);
             assert!(scanner.simulate);
-            assert!(scanner.open_blocks.is_empty());
+            assert!(scanner.blocks().is_empty());
         }
         for input in ["a | b\n-\n", "text\n---\n", "a | b\n- | -"] {
             assert!(
@@ -1737,61 +1948,55 @@ mod tests {
                 Event::Symbol(LINE_ENDING),
             ]
         );
-        assert_eq!(scanner.state, 0);
+        assert_eq!(scanner.snapshot[STATE], 0);
 
         let mut lexer = TestLexer::new("\n``` rust\n");
         assert!(scanner.scan(&mut lexer, &valid(&[LINE_ENDING, SOFT_LINE_ENDING])));
         assert_eq!(lexer.end, Some(1));
         assert_eq!(usize::from(lexer.symbol), LINE_ENDING);
-        assert!(scanner.open_blocks.is_empty());
+        assert!(scanner.blocks().is_empty());
         // C's simulation does mutate the remembered delimiter length.
-        assert_eq!(scanner.fenced_code_block_delimiter_length, 3);
+        assert_eq!(scanner.snapshot[FENCE_LENGTH], 3);
 
         let mut lexer = TestLexer::new("\ncontinued\n");
         assert!(scanner.scan(&mut lexer, &valid(&[LINE_ENDING, SOFT_LINE_ENDING])));
         assert_eq!(lexer.end, Some(1));
         assert_eq!(usize::from(lexer.symbol), SOFT_LINE_ENDING);
-        assert_eq!(scanner.state, STATE_WAS_SOFT_LINE_BREAK);
+        assert_eq!(scanner.snapshot[STATE], STATE_WAS_SOFT_LINE_BREAK);
     }
 
     #[test]
     fn matching_yields_outer_continuation_before_requested_inner_close() {
-        let mut scanner = Scanner {
-            open_blocks: vec![Block::QUOTE, Block::FENCED_CODE],
-            state: STATE_MATCHING | STATE_CLOSE_BLOCK,
-            ..Scanner::default()
-        };
+        let mut scanner = Scanner::with_blocks([Block::QUOTE, Block::FENCED_CODE]);
+        scanner.snapshot[STATE] = STATE_MATCHING | STATE_CLOSE_BLOCK;
         let mut lexer = TestLexer::new("> text");
         assert!(scanner.scan(&mut lexer, &valid(&[])));
         assert_eq!(usize::from(lexer.symbol), BLOCK_CONTINUATION);
-        assert_eq!(scanner.matched, 1);
-        assert_eq!(scanner.state, STATE_MATCHING | STATE_CLOSE_BLOCK);
+        assert_eq!(scanner.snapshot[MATCHED], 1);
+        assert_eq!(scanner.snapshot[STATE], STATE_MATCHING | STATE_CLOSE_BLOCK);
         assert!(scanner.scan(&mut lexer, &valid(&[])));
         assert_eq!(usize::from(lexer.symbol), BLOCK_CLOSE);
-        assert_eq!(scanner.open_blocks, [Block::QUOTE]);
-        assert_eq!(scanner.state, 0);
+        assert_eq!(scanner.blocks(), [Block::QUOTE]);
+        assert_eq!(scanner.snapshot[STATE], 0);
         assert_eq!(lexer.position, 2);
     }
 
     #[test]
     fn eof_and_error_requests_take_precedence_without_advancing() {
-        let mut scanner = Scanner {
-            open_blocks: vec![Block::QUOTE],
-            ..Scanner::default()
-        };
+        let mut scanner = Scanner::with_blocks([Block::QUOTE]);
         let mut lexer = TestLexer::new("");
         assert!(scanner.scan(&mut lexer, &valid(&[TOKEN_EOF, CLOSE_BLOCK, TRIGGER_ERROR])));
         assert_eq!(lexer.events, [Event::Symbol(ERROR)]);
-        assert_eq!(scanner.state, 0);
+        assert_eq!(scanner.snapshot[STATE], 0);
         assert!(scanner.scan(&mut lexer, &valid(&[TOKEN_EOF, CLOSE_BLOCK])));
         assert_eq!(usize::from(lexer.symbol), CLOSE_BLOCK);
-        assert_eq!(scanner.state, STATE_CLOSE_BLOCK);
+        assert_eq!(scanner.snapshot[STATE], STATE_CLOSE_BLOCK);
         assert!(scanner.scan(&mut lexer, &valid(&[TOKEN_EOF])));
         assert_eq!(usize::from(lexer.symbol), TOKEN_EOF);
-        assert_eq!(scanner.open_blocks, [Block::QUOTE]);
+        assert_eq!(scanner.blocks(), [Block::QUOTE]);
         assert!(scanner.scan(&mut lexer, &valid(&[])));
         assert_eq!(usize::from(lexer.symbol), BLOCK_CLOSE);
-        assert!(scanner.open_blocks.is_empty());
+        assert!(scanner.blocks().is_empty());
         assert!(!scanner.scan(&mut lexer, &valid(&[])));
     }
 }
