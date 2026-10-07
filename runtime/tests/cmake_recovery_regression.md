@@ -254,8 +254,8 @@ changes are introduced.
 
 ## Unterminated-call bucket `7f8795fb`
 
-Reverified at `b5edaa9` (also previously at `40208fa` and `a4425c2`): all
-three reported inputs already pass on the starting checkout with the merged scanner
+Reverified at `9a8563b`: all three reported inputs already pass on the starting
+checkout with the merged scanner
 initialization/reset correction above. The current C scanner uses
 `ts_calloc` and clears both fields on empty or invalid-length snapshots, matching
 the Rust implementation. This allows recovery content without an opener:
@@ -272,7 +272,7 @@ input chunks. The earlier verification note incorrectly described all three coun
 as zero; the existing tests already assert the correct counts. No additional
 behavior change or duplicate test is needed.
 
-Validation rerun for this bucket at `b5edaa9`:
+Validation rerun for this bucket at `9a8563b`:
 
 - `run_oracle(inputs = "bucket:7f8795fb")`: 3/3 pass.
 - `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs
@@ -281,7 +281,7 @@ Validation rerun for this bucket at `b5edaa9`:
   in host-owned `grammars/yaml/src/lex.rs:20` noted above.
 - `cargo test -p ts_port_cmake`: 24 tests pass.
 - `cargo test -p ts_port`: all unit and integration tests pass, including the
-  three `cmake_unterminated_call_recovery` tests, which now also assert each
+  three `cmake_unterminated_call_recovery` tests, which also assert each
   direct ERROR child's kind, symbol id, range, flags, and child count.
 - `cargo clippy -p ts_port -p ts_port_cmake --all-targets -- -D warnings`: passes.
 - `cargo clippy --workspace --all-targets -- -D warnings`: blocked by the
