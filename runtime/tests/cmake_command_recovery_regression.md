@@ -2,12 +2,12 @@
 
 ## Status
 
-The assigned bucket is already fixed on the merged baseline `40bf9fe`. Fresh
+The assigned bucket is already fixed on the merged baseline `42db150`. Fresh
 verification passes all seven reported inputs on the initial reproduction, before
 any edits; no additional runtime/scanner change is needed. Existing regressions
 include incremental repair-and-undo coverage for malformed variable references.
 All checks below were rerun at this starting revision, rather than inherited
-from the previous verification at `c5ef0c0`. Direct comparison of the current C
+from the previous verification at `40bf9fe`. Direct comparison of the current C
 scanner and Rust implementation confirms the existing correction remains exact.
 This revision only refreshes the verification record; it does not add duplicate
 tests or change behavior.
@@ -48,7 +48,7 @@ change source lengths and must produce valid `normal_command` nodes. Undo must
 restore the original top-level ERROR shape and bracket-content byte/point ranges,
 not retain the repaired command or a stale external-scanner snapshot.
 
-## Verification based on `40bf9fe`
+## Verification based on `42db150`
 
 - `run_oracle(inputs = "bucket:6c68c51b")`: **7/7 pass**, with query checks.
 - `run_oracle(languages = "cmake", inputs = "all")`:
