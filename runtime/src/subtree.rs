@@ -27,7 +27,11 @@ pub(crate) const HAS_CHANGES: u8 = 8;
 pub(crate) const MISSING: u8 = 16;
 pub(crate) const KEYWORD: u8 = 32;
 
+// On 64-bit hosts this fills the padding before a heap pointer without growing
+// the 16-byte handle. Word-sized tag stores avoid partial-store forwarding stalls
+// when stack links move a freshly constructed handle as a whole value.
 #[derive(Clone, Debug, Default)]
+#[repr(u64)]
 pub(crate) enum Subtree {
     #[default]
     Null,
@@ -1788,7 +1792,10 @@ mod layout_tests {
     fn compact_handles() {
         assert_eq!(std::mem::size_of::<InlineLeaf>(), 8);
         #[cfg(target_pointer_width = "64")]
-        assert_eq!(std::mem::size_of::<Subtree>(), 16);
+        {
+            assert_eq!(std::mem::size_of::<Subtree>(), 16);
+            assert_eq!(std::mem::size_of::<Option<Subtree>>(), 16);
+        }
     }
     #[test]
     fn heap_mutation_is_shallow_copy_on_write() {

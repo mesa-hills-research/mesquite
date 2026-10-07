@@ -278,52 +278,67 @@ pub(crate) fn stack_node_new(
     is_pending: bool,
     state: StateId,
 ) -> StackNodeId {
-    let mut node = StackNode {
-        state,
-        position: length_zero(),
-        links: StackLinks::default(),
-        link_count: 0,
-        ref_count: 1,
-        error_cost: 0,
-        node_count: 0,
-        dynamic_precedence: 0,
-    };
-    if let Some(previous_node) = previous_node {
-        let previous = arena.node(previous_node);
-        node.position = previous.position;
-        node.error_cost = previous.error_cost;
-        node.dynamic_precedence = previous.dynamic_precedence;
-        node.node_count = previous.node_count;
-        if !subtree.is_null() {
-            node.error_cost = node
-                .error_cost
-                .wrapping_add(ts_subtree_error_cost(&subtree));
-            node.position = length_add(node.position, ts_subtree_total_size(&subtree));
-            node.node_count = node
-                .node_count
-                .wrapping_add(stack__subtree_node_count(&subtree));
-            node.dynamic_precedence = node
-                .dynamic_precedence
-                .wrapping_add(ts_subtree_dynamic_precedence(&subtree));
-        }
-        // A push transfers the old head's ownership to this edge. Do not retain
-        // the predecessor or subtree a second time.
-        node.link_count = 1;
-        node.links[0] = Some(StackLink {
-            node: previous_node,
-            subtree,
-            is_pending,
-        });
-    }
-    if let Some(id) = arena.free.pop() {
-        assert!(arena.nodes[id.0].is_none());
-        arena.nodes[id.0] = Some(node);
+    // Select the destination before computing the header, so arena growth does
+    // not make those scalar values live across an allocation.
+    let id = if let Some(id) = arena.free.pop() {
         id
     } else {
         let id = StackNodeId(arena.nodes.len());
-        arena.nodes.push(Some(node));
+        arena.nodes.push(None);
         id
-    }
+    };
+    // Compute the scalar header before constructing the owning node. Updating
+    // narrow fields of a temporary StackNode and then copying the whole node
+    // forces overlapping stores/loads in the hot recycled-slot path.
+    let (position, error_cost, node_count, dynamic_precedence) =
+        if let Some(previous_node) = previous_node {
+            let previous = arena.node(previous_node);
+            if subtree.is_null() {
+                (
+                    previous.position,
+                    previous.error_cost,
+                    previous.node_count,
+                    previous.dynamic_precedence,
+                )
+            } else {
+                (
+                    length_add(previous.position, ts_subtree_total_size(&subtree)),
+                    previous
+                        .error_cost
+                        .wrapping_add(ts_subtree_error_cost(&subtree)),
+                    previous
+                        .node_count
+                        .wrapping_add(stack__subtree_node_count(&subtree)),
+                    previous
+                        .dynamic_precedence
+                        .wrapping_add(ts_subtree_dynamic_precedence(&subtree)),
+                )
+            }
+        } else {
+            (length_zero(), 0, 0, 0)
+        };
+    let slot = &mut arena.nodes[id.0];
+    assert!(slot.is_none());
+    *slot = Some(StackNode {
+        state,
+        position,
+        links: StackLinks {
+            // Transfer the old head's ownership to this edge, without retaining
+            // either the predecessor or the subtree a second time.
+            first: previous_node.map(|node| StackLink {
+                node,
+                subtree,
+                is_pending,
+            }),
+            rest: None,
+        },
+        link_count: u16::from(previous_node.is_some()),
+        ref_count: 1,
+        error_cost,
+        node_count,
+        dynamic_precedence,
+    });
+    id
 }
 
 pub(crate) fn stack__subtree_is_equivalent(left: &Subtree, right: &Subtree) -> bool {
@@ -871,7 +886,8 @@ fn stack_node_replace_subtree(
     data.node_count = node_count;
     data.dynamic_precedence = dynamic_precedence;
     data.state = state;
-    data.links.rest = None;
+    // A single-link prefix has never allocated overflow links.
+    debug_assert!(data.links.rest.is_none());
     let link = data.links.first.as_mut().unwrap();
     link.subtree = parent;
     link.is_pending = false;
@@ -2322,6 +2338,63 @@ mod stack_1_tests {
         assert_eq!(arena.node(recovery).node_count, 5);
         assert_eq!(arena.node(recovery).error_cost, 23);
         assert_eq!(arena.node(recovery).dynamic_precedence, -7);
+    }
+
+    #[test]
+    fn recycled_node_construction_matches_fresh_slots() {
+        fn construct(tree: Subtree, pending: bool, recycle: bool) -> StackArena {
+            let mut arena = StackArena::default();
+            let base = stack_node_new(&mut arena, None, Subtree::Null, false, 1);
+            if recycle {
+                // Leave a vacant slot which previously owned overflow links.
+                // Hold the base separately while the two edges are released.
+                stack_node_retain(&mut arena, base);
+                let stale = stack_node_new(&mut arena, Some(base), leaf(1, VISIBLE), true, 9);
+                stack_node_retain(&mut arena, base);
+                let data = arena.node_mut(stale);
+                data.links[1] = Some(null_link(base));
+                data.link_count = 2;
+                stack_node_release(&mut arena, stale, &mut SubtreePool::default());
+                assert_eq!(arena.free, [stale]);
+                assert_eq!(arena.node(base).ref_count, 1);
+            }
+            let data = arena.node_mut(base);
+            data.position = Length {
+                bytes: u32::MAX - 1,
+                extent: Point { row: 4, column: 9 },
+            };
+            data.error_cost = u32::MAX - 1;
+            data.node_count = u32::MAX;
+            data.dynamic_precedence = -7;
+            let top = stack_node_new(&mut arena, Some(base), tree, pending, 3);
+            assert_eq!(top, StackNodeId(1));
+            assert!(arena.node(top).links.rest.is_none());
+            assert!(arena.free.is_empty());
+            arena
+        }
+
+        let heap = Subtree::Heap(Arc::new(SubtreeHeapData {
+            symbol: BUILTIN_SYM_ERROR_REPEAT,
+            size: Length {
+                bytes: 4,
+                extent: Point { row: 2, column: 3 },
+            },
+            error_cost: 23,
+            children: vec![leaf(2, VISIBLE)],
+            payload: SubtreePayload::Branch(BranchData {
+                visible_descendant_count: 3,
+                dynamic_precedence: -5,
+                ..BranchData::default()
+            }),
+            ..SubtreeHeapData::default()
+        }));
+        for tree in [Subtree::Null, leaf(3, VISIBLE), leaf(4, MISSING), heap] {
+            for pending in [false, true] {
+                let fresh = construct(tree.clone(), pending, false);
+                let recycled = construct(tree.clone(), pending, true);
+                assert_eq!(format!("{fresh:?}"), format!("{recycled:?}"));
+            }
+        }
     }
 
     #[test]
