@@ -103,7 +103,7 @@ checkout; this revalidation changes no scanner or runtime behavior.
 
 ## Empty recovery-content bucket `f5e2762e`
 
-Reverified at `d835a69`: all 16 reported inputs already pass. The merged scanner
+Reverified at `bcc1bc7`: all 16 reported inputs already pass. The merged scanner
 initialization/reset correction above allows `bracket_argument_content` at EOF
 without an opener, including after `a` and after skipping the newline in `if(\n`.
 This zero-width token is a real scanner token, not an inserted missing node.
@@ -113,7 +113,7 @@ The existing `cmake_empty_recovery_content` integration tests assert the complet
 small recovery trees, content ranges and flags, and zero progress-callback calls,
 both with fresh scanners and after parsing bracket arguments/comments. Scanner
 unit tests additionally check the EOF callback order and snapshot reset behavior.
-The parser-level whitespace cases now also cover CRLF, lone CR, spaces/tabs,
+The existing parser-level whitespace cases also cover CRLF, lone CR, spaces/tabs,
 and multiple newlines, asserting exact EOF byte and point ranges after skipping
 that whitespace with both fresh and reused scanners.
 
@@ -128,5 +128,7 @@ Checks rerun for this bucket:
 - `cargo test -p ts_port --test cmake_empty_recovery_content`: 2 tests pass.
 - `cargo clippy -p ts_port_cmake -p ts_port --all-targets -- -D warnings`: passes.
 
-This follow-up expands regression coverage without changing scanner/runtime
-behavior; it adds no C deviations, unsafe code, or generated-file changes.
+This follow-up only updates the verification record: the implementation and
+regression coverage were already present at the starting revision. No further
+scanner/runtime fix is needed, and no C deviations, unsafe code, or generated-file
+changes are introduced.
