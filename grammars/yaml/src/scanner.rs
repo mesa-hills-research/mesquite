@@ -140,92 +140,6 @@ impl Indent {
     }
 }
 
-// Keep the usual shallow indentation stack in the scanner allocation. The
-// spill buffer is reused for deeply nested documents, with no depth limit.
-#[derive(Default, Debug)]
-struct Indents {
-    inline: [[u8; 4]; 16],
-    len: usize,
-    spill: Vec<[u8; 4]>,
-}
-
-impl std::ops::Deref for Indents {
-    type Target = [[u8; 4]];
-
-    fn deref(&self) -> &Self::Target {
-        if self.len <= self.inline.len() {
-            &self.inline[..self.len]
-        } else {
-            &self.spill
-        }
-    }
-}
-
-#[cfg(test)]
-impl PartialEq for Indents {
-    fn eq(&self, other: &Self) -> bool {
-        self[..] == other[..]
-    }
-}
-
-#[cfg(test)]
-impl PartialEq<[[u8; 4]]> for Indents {
-    fn eq(&self, other: &[[u8; 4]]) -> bool {
-        &self[..] == other
-    }
-}
-
-impl Indents {
-    fn clear(&mut self) {
-        self.len = 0;
-        self.spill.clear();
-    }
-
-    fn push(&mut self, indent: [u8; 4]) {
-        if self.len < self.inline.len() {
-            self.inline[self.len] = indent;
-        } else {
-            if self.len == self.inline.len() {
-                self.spill.clear();
-                self.spill.extend_from_slice(&self.inline);
-            }
-            self.spill.push(indent);
-        }
-        self.len += 1;
-    }
-
-    fn pop(&mut self) -> Option<[u8; 4]> {
-        if self.len == 0 {
-            return None;
-        }
-        let result = if self.len > self.inline.len() {
-            self.spill.pop().unwrap()
-        } else {
-            self.inline[self.len - 1]
-        };
-        self.len -= 1;
-        Some(result)
-    }
-
-    fn restore(&mut self, indents: &[[u8; 4]]) {
-        let inline_len = indents.len().min(self.inline.len());
-        copy_indent_bytes(
-            self.inline[..inline_len].as_flattened_mut(),
-            indents[..inline_len].as_flattened(),
-        );
-        self.spill.clear();
-        if indents.len() > self.inline.len() {
-            self.restore_spill(indents);
-        }
-        self.len = indents.len();
-    }
-
-    #[inline(never)]
-    fn restore_spill(&mut self, indents: &[[u8; 4]]) {
-        self.spill.extend_from_slice(indents);
-    }
-}
-
 /// The two C indentation arrays are kept together; their push/pop order is identical.
 #[derive(Default)]
 pub(crate) struct Scanner {
@@ -236,7 +150,7 @@ pub(crate) struct Scanner {
     blk_imp_tab: i16,
     // Native-endian pairs for bulk state copies. The constant root indentation
     // is implicit: it is never popped or serialized by the C scanner.
-    indents: Indents,
+    indents: Vec<[u8; 4]>,
     // Temporary state, not serialized.
     end_row: i16,
     end_col: i16,
@@ -257,6 +171,18 @@ impl Scanner {
         self.lookahead = lexer.lookahead();
     }
 
+    // No scanner code observes lookahead after these final advances. Do not
+    // refresh the scan-local cache just before returning; scan() refreshes it
+    // on entry, including after a parser rewind or state restoration.
+    #[inline(always)]
+    fn adv_end(&mut self, lexer: &mut dyn Lexer, symbol: usize) -> bool {
+        self.cur_col = self.cur_col.wrapping_add(1);
+        self.cur_chr = self.lookahead;
+        lexer.advance(false);
+        self.mrk_end(lexer);
+        self.finish(lexer, symbol)
+    }
+
     fn adv_nwl(&mut self, lexer: &mut dyn Lexer) {
         self.cur_row = self.cur_row.wrapping_add(1);
         self.cur_col = 0;
@@ -267,8 +193,7 @@ impl Scanner {
 
     // The leading-space count ends at the first tab on the final line. Keep
     // its origin rather than updating both it and the column for every space.
-    // Isolate whitespace's counters from the large dispatcher's live locals.
-    #[inline(never)]
+    #[inline(always)]
     fn skip_whitespace(&mut self, lexer: &mut dyn Lexer) -> (bool, i16) {
         let mut row = self.cur_row;
         let mut col = self.cur_col;
@@ -334,6 +259,7 @@ impl Scanner {
         true
     }
 
+    #[inline(always)]
     fn current_indent(&self) -> Indent {
         self.indents.last().copied().map_or(
             Indent {
@@ -348,6 +274,7 @@ impl Scanner {
         self.indents.pop().is_some()
     }
 
+    #[inline(always)]
     fn push_ind(&mut self, kind: i16, length: i16) {
         self.indents.push(Indent { kind, length }.to_bytes());
     }
@@ -362,6 +289,7 @@ impl Scanner {
 
     // Each schema has five positional/contextual variants, with timestamp slots
     // reserved between float and string even though the core schema has no timestamps.
+    #[inline(always)]
     fn plain_symbol(&self, position: usize) -> usize {
         let base = match self.rlt_sch {
             ResultSchema::Null => R_SGL_PLN_NUL_BLK,
@@ -905,6 +833,7 @@ const ASCII_PLAIN_SAFE: [u8; 128] = {
     table
 };
 
+#[inline(always)]
 fn is_plain_run(c: i32, is_in_blk: bool) -> bool {
     if is_in_blk {
         return is_ns_char(c) && c != i32::from(b':');
@@ -916,6 +845,7 @@ fn is_plain_run(c: i32, is_in_blk: bool) -> bool {
     }
 }
 
+#[inline(always)]
 fn is_plain_safe(c: i32, is_in_blk: bool) -> bool {
     if is_in_blk {
         return is_ns_char(c);
@@ -975,24 +905,6 @@ fn is_ns_tag_char(c: i32) -> bool {
 
 fn is_ns_anchor_char(c: i32) -> bool {
     is_ns_char(c) && !is_c_flow_indicator(c)
-}
-
-// Shallow snapshots are common and small: fixed-size copies avoid a call to
-// memcpy. The fallback retains bulk copying for arbitrarily deep indentation.
-#[inline]
-fn copy_indent_bytes(to: &mut [u8], from: &[u8]) {
-    match from.len() {
-        0 => {}
-        4 => to[..4].copy_from_slice(&from[..4]),
-        8 => to[..8].copy_from_slice(&from[..8]),
-        12 => to[..12].copy_from_slice(&from[..12]),
-        16 => to[..16].copy_from_slice(&from[..16]),
-        20 => to[..20].copy_from_slice(&from[..20]),
-        24 => to[..24].copy_from_slice(&from[..24]),
-        28 => to[..28].copy_from_slice(&from[..28]),
-        32 => to[..32].copy_from_slice(&from[..32]),
-        _ => to.copy_from_slice(from),
-    }
 }
 
 impl ExternalScanner for Scanner {
@@ -1174,138 +1086,92 @@ impl ExternalScanner for Scanner {
         } else if self.lookahead == i32::from(b'[') {
             if valid_symbols[R_FLW_SEQ_BGN] && is_r {
                 self.may_upd_imp_col(bgn_row, bgn_col, has_tab_ind);
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, R_FLW_SEQ_BGN);
+                return self.adv_end(lexer, R_FLW_SEQ_BGN);
             }
             if valid_symbols[BR_FLW_SEQ_BGN] && is_br {
                 self.may_upd_imp_col(bgn_row, bgn_col, has_tab_ind);
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, BR_FLW_SEQ_BGN);
+                return self.adv_end(lexer, BR_FLW_SEQ_BGN);
             }
             if valid_symbols[B_FLW_SEQ_BGN] && is_b {
                 self.may_upd_imp_col(bgn_row, bgn_col, has_tab_ind);
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, B_FLW_SEQ_BGN);
+                return self.adv_end(lexer, B_FLW_SEQ_BGN);
             }
         } else if self.lookahead == i32::from(b']') {
             if valid_symbols[R_FLW_SEQ_END] && is_r {
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, R_FLW_SEQ_END);
+                return self.adv_end(lexer, R_FLW_SEQ_END);
             }
             if valid_symbols[BR_FLW_SEQ_END] && is_br {
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, BR_FLW_SEQ_END);
+                return self.adv_end(lexer, BR_FLW_SEQ_END);
             }
             if valid_symbols[B_FLW_SEQ_END] && is_b {
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, BR_FLW_SEQ_END);
+                return self.adv_end(lexer, BR_FLW_SEQ_END);
             }
         } else if self.lookahead == i32::from(b'{') {
             if valid_symbols[R_FLW_MAP_BGN] && is_r {
                 self.may_upd_imp_col(bgn_row, bgn_col, has_tab_ind);
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, R_FLW_MAP_BGN);
+                return self.adv_end(lexer, R_FLW_MAP_BGN);
             }
             if valid_symbols[BR_FLW_MAP_BGN] && is_br {
                 self.may_upd_imp_col(bgn_row, bgn_col, has_tab_ind);
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, BR_FLW_MAP_BGN);
+                return self.adv_end(lexer, BR_FLW_MAP_BGN);
             }
             if valid_symbols[B_FLW_MAP_BGN] && is_b {
                 self.may_upd_imp_col(bgn_row, bgn_col, has_tab_ind);
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, B_FLW_MAP_BGN);
+                return self.adv_end(lexer, B_FLW_MAP_BGN);
             }
         } else if self.lookahead == i32::from(b'}') {
             if valid_symbols[R_FLW_MAP_END] && is_r {
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, R_FLW_MAP_END);
+                return self.adv_end(lexer, R_FLW_MAP_END);
             }
             if valid_symbols[BR_FLW_MAP_END] && is_br {
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, BR_FLW_MAP_END);
+                return self.adv_end(lexer, BR_FLW_MAP_END);
             }
             if valid_symbols[B_FLW_MAP_END] && is_b {
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, BR_FLW_MAP_END);
+                return self.adv_end(lexer, BR_FLW_MAP_END);
             }
         } else if self.lookahead == i32::from(b',') {
             if valid_symbols[R_FLW_SEP_BGN] && is_r {
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, R_FLW_SEP_BGN);
+                return self.adv_end(lexer, R_FLW_SEP_BGN);
             }
             if valid_symbols[BR_FLW_SEP_BGN] && is_br {
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, BR_FLW_SEP_BGN);
+                return self.adv_end(lexer, BR_FLW_SEP_BGN);
             }
         } else if self.lookahead == i32::from(b'"') {
             if valid_symbols[R_DQT_STR_BGN] && is_r {
                 self.may_upd_imp_col(bgn_row, bgn_col, has_tab_ind);
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, R_DQT_STR_BGN);
+                return self.adv_end(lexer, R_DQT_STR_BGN);
             }
             if valid_symbols[BR_DQT_STR_BGN] && is_br {
                 self.may_upd_imp_col(bgn_row, bgn_col, has_tab_ind);
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, BR_DQT_STR_BGN);
+                return self.adv_end(lexer, BR_DQT_STR_BGN);
             }
             if valid_symbols[B_DQT_STR_BGN] && is_b {
                 self.may_upd_imp_col(bgn_row, bgn_col, has_tab_ind);
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, B_DQT_STR_BGN);
+                return self.adv_end(lexer, B_DQT_STR_BGN);
             }
             if valid_symbols[R_DQT_STR_END] && is_r {
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, R_DQT_STR_END);
+                return self.adv_end(lexer, R_DQT_STR_END);
             }
             if valid_symbols[BR_DQT_STR_END] && is_br {
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, BR_DQT_STR_END);
+                return self.adv_end(lexer, BR_DQT_STR_END);
             }
         } else if self.lookahead == i32::from(b'\'') {
             if valid_symbols[R_SQT_STR_BGN] && is_r {
                 self.may_upd_imp_col(bgn_row, bgn_col, has_tab_ind);
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, R_SQT_STR_BGN);
+                return self.adv_end(lexer, R_SQT_STR_BGN);
             }
             if valid_symbols[BR_SQT_STR_BGN] && is_br {
                 self.may_upd_imp_col(bgn_row, bgn_col, has_tab_ind);
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, BR_SQT_STR_BGN);
+                return self.adv_end(lexer, BR_SQT_STR_BGN);
             }
             if valid_symbols[B_SQT_STR_BGN] && is_b {
                 self.may_upd_imp_col(bgn_row, bgn_col, has_tab_ind);
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, B_SQT_STR_BGN);
+                return self.adv_end(lexer, B_SQT_STR_BGN);
             }
             if valid_symbols[R_SQT_STR_END] && is_r {
                 self.adv(lexer);
                 if self.lookahead == i32::from(b'\'') {
-                    self.adv(lexer);
-                    self.mrk_end(lexer);
-                    return self.finish(lexer, R_SQT_ESC_SQT);
+                    return self.adv_end(lexer, R_SQT_ESC_SQT);
                 } else {
                     self.mrk_end(lexer);
                     return self.finish(lexer, R_SQT_STR_END);
@@ -1314,9 +1180,7 @@ impl ExternalScanner for Scanner {
             if valid_symbols[BR_SQT_STR_END] && is_br {
                 self.adv(lexer);
                 if self.lookahead == i32::from(b'\'') {
-                    self.adv(lexer);
-                    self.mrk_end(lexer);
-                    return self.finish(lexer, BR_SQT_ESC_SQT);
+                    return self.adv_end(lexer, BR_SQT_ESC_SQT);
                 } else {
                     self.mrk_end(lexer);
                     return self.finish(lexer, BR_SQT_STR_END);
@@ -1364,14 +1228,10 @@ impl ExternalScanner for Scanner {
             }
         } else if self.lookahead == i32::from(b':') {
             if valid_symbols[R_FLW_JSV_BGN] && is_r {
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, R_FLW_JSV_BGN);
+                return self.adv_end(lexer, R_FLW_JSV_BGN);
             }
             if valid_symbols[BR_FLW_JSV_BGN] && is_br {
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, BR_FLW_JSV_BGN);
+                return self.adv_end(lexer, BR_FLW_JSV_BGN);
             }
             let is_r_blk_val_bgn: bool = valid_symbols[R_BLK_VAL_BGN] && is_r;
             let is_br_blk_val_bgn: bool = valid_symbols[BR_BLK_VAL_BGN] && is_br;
@@ -1569,7 +1429,10 @@ impl ExternalScanner for Scanner {
                 if !is_plain_first {
                     return false;
                 }
-                self.sch_stt = advance_schema(self.sch_stt, self.cur_chr, &mut self.rlt_sch);
+                (self.sch_stt, self.rlt_sch) = INITIAL_SCHEMA
+                    .get(self.cur_chr as usize)
+                    .copied()
+                    .unwrap_or((SCH_STT_FRZ, ResultSchema::String));
             } else {
                 // no need to check the following cases:
                 // ..X
@@ -1677,13 +1540,13 @@ impl ExternalScanner for Scanner {
         let indents = &self.indents;
         let count = indents.len().min((capacity - size) / 4);
         let bytes = indents[..count].as_flattened();
-        copy_indent_bytes(&mut buffer[size..size + bytes.len()], bytes);
+        buffer[size..size + bytes.len()].copy_from_slice(bytes);
         size + bytes.len()
     }
 
     fn deserialize(&mut self, buffer: &[u8]) {
+        self.indents.clear();
         if buffer.is_empty() {
-            self.indents.clear();
             self.row = 0;
             self.col = 0;
             self.blk_imp_row = -1;
@@ -1701,7 +1564,8 @@ impl ExternalScanner for Scanner {
             self.blk_imp_row = values.next().unwrap();
             self.blk_imp_col = values.next().unwrap();
             self.blk_imp_tab = values.next().unwrap();
-            self.indents.restore(buffer[10..].as_chunks::<4>().0);
+            self.indents
+                .extend_from_slice(buffer[10..].as_chunks::<4>().0);
         }
     }
 }
@@ -1799,6 +1663,29 @@ pub(crate) fn create() -> Box<dyn ExternalScanner> {
     scanner.deserialize(&[]);
     Box::new(scanner)
 }
+
+// State zero starts with String and only recognizes these ASCII prefixes.
+// Other codepoints freeze immediately; subsequent states use the full DFA.
+const INITIAL_SCHEMA: [(i8, ResultSchema); 128] = {
+    let mut table = [(SCH_STT_FRZ, ResultSchema::String); 128];
+    table[b'.' as usize] = (6, ResultSchema::String);
+    table[b'0' as usize] = (37, ResultSchema::Int);
+    table[b'F' as usize] = (2, ResultSchema::String);
+    table[b'N' as usize] = (16, ResultSchema::String);
+    table[b'T' as usize] = (13, ResultSchema::String);
+    table[b'f' as usize] = (17, ResultSchema::String);
+    table[b'n' as usize] = (29, ResultSchema::String);
+    table[b't' as usize] = (26, ResultSchema::String);
+    table[b'~' as usize] = (35, ResultSchema::Null);
+    table[b'+' as usize] = (1, ResultSchema::String);
+    table[b'-' as usize] = (1, ResultSchema::String);
+    let mut c = b'1';
+    while c <= b'9' {
+        table[c as usize] = (38, ResultSchema::Int);
+        c += 1;
+    }
+    table
+};
 
 // This is the core schema's incremental DFA, not a post-token string parser:
 // trailing spaces, tabs, and schema freezing must be handled at the same points.
@@ -2300,7 +2187,7 @@ mod tests {
     }
 
     #[test]
-    fn lookahead_is_read_once_at_entry_and_after_each_advance() {
+    fn lookahead_is_read_once_per_observed_position() {
         let cases: &[(&str, &[usize], usize)] = &[
             ("- value", &[R_BLK_SEQ_BGN], R_BLK_SEQ_BGN),
             ("\r\n# comment", &[], COMMENT),
@@ -2327,7 +2214,12 @@ mod tests {
                 .iter()
                 .filter(|event| matches!(event, Event::Advance(..)))
                 .count();
-            assert_eq!(lexer.lookahead_calls.get(), advances + 1, "{input:?}");
+            let unused_final_lookahead = usize::from(expected == R_SQT_ESC_SQT);
+            assert_eq!(
+                lexer.lookahead_calls.get(),
+                advances + 1 - unused_final_lookahead,
+                "{input:?}"
+            );
         }
     }
 
@@ -2542,13 +2434,13 @@ mod tests {
         assert_eq!(length, 1022);
         let mut restored = scanner();
         restored.deserialize(&buffer[..length]);
-        let capacity = restored.indents.spill.capacity();
-        let allocation = restored.indents.spill.as_ptr();
+        let capacity = restored.indents.capacity();
+        let allocation = restored.indents.as_ptr();
         // Move between short/deep snapshots, and reset to the omitted root.
         for length in [10, 22, 1022, 14, 0, 18, 0, 1022] {
             restored.deserialize(&buffer[..length]);
-            assert_eq!(restored.indents.spill.capacity(), capacity);
-            assert_eq!(restored.indents.spill.as_ptr(), allocation);
+            assert_eq!(restored.indents.capacity(), capacity);
+            assert_eq!(restored.indents.as_ptr(), allocation);
             let mut roundtrip = [0; SERIALIZATION_BUFFER_SIZE];
             let written = restored.serialize(&mut roundtrip);
             if length == 0 {
@@ -2575,13 +2467,13 @@ mod tests {
             assert_eq!(scanner.current_indent(), root);
             assert!(!scanner.pop_ind());
             assert!(scanner.indents.is_empty());
-            assert_eq!(scanner.indents.spill.capacity(), 0);
+            assert_eq!(scanner.indents.capacity(), 0);
             let mut lexer = TestLexer::new("rootless scalar");
             assert!(scanner.scan(&mut lexer, &valid(&[R_SGL_PLN_STR_BLK])));
             assert_eq!(scanner.serialize(&mut snapshot), 10);
             scanner.deserialize(&snapshot[..10]);
             assert_eq!(scanner.current_indent(), root);
-            assert_eq!(scanner.indents.spill.capacity(), 0);
+            assert_eq!(scanner.indents.capacity(), 0);
             scanner.deserialize(&[]);
         }
         scanner.push_ind(IND_MAP, 0);
@@ -3045,57 +2937,60 @@ mod tests {
     }
 
     #[test]
-    fn inline_indent_prefix_survives_spill_restore_and_pop() {
-        let mut indents = Indents::default();
-        let mut reference = Vec::new();
-        for depth in [0, 1, 15, 16, 17, 40, 16, 2, 60, 0] {
-            reference.clear();
-            for i in 0..depth {
-                reference.push(
-                    Indent {
-                        kind: IND_MAP,
-                        length: (i * 3 + depth) as i16,
-                    }
-                    .to_bytes(),
-                );
-            }
-            indents.restore(&reference);
-            assert_eq!(&indents[..], reference.as_slice());
-            for i in 0..20 {
-                let entry = Indent {
-                    kind: IND_SEQ,
-                    length: i,
-                }
-                .to_bytes();
-                indents.push(entry);
-                reference.push(entry);
-                assert_eq!(&indents[..], reference.as_slice());
-            }
-            while !reference.is_empty() {
-                assert_eq!(indents.pop(), reference.pop());
-                assert_eq!(&indents[..], reference.as_slice());
-            }
-            assert_eq!(indents.pop(), None);
+    fn initial_schema_table_matches_dfa_for_every_codepoint() {
+        for c in -1..=0x10ffff {
+            let actual = INITIAL_SCHEMA
+                .get(c as usize)
+                .copied()
+                .unwrap_or((SCH_STT_FRZ, ResultSchema::String));
+            let mut expected = ResultSchema::String;
+            let next = advance_schema_dfa(0, c, &mut expected);
+            assert_eq!(actual, (next, expected), "codepoint {c:#x}");
         }
     }
 
     #[test]
-    fn shallow_indents_need_no_spill_allocation() {
-        let mut indents = Indents::default();
-        for i in 0..16 {
-            indents.push(
-                Indent {
-                    kind: IND_MAP,
-                    length: i,
-                }
-                .to_bytes(),
-            );
-            assert_eq!(indents.spill.capacity(), 0);
+    fn final_advance_preserves_events_coordinates_and_snapshot() {
+        for col in [0, 10, i16::MIN, i16::MAX] {
+            for input in ["[next", "}suffix", "'", "éx"] {
+                let mut fast = scanner();
+                let mut reference = scanner();
+                fast.col = col;
+                reference.col = col;
+                fast.init();
+                reference.init();
+                let mut fast_lexer = TestLexer::new(input);
+                let mut reference_lexer = TestLexer::new(input);
+                fast.lookahead = fast_lexer.lookahead();
+                reference.lookahead = reference_lexer.lookahead();
+                assert!(fast.adv_end(&mut fast_lexer, R_FLW_SEQ_BGN));
+                reference.adv(&mut reference_lexer);
+                reference.mrk_end(&mut reference_lexer);
+                assert!(reference.finish(&mut reference_lexer, R_FLW_SEQ_BGN));
+                assert_eq!(fast_lexer.events, reference_lexer.events);
+                assert_eq!(
+                    (fast.cur_row, fast.cur_col, fast.cur_chr),
+                    (reference.cur_row, reference.cur_col, reference.cur_chr)
+                );
+                assert_eq!(fast_lexer.lookahead_calls.get(), 1);
+                assert_eq!(reference_lexer.lookahead_calls.get(), 2);
+                let mut fast_snapshot = [0; SERIALIZATION_BUFFER_SIZE];
+                let mut reference_snapshot = [0; SERIALIZATION_BUFFER_SIZE];
+                assert_eq!(
+                    fast.serialize(&mut fast_snapshot),
+                    reference.serialize(&mut reference_snapshot)
+                );
+                assert_eq!(fast_snapshot, reference_snapshot);
+
+                // A stale cache from the terminal advance must not reach the
+                // next scan, even when a parser restores the same snapshot.
+                fast.deserialize(&fast_snapshot[..10]);
+                let mut next = TestLexer::new("]");
+                assert!(fast.scan(&mut next, &valid(&[R_FLW_SEQ_END])));
+                assert_eq!(next.symbol, R_FLW_SEQ_END as u16);
+                assert_eq!(next.end, 1);
+                assert_eq!(next.lookahead_calls.get(), 1);
+            }
         }
-        let snapshot: Vec<_> = indents.iter().copied().collect();
-        indents.clear();
-        indents.restore(&snapshot);
-        assert_eq!(indents.spill.capacity(), 0);
-        assert_eq!(&indents[..], snapshot.as_slice());
     }
 }
