@@ -159,3 +159,19 @@ After the workflow resumed at `3b7de19`, the deferred checks were completed:
 The bucket has no remaining failure in this checkout, and no verification work
 remains deferred. This update records verification only and introduces no C
 deviations or runtime/scanner changes.
+
+## Revalidation at `ef23768`
+
+Bucket `6c68c51b` is already fixed on this merged baseline: **7/7 inputs pass**.
+The current C scanner uses `ts_calloc` and resets both state fields on an invalid
+or empty snapshot; Rust's zero default and whole-state reset match it. The
+existing command-recovery tests cover the reported malformed variables and
+multiline commands, including parser reuse and one-byte input chunks.
+
+Fresh verification passed all **270 gate inputs** (including seven incremental
+checks), **9878 fresh CMake inputs**, `cargo check --workspace --all-targets`,
+`cargo test -p ts_port -p ts_port_cmake` (212 runtime unit tests, all integration
+and doc tests, and 24 CMake tests), and targeted all-targets clippy with
+`-D warnings`. Workspace checking reports only the existing warning in the
+host-owned YAML lexer. No further behavior change, C deviation, or duplicate
+regression test was needed; this commit records the completed verification.
