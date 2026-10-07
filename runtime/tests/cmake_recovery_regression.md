@@ -152,7 +152,7 @@ changes only the verification record, not scanner or runtime behavior.
 
 ## Empty recovery-content bucket `f5e2762e`
 
-Reverified at `4977a30`: all 16 reported inputs already pass. The merged scanner
+Reverified at `a08dab1`: all 16 reported inputs already pass. The merged scanner
 initialization/reset correction above allows `bracket_argument_content` at EOF
 without an opener, including after `a` and after skipping the newline in `if(\n`.
 This zero-width token is a real scanner token, not an inserted missing node.
@@ -164,9 +164,12 @@ both with fresh scanners and after parsing bracket arguments/comments. Scanner
 unit tests additionally check the EOF callback order and snapshot reset behavior.
 The existing parser-level whitespace cases also cover CRLF, lone CR, spaces/tabs,
 and multiple newlines, asserting exact EOF byte and point ranges after skipping
-that whitespace with both fresh and reused scanners. Both integration tests run
+that whitespace with both fresh and reused scanners. All three integration tests run
 with whole-source and byte-at-a-time input callbacks, covering whitespace and
 CRLF split across chunks without changing the zero-width token's EOF position.
+The block/while cases additionally verify that a complete header remains a sibling
+of the empty recovery content when its terminating command is missing. Tree
+cursor assertions confirm that the empty token remains traversable at EOF.
 
 Checks rerun for this bucket:
 
@@ -176,7 +179,7 @@ Checks rerun for this bucket:
 - `cargo check --workspace --all-targets`: passes with the pre-existing warning
   in host-owned `grammars/yaml/src/lex.rs:20` noted above.
 - `cargo test -p ts_port_cmake`: 24 tests pass.
-- `cargo test -p ts_port --test cmake_empty_recovery_content`: 2 tests pass.
+- `cargo test -p ts_port --test cmake_empty_recovery_content`: 3 tests pass.
 - `cargo clippy -p ts_port_cmake -p ts_port --all-targets -- -D warnings`: passes.
 
 This follow-up only updates the verification record: the implementation and
