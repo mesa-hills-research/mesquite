@@ -1,41 +1,52 @@
-# Final committed-pop optimization
+# C++ performance investigation — final disposition
 
-Baseline: main `4a40c35`. Earlier cache and direct-reduction experiments on this
-branch were superseded by equivalent main changes; those historical gains are
-not claimed as additional gains here.
+**No additional qualifying performance change remains on this branch.** All
+production runtime sources match main `298df50`. The remaining differences are
+this report and a regression test exercising colliding parse-table cache entries,
+cached zero transitions, and clearing the cache before switching grammars.
 
-## Final changes
+## Historical improvements, now superseded
 
-- For a committed one-symbol pop, a unique top node with one non-extra edge can
-  transfer that edge immediately. It needs no second ownership/predecessor walk.
-  Null links produce an empty child Vec; ordinary tokens produce one owned child.
-  Leading extras, larger reductions, sharing, and branching keep the existing
-  preflight/general paths. Free-list order, head metadata, and refcounts remain
-  unchanged.
-- Ordinary `#[inline]` hints expose the small committed reduction, in-place pop,
-  push, and node-construction paths to call-site optimization. No forced inlining,
-  unsafe code, or host-owned changes are used.
+Earlier versions of this branch measured improvements from compressed-table
+memoization, direct completion of committed reductions, and a specialized
+one-child committed pop with ordinary inlining hints. Equivalent optimizations
+entered main independently before final acceptance. Their historical gains must
+not be counted as gains over current main.
 
-## Final pinned measurements
+In particular, the previous report's 2.24% improvement compared against main
+`4a40c35`, not current main. The subsequent host measurement found only 1.0%
+additional improvement, below the required 1.9% noise threshold. This report
+replaces that stale claim.
 
-Three runs against main's overall port/C **0.939**:
+## Follow-up experiments
 
-| | Run 1 | Run 2 | Run 3 | Median |
-|---|---:|---:|---:|---:|
-| Overall port/C | 0.918 | 0.921 | 0.917 | **0.918** |
-| C++ port/C | 0.96 | 0.97 | 0.97 | **0.97** |
+The current C++ profile still showed substantial time in stack pushes (~7.5%),
+general count pops (~5.3%), and subtree construction. Experiments included:
 
-Median overall improvement is approximately **2.24%**, beyond the reported
-**1.9%** noise threshold. C++ improves from main's 0.99 to 0.97. No language's
-median regresses; all nine language medians and the geometric mean are below C.
+- Constructing complete stack-node records from local summaries rather than
+  updating partially initialized records.
+- Storing one-child reduction children inline in the heap header, avoiding the
+  separate child-buffer allocation on the committed one-child path.
+- Caching decoded action slices in addition to compact-table values.
+- Combining stack state/link-count fields into one integer to change record-copy
+  code generation.
+- Specializing zero/one-child general pops without changing speculative ownership.
+- Deferring byte-column updates until the lexer's position is observed.
+
+None demonstrated a gain beyond the acceptance threshold; all were reverted.
+Representative single-run overall port/C measurements for the last four
+experiments were 0.905, 0.896, 0.898, and 0.901 respectively, against current main's
+0.895. These are screening measurements, not three-run acceptance medians.
+
+Main's latest reported C++ port/C is 0.93 and its overall geometric mean is 0.895,
+already below the task's original 1.00 goal. **No incremental gain is claimed for
+this final branch; it should not be accepted as a new performance optimization.**
 
 ## Final validation
 
-- **4,712/4,712** oracle gate inputs match, with incremental seed 7 and queries on.
-- **189** runtime unit tests pass; clippy is clean.
-- Added focused coverage of null and visible one-edge pops, including predecessor
-  ownership and free-list order. Existing tests cover extras, shared/branching
-  fallback, missing/error paths, zero-count pops, metadata, and scratch reuse.
-
-Full kernel/fresh reference checks also passed on the preceding direct-reduction
-revision, but must be rerun by the host for final acceptance of this revision.
+- Production runtime sources match main `298df50` exactly.
+- All 191 runtime unit tests pass.
+- `cargo clippy -p ts_port --all-targets --quiet` is clean.
+- No unsafe code or host-owned files were changed.
+- Prior optimized revisions passed the differential gate, but those results are
+  historical. No unvalidated experimental production changes remain.
