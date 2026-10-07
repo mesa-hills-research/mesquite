@@ -424,21 +424,32 @@ mod tests {
 
     #[test]
     fn fresh_and_reset_scanners_emit_zero_width_content_at_eof() {
-        let mut scanner = create();
-        for reset in [false, true] {
-            if reset {
-                // The previous scan changed token to CONTENT; resetting must
-                // allow the same zero-width recovery token to be emitted again.
-                scanner.deserialize(&[]);
+        // Unterminated calls can enter recovery either at EOF or before trailing
+        // whitespace. Whitespace is skipped, not included in the empty token.
+        for input in ["", "\n", " \t\r\n"] {
+            let mut scanner = create();
+            for reset in [false, true] {
+                if reset {
+                    // The previous scan changed token to CONTENT; resetting must
+                    // allow the same zero-width recovery token to be emitted again.
+                    scanner.deserialize(&[]);
+                }
+                let mut lexer = TestLexer::new(input);
+                assert!(scanner.scan(&mut lexer, &[true; 7]));
+                assert_eq!(lexer.position, input.len());
+                assert_eq!(lexer.end, None);
+                let mut expected: Vec<_> = (0..input.len())
+                    .map(|position| Event::Advance(position, true))
+                    .collect();
+                expected.push(Event::Symbol(BRACKET_ARGUMENT_CONTENT as u16));
+                assert_eq!(lexer.events, expected);
+
+                // Without a reset, CONTENT is not an opener and must not emit
+                // another zero-width token at the same EOF position.
+                lexer.events.clear();
+                assert!(!scanner.scan(&mut lexer, &[true; 7]));
+                assert!(lexer.events.is_empty());
             }
-            let mut lexer = TestLexer::new("");
-            assert!(scanner.scan(&mut lexer, &[true; 7]));
-            assert_eq!(lexer.position, 0);
-            assert_eq!(lexer.end, None);
-            assert_eq!(
-                lexer.events,
-                [Event::Symbol(BRACKET_ARGUMENT_CONTENT as u16)]
-            );
         }
     }
 
