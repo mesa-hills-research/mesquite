@@ -6,8 +6,8 @@ an exposed `(` in the port, around byte 3335 in a malformed quoted variable
 reference.
 
 The bucket already passed at revision `9b5a105` and was reverified after the
-merged fixes at `c99a0a2` and `eb15bda`. The scanner initialization/reset correction
-is already merged; no additional runtime or scanner behavior change is needed.
+merged fixes through `b21cac4`. The scanner initialization/reset correction is
+already merged; no additional runtime or scanner behavior change is needed.
 
 ## Root cause and existing correction
 
@@ -28,7 +28,7 @@ the same recovery scenario as `${CMAKE_ CURRENT_SOURCE_DIR}` in this bucket.
 
 ## Verification
 
-All checks below were rerun at `eb15bda`.
+All checks below were rerun at `b21cac4`.
 
 - `run_oracle(inputs = "bucket:4d6cc948")`: 1/1 passes; incremental off,
   queries on.
@@ -42,6 +42,8 @@ All checks below were rerun at `eb15bda`.
 - `cargo test -p ts_port_cmake`: 24 tests pass.
 - `cargo test -p ts_port --test cmake_malformed_closer`: 1 test passes,
   covering recovery tree structure with fresh and reused scanners.
+- `cargo test -p ts_port --test cmake_command_recovery`: 1 test passes,
+  covering malformed variable references with fresh and reused scanners.
 - `cargo clippy -p ts_port_cmake --all-targets -- -D warnings`: passes.
 
 This follow-up changes only this verification note; it introduces no deviation

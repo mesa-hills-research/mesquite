@@ -45,3 +45,15 @@ All checks were rerun for this task with the correction already merged:
 
 This follow-up adds parser-level regression coverage: no deviations from C, no
 unsafe code, and no host-owned generated files changed.
+
+## Reverification after merge `6a25441`
+
+On reassignment of bucket `548436bf`, its four inputs already passed before any
+changes. Rechecked the current read-only C scanner against Rust: zero-initialized
+creation and resetting both fields on invalid-length deserialization still match.
+Reran every verification command above on this merged baseline: bucket 4/4,
+CMake gate 270/270, fresh CMake 9,878/9,878, all 24 scanner tests and the parser BOM
+regression pass. Workspace all-target checking and both targeted strict clippy
+commands also pass, with only the unchanged generated YAML warning during the
+workspace check. No further behavior change or duplicate regression is needed;
+this reassignment records verification of the already committed correction.
