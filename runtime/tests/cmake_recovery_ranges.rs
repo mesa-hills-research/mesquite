@@ -36,63 +36,70 @@ Available commands:
                 assert!(!tree.root_node().has_error());
             }
 
-            let mut progress_calls = 0;
-            let mut progress = |_: &ParseState| {
-                progress_calls += 1;
-                false
-            };
-            let mut read = |byte: usize, _: Point| &source.as_bytes()[byte.min(source.len())..];
-            let options = ParseOptions::new().progress_callback(&mut progress);
-            let tree = parser
-                .parse_with_options(&mut read, None, Some(options))
-                .unwrap();
-            assert_eq!(progress_calls, 0);
-
-            let root = tree.root_node();
-            assert_eq!(root.kind(), "source_file");
-            assert_eq!(root.byte_range(), 0..source.len());
-            assert_eq!(root.start_position(), Point::new(0, 0));
-            assert_eq!(root.end_position(), Point::new(end_row, 0));
-            assert!(root.has_error());
-            assert_eq!(root.child_count(), 1);
-            assert_eq!(root.named_child_count(), 1);
-
-            let error = root.child(0).unwrap();
-            assert!(error.is_error());
-            assert!(error.is_named());
-            assert!(error.is_extra());
-            assert!(!error.is_missing());
-            assert!(error.has_error());
-            assert_eq!(error.range(), root.range());
-            let content_index = usize::from(content_start != 0);
-            assert_eq!(error.child_count(), content_index + 1);
-            assert_eq!(error.named_child_count(), content_index + 1);
-
-            let expected = [
-                ("identifier", 35, 0..content_start),
-                ("bracket_argument_content", 37, content_start..source.len()),
-            ];
-            for (index, (kind, kind_id, range)) in
-                expected.into_iter().skip(1 - content_index).enumerate()
-            {
-                let child = error.child(index).unwrap();
-                assert_eq!(child.kind(), kind);
-                assert_eq!(child.kind_id(), kind_id);
-                assert_eq!(child.byte_range(), range);
-                assert_eq!(child.start_position(), Point::new(0, range.start));
-                let end = if range.end == source.len() {
-                    Point::new(end_row, 0)
-                } else {
-                    Point::new(0, range.end)
+            // The content token spans newlines and may cross many input chunks.
+            // Reparse on the same scanner as well as testing the fresh state.
+            for chunk_size in [source.len(), 1] {
+                let mut progress_calls = 0;
+                let mut progress = |_: &ParseState| {
+                    progress_calls += 1;
+                    false
                 };
-                assert_eq!(child.end_position(), end);
-                assert!(child.is_named());
-                assert!(!child.is_extra());
-                assert!(!child.is_missing());
-                assert!(!child.is_error());
-                assert!(!child.has_error());
-                assert_eq!(child.child_count(), 0);
-                assert_eq!(error.named_child(index), Some(child));
+                let mut read = |byte: usize, _: Point| {
+                    let start = byte.min(source.len());
+                    &source.as_bytes()[start..(start + chunk_size).min(source.len())]
+                };
+                let options = ParseOptions::new().progress_callback(&mut progress);
+                let tree = parser
+                    .parse_with_options(&mut read, None, Some(options))
+                    .unwrap();
+                assert_eq!(progress_calls, 0);
+
+                let root = tree.root_node();
+                assert_eq!(root.kind(), "source_file");
+                assert_eq!(root.byte_range(), 0..source.len());
+                assert_eq!(root.start_position(), Point::new(0, 0));
+                assert_eq!(root.end_position(), Point::new(end_row, 0));
+                assert!(root.has_error());
+                assert_eq!(root.child_count(), 1);
+                assert_eq!(root.named_child_count(), 1);
+
+                let error = root.child(0).unwrap();
+                assert!(error.is_error());
+                assert!(error.is_named());
+                assert!(error.is_extra());
+                assert!(!error.is_missing());
+                assert!(error.has_error());
+                assert_eq!(error.range(), root.range());
+                let content_index = usize::from(content_start != 0);
+                assert_eq!(error.child_count(), content_index + 1);
+                assert_eq!(error.named_child_count(), content_index + 1);
+
+                let expected = [
+                    ("identifier", 35, 0..content_start),
+                    ("bracket_argument_content", 37, content_start..source.len()),
+                ];
+                for (index, (kind, kind_id, range)) in
+                    expected.into_iter().skip(1 - content_index).enumerate()
+                {
+                    let child = error.child(index).unwrap();
+                    assert_eq!(child.kind(), kind);
+                    assert_eq!(child.kind_id(), kind_id);
+                    assert_eq!(child.byte_range(), range);
+                    assert_eq!(child.start_position(), Point::new(0, range.start));
+                    let end = if range.end == source.len() {
+                        Point::new(end_row, 0)
+                    } else {
+                        Point::new(0, range.end)
+                    };
+                    assert_eq!(child.end_position(), end);
+                    assert!(child.is_named());
+                    assert!(!child.is_extra());
+                    assert!(!child.is_missing());
+                    assert!(!child.is_error());
+                    assert!(!child.has_error());
+                    assert_eq!(child.child_count(), 0);
+                    assert_eq!(error.named_child(index), Some(child));
+                }
             }
         }
     }
