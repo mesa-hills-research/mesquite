@@ -1,0 +1,9 @@
+[package]
+name = "ts_port"
+version = "0.25.10"
+edition = "2024"
+license = "MIT"
+description = "An idiomatic Rust port of the tree-sitter 0.25.10 runtime."
+
+[dependencies]
+ts_port_tables = { path = "../tables" }

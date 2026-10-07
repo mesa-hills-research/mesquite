@@ -1,0 +1,19 @@
+# Written by the ts_port host; agents don't change it.
+[workspace]
+resolver = "3"
+members = [
+    "tables",
+    "runtime",
+    "grammars/c",
+    "grammars/cpp",
+    "grammars/go",
+    "grammars/java",
+    "grammars/javascript",
+    "grammars/python",
+    "grammars/rust",
+    "grammars/typescript",
+    "grammars/tsx",
+]
+
+[profile.release]
+debug = "line-tables-only"
