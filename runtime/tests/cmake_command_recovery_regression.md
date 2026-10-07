@@ -3,10 +3,11 @@
 The seven reported fresh-CMake inputs had an `ERROR` child of `source_file` in
 C, but a `normal_command` in the port. The smallest was
 `Tests/RunCMake/Syntax/UnterminatedBrace1.cmake` (`set(var "${")`, followed by a
-newline). The bucket already passes at this worktree's starting revision,
-`8fbaaf9`; no additional runtime or scanner behavior change is needed.
+newline). The bucket already passed at the original verification revision,
+`8fbaaf9`, and still passes at the current starting revision, `58ff8c2`; no
+additional runtime or scanner behavior change is needed.
 
-## Revalidation at `e42ccca`
+## Latest revalidation at `58ff8c2`
 
 The assigned bucket still passes on the starting checkout: **7/7 bucket**,
 **270/270 gate** (including incremental/query checks), and **9878/9878 fresh**
@@ -47,8 +48,9 @@ delimiter levels, callback order, and native-endian snapshot round trips.
   - **9878/9878 fresh inputs pass**, with queries enabled.
 - `cargo check --workspace --all-targets`: passes. The existing unused-assignment
   warning in host-owned `grammars/yaml/src/lex.rs:20` is unrelated and unchanged.
-- `cargo test -p ts_port_cmake`: **20 tests pass**.
-- `cargo clippy -p ts_port_cmake --all-targets -- -D warnings`: passes.
+- `cargo test -p ts_port_cmake`: **24 tests pass**.
+- `cargo test -p ts_port --test cmake_command_recovery`: **2 tests pass**.
+- `cargo clippy -p ts_port_cmake -p ts_port --all-targets -- -D warnings`: passes.
 
 This verification adds no runtime changes, deviations from C, or unsafe code.
 
