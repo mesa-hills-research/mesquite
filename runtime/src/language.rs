@@ -40,6 +40,111 @@ pub(crate) struct TableEntry {
     pub actions: &'static [ParseActionEntry],
     pub is_reusable: bool,
 }
+const PARSE_TABLE_CACHE_SIZE: usize = 4096;
+
+/// Parser-local memoization of immutable compact parse-table entries. Cache
+/// collisions only trigger the original lookup, and changing grammars clears it.
+/// Interior mutability lets independent parser operations borrow the cache along
+/// with stack/token state; the parser remains Send without locks or atomics.
+pub(crate) struct ParseTableCache {
+    entries: Box<[std::cell::Cell<u64>; PARSE_TABLE_CACHE_SIZE]>,
+}
+
+impl Default for ParseTableCache {
+    fn default() -> Self {
+        Self {
+            entries: Box::new(std::array::from_fn(|_| std::cell::Cell::new(0))),
+        }
+    }
+}
+
+impl ParseTableCache {
+    pub fn clear(&mut self) {
+        for entry in self.entries.iter_mut() {
+            *entry.get_mut() = 0;
+        }
+    }
+
+    #[inline]
+    pub fn lookup(&self, language: &Language, state: StateId, symbol: Symbol) -> u16 {
+        // Dense states are already a single indexed load.
+        if u32::from(state) < language.tables.large_state_count {
+            return language.tables.parse_table
+                [state as usize * language.tables.symbol_count as usize + symbol as usize];
+        }
+        // The extra tag bit distinguishes cached zero values from empty slots.
+        let key = (1u64 << 32) | (u64::from(state) << 16) | u64::from(symbol);
+        let entry =
+            &self.entries[(state as usize * 31 + symbol as usize) & (PARSE_TABLE_CACHE_SIZE - 1)];
+        let cached = entry.get();
+        if cached >> 16 == key {
+            return cached as u16;
+        }
+        let value = ts_language_lookup(language, state, symbol);
+        entry.set((key << 16) | u64::from(value));
+        value
+    }
+
+    #[inline]
+    pub fn table_entry(&self, language: &Language, state: StateId, symbol: Symbol) -> TableEntry {
+        if symbol == BUILTIN_SYM_ERROR || symbol == BUILTIN_SYM_ERROR_REPEAT {
+            TableEntry::default()
+        } else {
+            ts_assert!(u32::from(symbol) < language.tables.token_count);
+            let index = self.lookup(language, state, symbol);
+            let (is_reusable, actions) = language.tables.action_list(index as usize);
+            TableEntry {
+                actions,
+                is_reusable,
+            }
+        }
+    }
+
+    #[inline]
+    pub fn next_state(&self, language: &Language, state: StateId, symbol: Symbol) -> StateId {
+        if symbol == BUILTIN_SYM_ERROR || symbol == BUILTIN_SYM_ERROR_REPEAT {
+            0
+        } else if u32::from(symbol) < language.tables.token_count {
+            match self.table_entry(language, state, symbol).actions.last() {
+                Some(ParseActionEntry::Action(ParseAction::Shift {
+                    state: next_state,
+                    extra,
+                    ..
+                })) => {
+                    if *extra {
+                        state
+                    } else {
+                        *next_state
+                    }
+                }
+                _ => 0,
+            }
+        } else {
+            self.lookup(language, state, symbol)
+        }
+    }
+
+    pub fn has_actions(&self, language: &Language, state: StateId, symbol: Symbol) -> bool {
+        self.lookup(language, state, symbol) != 0
+    }
+
+    pub fn actions(
+        &self,
+        language: &Language,
+        state: StateId,
+        symbol: Symbol,
+    ) -> &'static [ParseActionEntry] {
+        self.table_entry(language, state, symbol).actions
+    }
+
+    pub fn has_reduce_action(&self, language: &Language, state: StateId, symbol: Symbol) -> bool {
+        matches!(
+            self.actions(language, state, symbol).first(),
+            Some(ParseActionEntry::Action(ParseAction::Reduce { .. }))
+        )
+    }
+}
+
 /// Internal lookaheads are needed by error recovery. No public iterator API.
 #[derive(Clone, Debug)]
 pub(crate) struct LookaheadIterator {
