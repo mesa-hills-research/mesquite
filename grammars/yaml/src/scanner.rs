@@ -171,6 +171,18 @@ impl Scanner {
         self.lookahead = lexer.lookahead();
     }
 
+    // No scanner code observes lookahead after these final advances. Do not
+    // refresh the scan-local cache just before returning; scan() refreshes it
+    // on entry, including after a parser rewind or state restoration.
+    #[inline(always)]
+    fn adv_end(&mut self, lexer: &mut dyn Lexer, symbol: usize) -> bool {
+        self.cur_col = self.cur_col.wrapping_add(1);
+        self.cur_chr = self.lookahead;
+        lexer.advance(false);
+        self.mrk_end(lexer);
+        self.finish(lexer, symbol)
+    }
+
     fn adv_nwl(&mut self, lexer: &mut dyn Lexer) {
         self.cur_row = self.cur_row.wrapping_add(1);
         self.cur_col = 0;
@@ -247,6 +259,7 @@ impl Scanner {
         true
     }
 
+    #[inline(always)]
     fn current_indent(&self) -> Indent {
         self.indents.last().copied().map_or(
             Indent {
@@ -261,6 +274,7 @@ impl Scanner {
         self.indents.pop().is_some()
     }
 
+    #[inline(always)]
     fn push_ind(&mut self, kind: i16, length: i16) {
         self.indents.push(Indent { kind, length }.to_bytes());
     }
@@ -275,6 +289,7 @@ impl Scanner {
 
     // Each schema has five positional/contextual variants, with timestamp slots
     // reserved between float and string even though the core schema has no timestamps.
+    #[inline(always)]
     fn plain_symbol(&self, position: usize) -> usize {
         let base = match self.rlt_sch {
             ResultSchema::Null => R_SGL_PLN_NUL_BLK,
@@ -628,14 +643,73 @@ impl Scanner {
         self.finish(lexer, result_symbol)
     }
 
-    // Select the context once: block scalars only need the character-range
-    // test, whereas flow scalars must also exclude collection delimiters.
+    // Select the context once: only flow scalars exclude collection delimiters
+    // from their content runs.
     fn scn_pln_cnt(&mut self, lexer: &mut dyn Lexer, is_in_blk: bool) -> ScanResult {
+        if self.sch_stt == SCH_STT_FRZ && self.rlt_sch == ResultSchema::String {
+            return if is_in_blk {
+                self.scn_pln_string::<true>(lexer)
+            } else {
+                self.scn_pln_string::<false>(lexer)
+            };
+        }
         if is_in_blk {
             self.scn_pln_cnt_impl::<true>(lexer)
         } else {
             self.scn_pln_cnt_impl::<false>(lexer)
         }
+    }
+
+    // A frozen string has no more schema transitions. Classify content with a
+    // compact ASCII role table; only run boundaries need the outer dispatch.
+    // Do not keep a role live across mark_end: leave registers for the lexer
+    // and coordinates in the content run instead.
+    #[inline(never)]
+    fn scn_pln_string<const BLOCK: bool>(&mut self, lexer: &mut dyn Lexer) -> ScanResult {
+        if plain_kind::<BLOCK>(self.lookahead) == 0 {
+            return ScanResult::Stop;
+        }
+        let mut previous_safe =
+            self.lookahead != i32::from(b'#') || plain_kind::<BLOCK>(self.cur_chr) >= 2;
+        loop {
+            match plain_kind::<BLOCK>(self.lookahead) {
+                0 => break,
+                1 => {
+                    self.adv(lexer);
+                    previous_safe = false;
+                }
+                2 => {
+                    self.adv(lexer);
+                    if plain_kind::<BLOCK>(self.lookahead) < 2 {
+                        return ScanResult::Fail;
+                    }
+                    self.mrk_end(lexer);
+                    previous_safe = true;
+                }
+                3 if !previous_safe => break,
+                _ => {
+                    let mut c = self.lookahead;
+                    let mut col = self.cur_col;
+                    loop {
+                        col = col.wrapping_add(1);
+                        lexer.advance(false);
+                        let next = lexer.lookahead();
+                        // Inside a run, only the stop/content distinction matters.
+                        // Block mode uses a range check instead of an ASCII-table load.
+                        if !is_plain_run(next, BLOCK) {
+                            self.cur_col = col;
+                            self.cur_chr = c;
+                            self.lookahead = next;
+                            break;
+                        }
+                        c = next;
+                    }
+                    self.mrk_end(lexer);
+                    previous_safe = true;
+                }
+            }
+        }
+        ScanResult::Success
     }
 
     // Keep this character loop separate from the large token dispatcher so
@@ -671,25 +745,11 @@ impl Scanner {
                     }
                     loop {
                         if self.sch_stt == SCH_STT_FRZ {
-                            // Content cannot be a schema terminator. Once frozen,
-                            // this entire run is a string, even if the preceding
-                            // whitespace froze a typed scalar.
+                            // Ordinary content cannot be a schema terminator.
+                            // It makes a frozen typed scalar a string, too, so
+                            // hand the remaining content to the schema-free loop.
                             self.rlt_sch = ResultSchema::String;
-                            let mut c = self.lookahead;
-                            let mut col = self.cur_col;
-                            loop {
-                                col = col.wrapping_add(1);
-                                lexer.advance(false);
-                                let next = lexer.lookahead();
-                                if !is_plain_run(next, is_in_blk) {
-                                    self.cur_col = col;
-                                    self.cur_chr = c;
-                                    self.lookahead = next;
-                                    break;
-                                }
-                                c = next;
-                            }
-                            break;
+                            return self.scn_pln_string::<IS_IN_BLK>(lexer);
                         }
                         self.adv(lexer);
                         self.sch_stt =
@@ -799,6 +859,44 @@ fn is_c_flow_indicator(c: i32) -> bool {
         || c == i32::from(b'}')
 }
 
+// 0: stop; 1: whitespace; 2: speculative colon; 3: hash; 4: content.
+const PLAIN_KINDS: [[u8; 128]; 2] = {
+    let mut tables = [[0; 128]; 2];
+    let mut c = 0x21;
+    while c <= 0x7e {
+        let kind = if c == b':' as usize {
+            2
+        } else if c == b'#' as usize {
+            3
+        } else {
+            4
+        };
+        tables[1][c] = kind;
+        tables[0][c] = if matches!(c, 0x2c | 0x5b | 0x5d | 0x7b | 0x7d) {
+            0
+        } else {
+            kind
+        };
+        c += 1;
+    }
+    tables[0][b' ' as usize] = 1;
+    tables[0][b'\t' as usize] = 1;
+    tables[1][b' ' as usize] = 1;
+    tables[1][b'\t' as usize] = 1;
+    tables
+};
+
+#[inline(always)]
+fn plain_kind<const BLOCK: bool>(c: i32) -> u8 {
+    if let Some(&kind) = PLAIN_KINDS[BLOCK as usize].get(c as usize) {
+        kind
+    } else if is_non_ascii_ns_char(c) {
+        4
+    } else {
+        0
+    }
+}
+
 const ASCII_PLAIN_SAFE: [u8; 128] = {
     let mut table = [0; 128];
     let mut c = 0x21;
@@ -818,6 +916,7 @@ const ASCII_PLAIN_SAFE: [u8; 128] = {
     table
 };
 
+#[inline(always)]
 fn is_plain_run(c: i32, is_in_blk: bool) -> bool {
     if is_in_blk {
         return is_ns_char(c) && c != i32::from(b':');
@@ -829,6 +928,7 @@ fn is_plain_run(c: i32, is_in_blk: bool) -> bool {
     }
 }
 
+#[inline(always)]
 fn is_plain_safe(c: i32, is_in_blk: bool) -> bool {
     if is_in_blk {
         return is_ns_char(c);
@@ -909,21 +1009,16 @@ impl ExternalScanner for Scanner {
             (false, 0)
         };
 
-        let allow_comment: bool = !(valid_symbols[R_DQT_STR_CTN]
-            || valid_symbols[BR_DQT_STR_CTN]
-            || valid_symbols[R_SQT_STR_CTN]
-            || valid_symbols[BR_SQT_STR_CTN]);
         let current = self.current_indent();
         let cur_ind = current.length;
-        let prt_ind = self
-            .indents
-            .iter()
-            .rev()
-            .nth(1)
-            .map_or(-1, |&indent| Indent::from_bytes(indent).length);
         let cur_ind_typ = current.kind;
 
-        if allow_comment && self.lookahead == i32::from(b'#') {
+        if self.lookahead == i32::from(b'#')
+            && !(valid_symbols[R_DQT_STR_CTN]
+                | valid_symbols[BR_DQT_STR_CTN]
+                | valid_symbols[R_SQT_STR_CTN]
+                | valid_symbols[BR_SQT_STR_CTN])
+        {
             if valid_symbols[BR_BLK_STR_CTN] && valid_symbols[BL] && self.cur_col <= cur_ind {
                 if !self.pop_ind() {
                     return false;
@@ -959,31 +1054,111 @@ impl ExternalScanner for Scanner {
             return false;
         }
 
-        let bgn_row: i16 = self.cur_row;
         let bgn_col: i16 = self.cur_col;
-        let bgn_chr: i32 = self.lookahead;
 
-        if valid_symbols[BL]
-            && bgn_col <= cur_ind
-            && !has_tab_ind
-            && if cur_ind == prt_ind && cur_ind_typ == IND_SEQ {
+        if valid_symbols[BL] && bgn_col <= cur_ind && !has_tab_ind && {
+            let prt_ind = self
+                .indents
+                .iter()
+                .rev()
+                .nth(1)
+                .map_or(-1, |&indent| Indent::from_bytes(indent).length);
+            if cur_ind == prt_ind && cur_ind_typ == IND_SEQ {
                 bgn_col < cur_ind || self.lookahead != i32::from(b'-')
             } else {
                 bgn_col <= prt_ind || cur_ind_typ == IND_STR
             }
-        {
+        } {
             if !self.pop_ind() {
                 return false;
             }
             return self.finish(lexer, BL);
         }
 
-        let has_nwl: bool = self.cur_row > self.row;
-        let is_r: bool = !has_nwl;
-        let is_br: bool = has_nwl && leading_spaces > cur_ind;
-        let is_b: bool = has_nwl && leading_spaces == cur_ind && !has_tab_ind;
-        let is_s: bool = bgn_col == 0;
+        let has_nwl = self.cur_row > self.row;
+        if !has_nwl {
+            self.scan_tokens::<0>(lexer, valid_symbols, has_tab_ind)
+        } else if leading_spaces > cur_ind {
+            self.scan_tokens::<1>(lexer, valid_symbols, has_tab_ind)
+        } else if leading_spaces == cur_ind && !has_tab_ind {
+            self.scan_tokens::<2>(lexer, valid_symbols, has_tab_ind)
+        } else {
+            self.scan_tokens::<3>(lexer, valid_symbols, has_tab_ind)
+        }
+    }
 
+    fn serialize(&mut self, buffer: &mut [u8]) -> usize {
+        let capacity = buffer.len().min(SERIALIZATION_BUFFER_SIZE);
+        if capacity < 10 {
+            return 0;
+        }
+        let mut size = 0;
+        for value in [
+            self.row,
+            self.col,
+            self.blk_imp_row,
+            self.blk_imp_col,
+            self.blk_imp_tab,
+        ] {
+            buffer[size..size + 2].copy_from_slice(&value.to_ne_bytes());
+            size += 2;
+        }
+        // C checks only size < 1024 and can write a final pair at 1022,
+        // overrunning its buffer by two bytes. Keep complete pairs within
+        // the supplied buffer; all defined C serializations are identical.
+        let indents = &self.indents;
+        let count = indents.len().min((capacity - size) / 4);
+        let bytes = indents[..count].as_flattened();
+        buffer[size..size + bytes.len()].copy_from_slice(bytes);
+        size + bytes.len()
+    }
+
+    fn deserialize(&mut self, buffer: &[u8]) {
+        self.indents.clear();
+        if buffer.is_empty() {
+            self.row = 0;
+            self.col = 0;
+            self.blk_imp_row = -1;
+            self.blk_imp_col = -1;
+            self.blk_imp_tab = 0;
+        } else {
+            assert!(buffer.len() >= 10 && (buffer.len() - 10).is_multiple_of(4));
+            let mut values = buffer
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|bytes| i16::from_ne_bytes([bytes[0], bytes[1]]));
+            self.row = values.next().unwrap();
+            self.col = values.next().unwrap();
+            self.blk_imp_row = values.next().unwrap();
+            self.blk_imp_col = values.next().unwrap();
+            self.blk_imp_tab = values.next().unwrap();
+            self.indents
+                .extend_from_slice(buffer[10..].as_chunks::<4>().0);
+        }
+    }
+}
+
+impl Scanner {
+    // R/BR/B are mutually exclusive. Select the positional variant once so
+    // token dispatch does not load and combine irrelevant token flags.
+    #[inline(always)]
+    fn scan_tokens<const POSITION: u8>(
+        &mut self,
+        lexer: &mut dyn Lexer,
+        valid_symbols: &[bool; ERR_REC + 1],
+        has_tab_ind: bool,
+    ) -> bool {
+        let is_r = POSITION == 0;
+        let is_br = POSITION == 1;
+        let is_b = POSITION == 2;
+        let bgn_row = self.cur_row;
+        let bgn_col = self.cur_col;
+        let bgn_chr = self.lookahead;
+        let is_s = bgn_col == 0;
+        let current = self.current_indent();
+        let cur_ind = current.length;
+        let cur_ind_typ = current.kind;
         if valid_symbols[R_DIR_YML_VER] && is_r {
             return self.scn_dir_yml_ver(lexer, R_DIR_YML_VER);
         }
@@ -1069,138 +1244,92 @@ impl ExternalScanner for Scanner {
         } else if self.lookahead == i32::from(b'[') {
             if valid_symbols[R_FLW_SEQ_BGN] && is_r {
                 self.may_upd_imp_col(bgn_row, bgn_col, has_tab_ind);
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, R_FLW_SEQ_BGN);
+                return self.adv_end(lexer, R_FLW_SEQ_BGN);
             }
             if valid_symbols[BR_FLW_SEQ_BGN] && is_br {
                 self.may_upd_imp_col(bgn_row, bgn_col, has_tab_ind);
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, BR_FLW_SEQ_BGN);
+                return self.adv_end(lexer, BR_FLW_SEQ_BGN);
             }
             if valid_symbols[B_FLW_SEQ_BGN] && is_b {
                 self.may_upd_imp_col(bgn_row, bgn_col, has_tab_ind);
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, B_FLW_SEQ_BGN);
+                return self.adv_end(lexer, B_FLW_SEQ_BGN);
             }
         } else if self.lookahead == i32::from(b']') {
             if valid_symbols[R_FLW_SEQ_END] && is_r {
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, R_FLW_SEQ_END);
+                return self.adv_end(lexer, R_FLW_SEQ_END);
             }
             if valid_symbols[BR_FLW_SEQ_END] && is_br {
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, BR_FLW_SEQ_END);
+                return self.adv_end(lexer, BR_FLW_SEQ_END);
             }
             if valid_symbols[B_FLW_SEQ_END] && is_b {
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, BR_FLW_SEQ_END);
+                return self.adv_end(lexer, BR_FLW_SEQ_END);
             }
         } else if self.lookahead == i32::from(b'{') {
             if valid_symbols[R_FLW_MAP_BGN] && is_r {
                 self.may_upd_imp_col(bgn_row, bgn_col, has_tab_ind);
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, R_FLW_MAP_BGN);
+                return self.adv_end(lexer, R_FLW_MAP_BGN);
             }
             if valid_symbols[BR_FLW_MAP_BGN] && is_br {
                 self.may_upd_imp_col(bgn_row, bgn_col, has_tab_ind);
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, BR_FLW_MAP_BGN);
+                return self.adv_end(lexer, BR_FLW_MAP_BGN);
             }
             if valid_symbols[B_FLW_MAP_BGN] && is_b {
                 self.may_upd_imp_col(bgn_row, bgn_col, has_tab_ind);
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, B_FLW_MAP_BGN);
+                return self.adv_end(lexer, B_FLW_MAP_BGN);
             }
         } else if self.lookahead == i32::from(b'}') {
             if valid_symbols[R_FLW_MAP_END] && is_r {
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, R_FLW_MAP_END);
+                return self.adv_end(lexer, R_FLW_MAP_END);
             }
             if valid_symbols[BR_FLW_MAP_END] && is_br {
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, BR_FLW_MAP_END);
+                return self.adv_end(lexer, BR_FLW_MAP_END);
             }
             if valid_symbols[B_FLW_MAP_END] && is_b {
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, BR_FLW_MAP_END);
+                return self.adv_end(lexer, BR_FLW_MAP_END);
             }
         } else if self.lookahead == i32::from(b',') {
             if valid_symbols[R_FLW_SEP_BGN] && is_r {
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, R_FLW_SEP_BGN);
+                return self.adv_end(lexer, R_FLW_SEP_BGN);
             }
             if valid_symbols[BR_FLW_SEP_BGN] && is_br {
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, BR_FLW_SEP_BGN);
+                return self.adv_end(lexer, BR_FLW_SEP_BGN);
             }
         } else if self.lookahead == i32::from(b'"') {
             if valid_symbols[R_DQT_STR_BGN] && is_r {
                 self.may_upd_imp_col(bgn_row, bgn_col, has_tab_ind);
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, R_DQT_STR_BGN);
+                return self.adv_end(lexer, R_DQT_STR_BGN);
             }
             if valid_symbols[BR_DQT_STR_BGN] && is_br {
                 self.may_upd_imp_col(bgn_row, bgn_col, has_tab_ind);
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, BR_DQT_STR_BGN);
+                return self.adv_end(lexer, BR_DQT_STR_BGN);
             }
             if valid_symbols[B_DQT_STR_BGN] && is_b {
                 self.may_upd_imp_col(bgn_row, bgn_col, has_tab_ind);
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, B_DQT_STR_BGN);
+                return self.adv_end(lexer, B_DQT_STR_BGN);
             }
             if valid_symbols[R_DQT_STR_END] && is_r {
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, R_DQT_STR_END);
+                return self.adv_end(lexer, R_DQT_STR_END);
             }
             if valid_symbols[BR_DQT_STR_END] && is_br {
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, BR_DQT_STR_END);
+                return self.adv_end(lexer, BR_DQT_STR_END);
             }
         } else if self.lookahead == i32::from(b'\'') {
             if valid_symbols[R_SQT_STR_BGN] && is_r {
                 self.may_upd_imp_col(bgn_row, bgn_col, has_tab_ind);
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, R_SQT_STR_BGN);
+                return self.adv_end(lexer, R_SQT_STR_BGN);
             }
             if valid_symbols[BR_SQT_STR_BGN] && is_br {
                 self.may_upd_imp_col(bgn_row, bgn_col, has_tab_ind);
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, BR_SQT_STR_BGN);
+                return self.adv_end(lexer, BR_SQT_STR_BGN);
             }
             if valid_symbols[B_SQT_STR_BGN] && is_b {
                 self.may_upd_imp_col(bgn_row, bgn_col, has_tab_ind);
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, B_SQT_STR_BGN);
+                return self.adv_end(lexer, B_SQT_STR_BGN);
             }
             if valid_symbols[R_SQT_STR_END] && is_r {
                 self.adv(lexer);
                 if self.lookahead == i32::from(b'\'') {
-                    self.adv(lexer);
-                    self.mrk_end(lexer);
-                    return self.finish(lexer, R_SQT_ESC_SQT);
+                    return self.adv_end(lexer, R_SQT_ESC_SQT);
                 } else {
                     self.mrk_end(lexer);
                     return self.finish(lexer, R_SQT_STR_END);
@@ -1209,9 +1338,7 @@ impl ExternalScanner for Scanner {
             if valid_symbols[BR_SQT_STR_END] && is_br {
                 self.adv(lexer);
                 if self.lookahead == i32::from(b'\'') {
-                    self.adv(lexer);
-                    self.mrk_end(lexer);
-                    return self.finish(lexer, BR_SQT_ESC_SQT);
+                    return self.adv_end(lexer, BR_SQT_ESC_SQT);
                 } else {
                     self.mrk_end(lexer);
                     return self.finish(lexer, BR_SQT_STR_END);
@@ -1259,14 +1386,10 @@ impl ExternalScanner for Scanner {
             }
         } else if self.lookahead == i32::from(b':') {
             if valid_symbols[R_FLW_JSV_BGN] && is_r {
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, R_FLW_JSV_BGN);
+                return self.adv_end(lexer, R_FLW_JSV_BGN);
             }
             if valid_symbols[BR_FLW_JSV_BGN] && is_br {
-                self.adv(lexer);
-                self.mrk_end(lexer);
-                return self.finish(lexer, BR_FLW_JSV_BGN);
+                return self.adv_end(lexer, BR_FLW_JSV_BGN);
             }
             let is_r_blk_val_bgn: bool = valid_symbols[R_BLK_VAL_BGN] && is_r;
             let is_br_blk_val_bgn: bool = valid_symbols[BR_BLK_VAL_BGN] && is_br;
@@ -1464,7 +1587,10 @@ impl ExternalScanner for Scanner {
                 if !is_plain_first {
                     return false;
                 }
-                self.sch_stt = advance_schema(self.sch_stt, self.cur_chr, &mut self.rlt_sch);
+                (self.sch_stt, self.rlt_sch) = INITIAL_SCHEMA
+                    .get(self.cur_chr as usize)
+                    .copied()
+                    .unwrap_or((SCH_STT_FRZ, ResultSchema::String));
             } else {
                 // no need to check the following cases:
                 // ..X
@@ -1550,59 +1676,6 @@ impl ExternalScanner for Scanner {
         !valid_symbols[ERR_REC]
     }
 
-    fn serialize(&mut self, buffer: &mut [u8]) -> usize {
-        let capacity = buffer.len().min(SERIALIZATION_BUFFER_SIZE);
-        if capacity < 10 {
-            return 0;
-        }
-        let mut size = 0;
-        for value in [
-            self.row,
-            self.col,
-            self.blk_imp_row,
-            self.blk_imp_col,
-            self.blk_imp_tab,
-        ] {
-            buffer[size..size + 2].copy_from_slice(&value.to_ne_bytes());
-            size += 2;
-        }
-        // C checks only size < 1024 and can write a final pair at 1022,
-        // overrunning its buffer by two bytes. Keep complete pairs within
-        // the supplied buffer; all defined C serializations are identical.
-        let indents = &self.indents;
-        let count = indents.len().min((capacity - size) / 4);
-        let bytes = indents[..count].as_flattened();
-        buffer[size..size + bytes.len()].copy_from_slice(bytes);
-        size + bytes.len()
-    }
-
-    fn deserialize(&mut self, buffer: &[u8]) {
-        self.indents.clear();
-        if buffer.is_empty() {
-            self.row = 0;
-            self.col = 0;
-            self.blk_imp_row = -1;
-            self.blk_imp_col = -1;
-            self.blk_imp_tab = 0;
-        } else {
-            assert!(buffer.len() >= 10 && (buffer.len() - 10).is_multiple_of(4));
-            let mut values = buffer
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|bytes| i16::from_ne_bytes([bytes[0], bytes[1]]));
-            self.row = values.next().unwrap();
-            self.col = values.next().unwrap();
-            self.blk_imp_row = values.next().unwrap();
-            self.blk_imp_col = values.next().unwrap();
-            self.blk_imp_tab = values.next().unwrap();
-            self.indents
-                .extend_from_slice(buffer[10..].as_chunks::<4>().0);
-        }
-    }
-}
-
-impl Scanner {
     fn scn_dir_tag_pfx(&mut self, lexer: &mut dyn Lexer, result_symbol: usize) -> bool {
         if self.lookahead == i32::from(b'!') {
             self.adv(lexer);
@@ -1695,6 +1768,29 @@ pub(crate) fn create() -> Box<dyn ExternalScanner> {
     scanner.deserialize(&[]);
     Box::new(scanner)
 }
+
+// State zero starts with String and only recognizes these ASCII prefixes.
+// Other codepoints freeze immediately; subsequent states use the full DFA.
+const INITIAL_SCHEMA: [(i8, ResultSchema); 128] = {
+    let mut table = [(SCH_STT_FRZ, ResultSchema::String); 128];
+    table[b'.' as usize] = (6, ResultSchema::String);
+    table[b'0' as usize] = (37, ResultSchema::Int);
+    table[b'F' as usize] = (2, ResultSchema::String);
+    table[b'N' as usize] = (16, ResultSchema::String);
+    table[b'T' as usize] = (13, ResultSchema::String);
+    table[b'f' as usize] = (17, ResultSchema::String);
+    table[b'n' as usize] = (29, ResultSchema::String);
+    table[b't' as usize] = (26, ResultSchema::String);
+    table[b'~' as usize] = (35, ResultSchema::Null);
+    table[b'+' as usize] = (1, ResultSchema::String);
+    table[b'-' as usize] = (1, ResultSchema::String);
+    let mut c = b'1';
+    while c <= b'9' {
+        table[c as usize] = (38, ResultSchema::Int);
+        c += 1;
+    }
+    table
+};
 
 // This is the core schema's incremental DFA, not a post-token string parser:
 // trailing spaces, tabs, and schema freezing must be handled at the same points.
@@ -2196,7 +2292,7 @@ mod tests {
     }
 
     #[test]
-    fn lookahead_is_read_once_at_entry_and_after_each_advance() {
+    fn lookahead_is_read_once_per_observed_position() {
         let cases: &[(&str, &[usize], usize)] = &[
             ("- value", &[R_BLK_SEQ_BGN], R_BLK_SEQ_BGN),
             ("\r\n# comment", &[], COMMENT),
@@ -2223,7 +2319,12 @@ mod tests {
                 .iter()
                 .filter(|event| matches!(event, Event::Advance(..)))
                 .count();
-            assert_eq!(lexer.lookahead_calls.get(), advances + 1, "{input:?}");
+            let unused_final_lookahead = usize::from(expected == R_SQT_ESC_SQT);
+            assert_eq!(
+                lexer.lookahead_calls.get(),
+                advances + 1 - unused_final_lookahead,
+                "{input:?}"
+            );
         }
     }
 
@@ -2709,7 +2810,9 @@ mod tests {
                     c
                 })
                 .collect();
-            for is_in_blk in [false, true] {
+            for (is_in_blk, frozen_string) in
+                [(false, false), (true, false), (false, true), (true, true)]
+            {
                 let mut actual = scanner();
                 let mut expected = scanner();
                 let mut lexer = TestLexer::new("");
@@ -2727,6 +2830,10 @@ mod tests {
                         scanner.sch_stt += 1;
                     }
                     scanner.rlt_sch = schemas[case % schemas.len()];
+                    if frozen_string {
+                        scanner.sch_stt = SCH_STT_FRZ;
+                        scanner.rlt_sch = ResultSchema::String;
+                    }
                     scanner.end_row = -8;
                     scanner.end_col = 13;
                 }
@@ -2938,5 +3045,132 @@ mod tests {
         scanner.adv_nwl(&mut lexer);
         assert_eq!(scanner.cur_chr, i32::from(b'\n'));
         assert_eq!((scanner.cur_row, scanner.cur_col), (i16::MIN, 0));
+    }
+
+    #[test]
+    fn initial_schema_table_matches_dfa_for_every_codepoint() {
+        for c in -1..=0x10ffff {
+            let actual = INITIAL_SCHEMA
+                .get(c as usize)
+                .copied()
+                .unwrap_or((SCH_STT_FRZ, ResultSchema::String));
+            let mut expected = ResultSchema::String;
+            let next = advance_schema_dfa(0, c, &mut expected);
+            assert_eq!(actual, (next, expected), "codepoint {c:#x}");
+        }
+    }
+
+    #[test]
+    fn final_advance_preserves_events_coordinates_and_snapshot() {
+        for col in [0, 10, i16::MIN, i16::MAX] {
+            for input in ["[next", "}suffix", "'", "éx"] {
+                let mut fast = scanner();
+                let mut reference = scanner();
+                fast.col = col;
+                reference.col = col;
+                fast.init();
+                reference.init();
+                let mut fast_lexer = TestLexer::new(input);
+                let mut reference_lexer = TestLexer::new(input);
+                fast.lookahead = fast_lexer.lookahead();
+                reference.lookahead = reference_lexer.lookahead();
+                assert!(fast.adv_end(&mut fast_lexer, R_FLW_SEQ_BGN));
+                reference.adv(&mut reference_lexer);
+                reference.mrk_end(&mut reference_lexer);
+                assert!(reference.finish(&mut reference_lexer, R_FLW_SEQ_BGN));
+                assert_eq!(fast_lexer.events, reference_lexer.events);
+                assert_eq!(
+                    (fast.cur_row, fast.cur_col, fast.cur_chr),
+                    (reference.cur_row, reference.cur_col, reference.cur_chr)
+                );
+                assert_eq!(fast_lexer.lookahead_calls.get(), 1);
+                assert_eq!(reference_lexer.lookahead_calls.get(), 2);
+                let mut fast_snapshot = [0; SERIALIZATION_BUFFER_SIZE];
+                let mut reference_snapshot = [0; SERIALIZATION_BUFFER_SIZE];
+                assert_eq!(
+                    fast.serialize(&mut fast_snapshot),
+                    reference.serialize(&mut reference_snapshot)
+                );
+                assert_eq!(fast_snapshot, reference_snapshot);
+
+                // A stale cache from the terminal advance must not reach the
+                // next scan, even when a parser restores the same snapshot.
+                fast.deserialize(&fast_snapshot[..10]);
+                let mut next = TestLexer::new("]");
+                assert!(fast.scan(&mut next, &valid(&[R_FLW_SEQ_END])));
+                assert_eq!(next.symbol, R_FLW_SEQ_END as u16);
+                assert_eq!(next.end, 1);
+                assert_eq!(next.lookahead_calls.get(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn plain_character_kinds_match_predicates_for_every_codepoint() {
+        for c in -1..=0x110000 {
+            for block in [false, true] {
+                let expected = if is_wsp(c) {
+                    1
+                } else if !is_plain_safe(c, block) {
+                    0
+                } else if c == i32::from(b':') {
+                    2
+                } else if c == i32::from(b'#') {
+                    3
+                } else {
+                    4
+                };
+                let actual = if block {
+                    plain_kind::<true>(c)
+                } else {
+                    plain_kind::<false>(c)
+                };
+                assert_eq!(actual, expected, "codepoint {c:#x}, block={block}");
+                assert_eq!(actual >= 3, is_plain_run(c, block));
+            }
+        }
+    }
+
+    #[test]
+    fn positional_dispatch_keeps_r_br_b_and_invalid_context_distinct() {
+        let families = [
+            ('[', [R_FLW_SEQ_BGN, BR_FLW_SEQ_BGN, B_FLW_SEQ_BGN]),
+            (']', [R_FLW_SEQ_END, BR_FLW_SEQ_END, B_FLW_SEQ_END]),
+            ('{', [R_FLW_MAP_BGN, BR_FLW_MAP_BGN, B_FLW_MAP_BGN]),
+            ('}', [R_FLW_MAP_END, BR_FLW_MAP_END, B_FLW_MAP_END]),
+            ('"', [R_DQT_STR_BGN, BR_DQT_STR_BGN, B_DQT_STR_BGN]),
+            ('\'', [R_SQT_STR_BGN, BR_SQT_STR_BGN, B_SQT_STR_BGN]),
+        ];
+        let contexts = [
+            ("", 2, 0, Some(0)),
+            ("\n   ", 2, 0, Some(1)),
+            ("\n  ", 2, 0, Some(2)),
+            ("\n ", 2, 0, None),
+            ("\n \t", 1, 0, None),
+            ("\n \t", 0, 0, Some(1)),
+            // C compares wrapping i16 rows with '>', not inequality.
+            ("\n  ", 2, i16::MAX, Some(0)),
+        ];
+        for (character, symbols) in families {
+            for (prefix, indent, row, expected) in contexts {
+                let mut scanner = scanner();
+                scanner.row = row;
+                scanner.push_ind(IND_MAP, indent);
+                let mut lexer = TestLexer::new(&format!("{prefix}{character}"));
+                let flags = valid(&[symbols[0], symbols[1], symbols[2], ERR_REC]);
+                assert_eq!(scanner.scan(&mut lexer, &flags), expected.is_some());
+                if let Some(mut position) = expected {
+                    // C accepts B closing-delimiter flags but emits BR tokens.
+                    if position == 2 && matches!(character, ']' | '}') {
+                        position = 1;
+                    }
+                    assert_eq!(lexer.symbol, symbols[position] as u16);
+                    assert_eq!(lexer.end, prefix.len() + 1);
+                } else {
+                    assert_eq!(lexer.symbol, u16::MAX);
+                    assert_eq!(lexer.end, 0);
+                }
+            }
+        }
     }
 }
