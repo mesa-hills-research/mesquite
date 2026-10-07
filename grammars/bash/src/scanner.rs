@@ -582,61 +582,12 @@ impl Scanner {
 
         if valid[TEST_OPERATOR] && !valid[EXPANSION_WORD] {
             lexer.skip_whitespace::<false>();
-            if lexer.lookahead() == i32::from(b'\\') {
-                if valid[EXTGLOB_PATTERN] {
-                    return self.scan_extglob_pattern(lexer, valid);
-                }
-                if valid[REGEX_NO_SPACE] {
-                    return self.scan_regex(lexer, valid);
-                }
-                skip(lexer);
-                if lexer.eof() {
-                    return false;
-                }
-                if lexer.lookahead() == i32::from(b'\r') {
-                    skip(lexer);
-                    if lexer.lookahead() == i32::from(b'\n') {
-                        skip(lexer);
-                    }
-                } else if lexer.lookahead() == i32::from(b'\n') {
-                    skip(lexer);
-                } else {
-                    return false;
-                }
-                lexer.skip_whitespace::<true>();
-            }
-            if lexer.lookahead() == i32::from(b'\n') && !valid[NEWLINE] {
-                skip(lexer);
-                lexer.skip_whitespace::<true>();
-            }
-            if lexer.lookahead() == i32::from(b'-') {
-                advance(lexer);
-                let mut advanced_once = false;
-                while lexer.is_alpha() {
-                    advanced_once = true;
-                    advance(lexer);
-                }
-                if lexer.is_space() && advanced_once {
-                    lexer.mark_end();
-                    advance(lexer);
-                    if lexer.lookahead() == i32::from(b'}') && valid[CLOSING_BRACE] {
-                        if valid[EXPANSION_WORD] {
-                            lexer.mark_end();
-                            lexer.set_result_symbol(EXPANSION_WORD as u16);
-                            return true;
-                        }
-                        return false;
-                    }
-                    lexer.set_result_symbol(TEST_OPERATOR as u16);
-                    return true;
-                }
-                if lexer.is_space() && valid[EXTGLOB_PATTERN] {
-                    lexer.set_result_symbol(EXTGLOB_PATTERN as u16);
-                    return true;
-                }
-            }
-            if valid[BARE_DOLLAR] && !valid[ERROR_RECOVERY] && scan_bare_dollar(lexer) {
-                return true;
+            // Names cannot enter any of the punctuation cases below. Test
+            // this after whitespace, which is the usual command prefix.
+            if lexer.class & IDENTIFIER == 0
+                && let Some(result) = self.scan_test_punctuation(lexer, valid)
+            {
+                return result;
             }
         }
 
@@ -764,6 +715,75 @@ impl Scanner {
             return true;
         }
         self.scan_regex(lexer, valid)
+    }
+}
+
+impl Scanner {
+    // None falls through to the following token handlers, including after
+    // speculative advances. Some(false) must still stop the entire scan.
+    #[cold]
+    fn scan_test_punctuation(
+        &mut self,
+        lexer: &mut ScannerLexer<'_>,
+        valid: &ValidSymbols,
+    ) -> Option<bool> {
+        if lexer.lookahead() == i32::from(b'\\') {
+            if valid[EXTGLOB_PATTERN] {
+                return Some(self.scan_extglob_pattern(lexer, valid));
+            }
+            if valid[REGEX_NO_SPACE] {
+                return Some(self.scan_regex(lexer, valid));
+            }
+            skip(lexer);
+            if lexer.eof() {
+                return Some(false);
+            }
+            if lexer.lookahead() == i32::from(b'\r') {
+                skip(lexer);
+                if lexer.lookahead() == i32::from(b'\n') {
+                    skip(lexer);
+                }
+            } else if lexer.lookahead() == i32::from(b'\n') {
+                skip(lexer);
+            } else {
+                return Some(false);
+            }
+            lexer.skip_whitespace::<true>();
+        }
+        if lexer.lookahead() == i32::from(b'\n') && !valid[NEWLINE] {
+            skip(lexer);
+            lexer.skip_whitespace::<true>();
+        }
+        if lexer.lookahead() == i32::from(b'-') {
+            advance(lexer);
+            let mut advanced_once = false;
+            while lexer.is_alpha() {
+                advanced_once = true;
+                advance(lexer);
+            }
+            if lexer.is_space() && advanced_once {
+                lexer.mark_end();
+                advance(lexer);
+                if lexer.lookahead() == i32::from(b'}') && valid[CLOSING_BRACE] {
+                    if valid[EXPANSION_WORD] {
+                        lexer.mark_end();
+                        lexer.set_result_symbol(EXPANSION_WORD as u16);
+                        return Some(true);
+                    }
+                    return Some(false);
+                }
+                lexer.set_result_symbol(TEST_OPERATOR as u16);
+                return Some(true);
+            }
+            if lexer.is_space() && valid[EXTGLOB_PATTERN] {
+                lexer.set_result_symbol(EXTGLOB_PATTERN as u16);
+                return Some(true);
+            }
+        }
+        if valid[BARE_DOLLAR] && !valid[ERROR_RECOVERY] && scan_bare_dollar(lexer) {
+            return Some(true);
+        }
+        None
     }
 }
 
@@ -1567,6 +1587,28 @@ mod tests {
                     assert_eq!(actual.symbol, expected.symbol);
                     assert_eq!(actual.lookahead_calls.get(), actual.position + 1);
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn identifier_characters_bypass_test_punctuation_without_effects() {
+        let rows = &crate::language().external_scanner.as_ref().unwrap().states;
+        for symbols in rows.as_chunks::<{ ERROR_RECOVERY + 1 }>().0 {
+            for c in 0..128 {
+                if character_class(c) & IDENTIFIER == 0 {
+                    continue;
+                }
+                let mut inner = TestLexer::new("x$\n");
+                inner.input[0] = c;
+                let mut scanner = Scanner::default();
+                let mut lexer = ScannerLexer::new(&mut inner);
+                assert_eq!(scanner.scan_test_punctuation(&mut lexer, symbols), None);
+                assert_eq!(lexer.lookahead(), c);
+                assert_eq!(inner.position, 0);
+                assert!(inner.events.is_empty());
+                assert_eq!(inner.lookahead_calls.get(), 1);
+                assert_eq!(snapshot(&mut scanner), [0; 4]);
             }
         }
     }
