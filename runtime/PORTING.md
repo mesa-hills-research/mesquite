@@ -328,6 +328,10 @@ Public-cursor entries also cache immutable alias, visibility, and resolved field
 metadata when visited. Fields propagate from an invisible non-extra wrapper only
 when the child's own non-inherited field map has no match; roots have field zero.
 The changed-range walker uses its own visibility rules and ignores these caches.
+Cursor child iterators borrow child slices once; their forward hot-path helpers
+are always inlined so large iterator/entry records need not cross call boundaries.
+Forward sibling traversal skips its already-resolved current edge directly;
+reverse traversal preserves the C int8 sentinel and structural-index rules.
 For changed-range traversal only, cursor.tree may be None; that iterator owns its
 Language separately and operates directly on subtree entries, never constructing
 public Nodes. `current_status` returns a CursorStatus record in place of six out
