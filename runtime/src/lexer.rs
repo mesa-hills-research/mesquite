@@ -126,8 +126,8 @@ pub(crate) fn ts_lexer__get_lookahead(lexer: &mut Lexer<'_>) {
         return;
     }
 
-    let chunk = &lexer.input.chunk()
-        [position_in_chunk as usize..lexer.state.chunk_size as usize];
+    let chunk =
+        &lexer.input.chunk()[position_in_chunk as usize..lexer.state.chunk_size as usize];
     if lexer.state.encoding == InputEncoding::Utf8 && chunk[0].is_ascii() {
         lexer.state.lookahead_size = 1;
         lexer.state.lookahead = i32::from(chunk[0]);
@@ -869,6 +869,85 @@ mod tests {
         state.lookahead = 0;
         ts_lexer_finish(&mut state, &mut end);
         assert_eq!(end, 4);
+    }
+
+    #[test]
+    fn cached_range_end_follows_jumps_range_changes_and_early_input_eof() {
+        let mut state = ts_lexer_init();
+        let mut input = RecordingInput::new(b"abc", &[1, 0]);
+        let mut lexer = Lexer {
+            state: &mut state,
+            input: &mut input,
+            logger: None,
+        };
+        assert_eq!(lexer.state.current_range_end, u32::MAX);
+        ts_lexer_start(&mut lexer);
+        lexer.advance(false);
+        // The callback can report EOF before the included range ends.
+        assert!(lexer.eof());
+        assert_eq!(lexer.state.current_range_end, 0);
+        ts_lexer_goto(lexer.state, length_zero());
+        assert_eq!(lexer.state.current_range_end, u32::MAX);
+        ts_lexer_start(&mut lexer);
+        assert_eq!(lexer.lookahead(), i32::from(b'a'));
+
+        assert!(ts_lexer_set_included_ranges(
+            lexer.state,
+            &[range(0, 1, 0), range(1, 1, 0), range(2, 3, 1)],
+        ));
+        assert_eq!(lexer.state.current_range_end, 1);
+        ts_lexer_start(&mut lexer);
+        lexer.advance(false);
+        assert_eq!(lexer.state.current_range_end, 3);
+        assert_eq!(lexer.state.current_position, position(2, 1, 0));
+        assert_eq!(lexer.lookahead(), i32::from(b'c'));
+        lexer.advance(false);
+        assert!(lexer.eof());
+        assert_eq!(lexer.state.current_range_end, 0);
+        ts_lexer_goto(lexer.state, length_zero());
+        assert_eq!(lexer.state.current_range_end, 1);
+    }
+
+    #[test]
+    fn utf16_ascii_code_units_keep_their_width_and_retry_partial_chunks() {
+        for encoding in [InputEncoding::Utf16Le, InputEncoding::Utf16Be] {
+            let mut state = ts_lexer_init();
+            ts_lexer_set_input(&mut state, encoding);
+            let bytes = match encoding {
+                InputEncoding::Utf16Le => [b'a', 0, b'\n', 0, 0, 1],
+                InputEncoding::Utf16Be => [0, b'a', 0, b'\n', 1, 0],
+                InputEncoding::Utf8 => unreachable!(),
+            };
+            let mut input = RecordingInput::new(&bytes, &[1, 4]);
+            let mut lexer = Lexer {
+                state: &mut state,
+                input: &mut input,
+                logger: None,
+            };
+            ts_lexer_start(&mut lexer);
+            assert_eq!(lexer.lookahead(), i32::from(b'a'));
+            assert_eq!(lexer.state.lookahead_size, 2);
+            lexer.advance(false);
+            assert_eq!(lexer.lookahead(), i32::from(b'\n'));
+            assert_eq!(lexer.state.current_position, position(2, 0, 2));
+            lexer.advance(false);
+            assert_eq!(lexer.lookahead(), 0x100);
+            assert_eq!(lexer.state.current_position, position(4, 1, 0));
+            assert_eq!(lexer.get_column(), 0);
+            lexer.advance(false);
+            assert!(lexer.eof());
+            assert_eq!(lexer.state.current_position, position(6, 1, 2));
+            assert_eq!(lexer.get_column(), 1);
+            assert_eq!(
+                input.reads,
+                [
+                    (0, point_new(0, 0)),
+                    (0, point_new(0, 0)),
+                    (4, point_new(1, 0)),
+                    (6, point_new(1, 2)),
+                ]
+            );
+        }
     }
 
     #[test]
