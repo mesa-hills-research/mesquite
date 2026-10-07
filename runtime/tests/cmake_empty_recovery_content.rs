@@ -84,6 +84,18 @@ fn incomplete_commands_retain_zero_width_content_at_eof() {
 }
 
 #[test]
-fn incomplete_if_skips_trailing_newline_before_empty_content() {
-    assert_empty_recovery_content("if(\n", &[("if", 0..2), ("(", 2..3)], Point::new(1, 0));
+fn incomplete_if_skips_trailing_whitespace_before_empty_content() {
+    // The scanner skips whitespace before emitting its zero-width token. Its
+    // byte and point ranges must start at EOF, not just after the opening `(`.
+    // Only LF advances the row; CR and tabs contribute one byte per column.
+    for (source, end) in [
+        ("if(\n", Point::new(1, 0)),
+        ("if(\r\n", Point::new(1, 0)),
+        ("if(\r", Point::new(0, 4)),
+        ("if( \t", Point::new(0, 5)),
+        ("if( \t\r\n \t", Point::new(1, 2)),
+        ("if(\n\n\t", Point::new(2, 1)),
+    ] {
+        assert_empty_recovery_content(source, &[("if", 0..2), ("(", 2..3)], end);
+    }
 }
