@@ -1,6 +1,6 @@
 # CMake quoted-variable recovery verification (bucket `1b5a6fb7`)
 
-The four reported inputs already pass at the starting revision `7fe8128`:
+The four reported inputs already pass at the starting revision `de3b2c8`:
 
 - `Tests/RunCMake/Syntax/NameWithTabsQuoted.cmake`
 - `Tests/RunCMake/Syntax/NameWithSpacesQuoted.cmake`
@@ -30,7 +30,7 @@ empty-snapshot reset.
 
 ## Verification
 
-Checks rerun at `7fe8128`:
+Checks rerun at `de3b2c8` (current assignment):
 
 - `run_oracle(inputs = "bucket:1b5a6fb7")`: **4/4 pass**, queries enabled.
 - `run_oracle(inputs = "all", languages = "cmake")`:
@@ -39,11 +39,14 @@ Checks rerun at `7fe8128`:
   - **9878/9878 fresh inputs pass**, queries enabled.
 - `cargo check --workspace --all-targets`: passes. The existing unused-assignment
   warning in host-owned `grammars/yaml/src/lex.rs:20` remains unchanged.
-- `cargo test -p ts_port_cmake`: **22 tests pass**.
-- `cargo clippy -p ts_port_cmake --all-targets -- -D warnings`: passes.
+- `cargo test -p ts_port_cmake`: **24 tests pass**.
+- `cargo test -p ts_port --test cmake_quoted_variable_recovery`: **2 tests pass**,
+  covering fresh/reused parsers, incremental repair/restore, and chunked input.
+- `cargo clippy -p ts_port -p ts_port_cmake --all-targets -- -D warnings`: passes.
 
-That follow-up recorded verification only, without runtime changes, deviations
-from C, unsafe code, or clippy warnings.
+This assignment records verification only: the existing fix and regressions
+already resolve the bucket. No runtime changes, deviations from C, unsafe code,
+or new clippy warnings were introduced, and no bucket failures remain.
 
 ## End-to-end regression
 
@@ -94,10 +97,10 @@ inputs. Workspace all-targets checking passes (the pre-existing host-owned YAML
 warning remains); all-targets clippy for `ts_port` and `ts_port_cmake` passes with
 `-D warnings`. No runtime changes or new deviations from C were needed.
 
-## Latest revalidation at `cbb7f00`
+## Latest revalidation at `1fbe098`
 
 All four bucket inputs already pass at this starting revision, as they did at
-`86bb31c`. The current C scanner still uses zero-initialization and resets both
+`cbb7f00`. The current C scanner still uses zero-initialization and resets both
 fields on invalid snapshot lengths, matching the merged Rust implementation; no
 further runtime fix is needed. Revalidated the bucket (**4/4**), full CMake gate
 (**270/270**, incremental and query checks), and fresh CMake inputs
