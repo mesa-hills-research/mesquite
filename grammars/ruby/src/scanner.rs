@@ -56,9 +56,9 @@ struct Heredoc {
 }
 
 /// Owned vectors replace C's arrays and their reset/destroy routines.
+/// Leading whitespace is scan-local: C never includes it in a snapshot.
 #[derive(Debug, Default)]
 pub(crate) struct Scanner {
-    has_leading_whitespace: bool,
     literal_stack: Vec<Literal>,
     open_heredocs: Vec<Heredoc>,
 }
@@ -113,10 +113,6 @@ fn is_alpha(c: i32) -> bool {
     matches!(c, 0x41..=0x5a | 0x61..=0x7a)
 }
 
-fn is_upper(c: i32) -> bool {
-    matches!(c, 0x41..=0x5a)
-}
-
 fn is_lower(c: i32) -> bool {
     matches!(c, 0x61..=0x7a)
 }
@@ -129,19 +125,33 @@ fn is_alnum(c: i32) -> bool {
     is_alpha(c) || is_digit(c)
 }
 
-// The identifier-suffix loop checks this class once per source character.
-// This table includes '_', unlike the C-locale alnum helper used elsewhere.
-fn is_word_char(c: i32) -> bool {
-    const WORD_CHARS: [bool; 128] = {
-        let mut table = [false; 128];
+// Classify the C-locale identifier alphabet once per source character.
+// Digits continue a word; letters and '_' start one; uppercase letters choose
+// CONSTANT_SUFFIX instead of IDENTIFIER_SUFFIX.
+fn word_char_kind(c: i32) -> u8 {
+    const WORD_CHARS: [u8; 128] = {
+        let mut table = [0; 128];
         let mut i = 0;
         while i < table.len() {
-            table[i] = matches!(i, 0x41..=0x5a | 0x61..=0x7a | 0x30..=0x39 | 0x5f);
+            table[i] = match i {
+                0x30..=0x39 => 1,
+                0x61..=0x7a | 0x5f => 2,
+                0x41..=0x5a => 3,
+                _ => 0,
+            };
             i += 1;
         }
         table
     };
-    (c as u32) < WORD_CHARS.len() as u32 && WORD_CHARS[c as usize]
+    if (c as u32) < WORD_CHARS.len() as u32 {
+        WORD_CHARS[c as usize]
+    } else {
+        0
+    }
+}
+
+fn is_word_char(c: i32) -> bool {
+    word_char_kind(c) != 0
 }
 
 fn advance(lexer: &mut CachedLexer<'_>) {
@@ -365,22 +375,46 @@ fn scan_short_interpolation(
     false
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum WhitespaceResult {
     Failed,
-    Skipped,
+    // Whether skipped whitespace affects the following operator/literal.
+    Skipped(bool),
     LineBreak,
     HeredocStart,
 }
 
 impl Scanner {
-    fn skip(&mut self, lexer: &mut CachedLexer<'_>) {
-        self.has_leading_whitespace = true;
-        lexer.advance(true);
+    fn clear_heredocs(&mut self) {
+        if !self.open_heredocs.is_empty() {
+            self.clear_heredocs_nonempty();
+        }
+    }
+
+    // Keep heredoc-word deallocation off the empty/single-literal restore path.
+    #[cold]
+    #[inline(never)]
+    fn clear_heredocs_nonempty(&mut self) {
+        self.open_heredocs.clear();
     }
 
     fn reset(&mut self) {
         self.literal_stack.clear();
-        self.open_heredocs.clear();
+        self.clear_heredocs();
+    }
+
+    // Only CR/LF can start a heredoc body. Inspect the queue at those positions
+    // rather than loading and retaining its header on every scanner attempt.
+    fn start_heredoc(&mut self, valid_symbols: &[bool; NONE]) -> bool {
+        if valid_symbols[HEREDOC_BODY_START]
+            && let Some(heredoc) = self.open_heredocs.first_mut()
+            && !heredoc.started
+        {
+            heredoc.started = true;
+            true
+        } else {
+            false
+        }
     }
 
     fn scan_whitespace(
@@ -388,11 +422,8 @@ impl Scanner {
         lexer: &mut CachedLexer<'_>,
         valid_symbols: &[bool; NONE],
     ) -> WhitespaceResult {
-        let heredoc_body_start_is_valid = !self.open_heredocs.is_empty()
-            && !self.open_heredocs[0].started
-            && valid_symbols[HEREDOC_BODY_START];
+        let mut has_leading_whitespace = false;
         let line_break_is_valid = !valid_symbols[NO_LINE_BREAK] && valid_symbols[LINE_BREAK];
-        let mut crossed_newline = false;
         loop {
             if line_break_is_valid && lexer.is_at_included_range_start() {
                 lexer.mark_end();
@@ -400,65 +431,97 @@ impl Scanner {
             }
             let lookahead = lexer.lookahead();
             match lookahead {
-                0x20 | 0x09 => self.skip(lexer), // ' ', '\t'
+                0x20 | 0x09 => {
+                    has_leading_whitespace = true;
+                    lexer.advance(true);
+                } // ' ', '\t'
                 0x0d => {
                     // '\r'
-                    if heredoc_body_start_is_valid {
-                        self.open_heredocs[0].started = true;
+                    if self.start_heredoc(valid_symbols) {
                         return WhitespaceResult::HeredocStart;
                     }
-                    self.skip(lexer);
+                    has_leading_whitespace = true;
+                    lexer.advance(true);
                 }
                 0x0a => {
                     // '\n'
-                    if heredoc_body_start_is_valid {
-                        self.open_heredocs[0].started = true;
+                    if self.start_heredoc(valid_symbols) {
                         return WhitespaceResult::HeredocStart;
-                    } else if line_break_is_valid && !crossed_newline {
+                    } else if line_break_is_valid {
                         lexer.mark_end();
                         advance(lexer);
-                        crossed_newline = true;
+                        return Self::scan_whitespace_after_newline(lexer, has_leading_whitespace);
                     } else {
-                        self.skip(lexer);
+                        has_leading_whitespace = true;
+                        lexer.advance(true);
                     }
                 }
                 0x5c => {
                     // '\\'
                     advance(lexer);
                     if lexer.lookahead() == i32::from(b'\r') {
-                        self.skip(lexer);
+                        lexer.advance(true);
                     }
                     if is_space(lexer.lookahead()) {
-                        self.skip(lexer);
+                        has_leading_whitespace = true;
+                        lexer.advance(true);
                     } else {
                         return WhitespaceResult::Failed;
                     }
                 }
                 _ => {
-                    if crossed_newline {
-                        if lookahead != i32::from(b'.')
-                            && lookahead != i32::from(b'&')
-                            && lookahead != i32::from(b'#')
-                        {
-                            return WhitespaceResult::LineBreak;
-                        } else if lookahead == i32::from(b'.') {
-                            // A call operator suppresses the break; a range does not.
-                            advance(lexer);
-                            if !lexer.eof() && lexer.lookahead() == i32::from(b'.') {
-                                return WhitespaceResult::LineBreak;
-                            } else {
-                                return WhitespaceResult::Failed;
-                            }
-                        }
-                    }
-                    return WhitespaceResult::Skipped;
+                    return WhitespaceResult::Skipped(has_leading_whitespace);
                 }
             }
         }
     }
 
+    // Once a significant newline has been consumed, line breaks are known
+    // to be valid and no heredoc body can start in this scan. Keep these facts
+    // out of the ordinary whitespace loop's per-character state.
+    #[inline(always)]
+    fn scan_whitespace_after_newline(
+        lexer: &mut CachedLexer<'_>,
+        mut has_leading_whitespace: bool,
+    ) -> WhitespaceResult {
+        loop {
+            if lexer.is_at_included_range_start() {
+                lexer.mark_end();
+                return WhitespaceResult::LineBreak;
+            }
+            match lexer.lookahead() {
+                0x20 | 0x09 | 0x0d | 0x0a => {
+                    has_leading_whitespace = true;
+                    lexer.advance(true);
+                }
+                0x5c => {
+                    advance(lexer);
+                    if lexer.lookahead() == i32::from(b'\r') {
+                        lexer.advance(true);
+                    }
+                    if is_space(lexer.lookahead()) {
+                        has_leading_whitespace = true;
+                        lexer.advance(true);
+                    } else {
+                        return WhitespaceResult::Failed;
+                    }
+                }
+                0x2e => {
+                    advance(lexer);
+                    return if !lexer.eof() && lexer.lookahead() == i32::from(b'.') {
+                        WhitespaceResult::LineBreak
+                    } else {
+                        WhitespaceResult::Failed
+                    };
+                }
+                0x26 | 0x23 => return WhitespaceResult::Skipped(has_leading_whitespace),
+                _ => return WhitespaceResult::LineBreak,
+            }
+        }
+    }
+
     fn scan_open_delimiter(
-        &self,
+        has_leading_whitespace: bool,
         lexer: &mut CachedLexer<'_>,
         literal: &mut Literal,
         valid_symbols: &[bool; NONE],
@@ -496,7 +559,7 @@ impl Scanner {
                 literal.allows_interpolation = true;
                 advance(lexer);
                 if valid_symbols[FORWARD_SLASH] {
-                    if !self.has_leading_whitespace {
+                    if !has_leading_whitespace {
                         return false;
                     }
                     if matches!(lexer.lookahead(), 0x20 | 0x09 | 0x0a | 0x0d) {
@@ -746,7 +809,6 @@ impl Scanner {
         // The grammar has NONE external tokens. Check that once instead of
         // bounds-checking each individual token lookup in the scanning paths.
         let valid_symbols: &[bool; NONE] = valid_symbols[..NONE].try_into().unwrap();
-        self.has_leading_whitespace = false;
         if !valid_symbols[STRING_START] {
             if (valid_symbols[STRING_CONTENT] || valid_symbols[STRING_END])
                 && !self.literal_stack.is_empty()
@@ -764,34 +826,39 @@ impl Scanner {
         // emitted token. Return an explicit outcome instead of passing that
         // sentinel through dynamic result-symbol calls on every attempt.
         // As with C, a failed scan's result symbol is ignored by the parser.
-        match self.scan_whitespace(lexer, valid_symbols) {
+        let has_leading_whitespace = match self.scan_whitespace(lexer, valid_symbols) {
             WhitespaceResult::Failed => return false,
-            WhitespaceResult::Skipped => {}
+            WhitespaceResult::Skipped(has_leading_whitespace) => has_leading_whitespace,
             WhitespaceResult::LineBreak => return emit(lexer, LINE_BREAK),
             WhitespaceResult::HeredocStart => return emit(lexer, HEREDOC_BODY_START),
-        }
+        };
 
         let lookahead = lexer.lookahead();
         // Identifier characters are disjoint from every operator/delimiter
         // below. Handle this common case without walking their dispatch first.
-        if ((valid_symbols[HASH_KEY_SYMBOL] || valid_symbols[IDENTIFIER_SUFFIX])
-            && (is_alpha(lookahead) || lookahead == i32::from(b'_')))
-            || (valid_symbols[CONSTANT_SUFFIX] && is_upper(lookahead))
+        let word_kind = word_char_kind(lookahead);
+        if word_kind >= 2
+            && (valid_symbols[HASH_KEY_SYMBOL]
+                | valid_symbols[IDENTIFIER_SUFFIX]
+                | (valid_symbols[CONSTANT_SUFFIX] & (word_kind == 3)))
         {
-            let valid_identifier_symbol = if is_upper(lookahead) {
+            let valid_identifier_symbol = if word_kind == 3 {
                 CONSTANT_SUFFIX
             } else {
                 IDENTIFIER_SUFFIX
             };
-            // The first character was already validated above.
+            // The first character was already validated above. Keep lookahead
+            // local throughout the run: neither advance nor lookahead needs to
+            // read the wrapper, so only synchronize it at the suffix boundary.
             let mut lookahead;
             loop {
-                advance(lexer);
-                lookahead = lexer.lookahead();
+                lexer.inner.advance(false);
+                lookahead = lexer.inner.lookahead();
                 if !is_word_char(lookahead) {
                     break;
                 }
             }
+            lexer.lookahead = lookahead;
             if valid_symbols[HASH_KEY_SYMBOL] && lexer.lookahead() == i32::from(b':') {
                 lexer.mark_end();
                 advance(lexer);
@@ -851,7 +918,7 @@ impl Scanner {
                             if lexer.lookahead() == i32::from(b'=') {
                                 return false;
                             }
-                            if valid_symbols[BINARY_STAR_STAR] && !self.has_leading_whitespace {
+                            if valid_symbols[BINARY_STAR_STAR] && !has_leading_whitespace {
                                 return emit(lexer, BINARY_STAR_STAR);
                             }
                             if valid_symbols[HASH_SPLAT_STAR_STAR] && !is_space(lexer.lookahead()) {
@@ -867,7 +934,7 @@ impl Scanner {
                         }
                         return false;
                     }
-                    if valid_symbols[BINARY_STAR] && !self.has_leading_whitespace {
+                    if valid_symbols[BINARY_STAR] && !has_leading_whitespace {
                         return emit(lexer, BINARY_STAR);
                     }
                     if valid_symbols[SPLAT_STAR] && !is_space(lexer.lookahead()) {
@@ -892,13 +959,13 @@ impl Scanner {
                     if lexer.lookahead() != i32::from(b'=') && lexer.lookahead() != i32::from(b'>')
                     {
                         if valid_symbols[UNARY_MINUS_NUM]
-                            && (!valid_symbols[BINARY_STAR] || self.has_leading_whitespace)
+                            && (!valid_symbols[BINARY_STAR] || has_leading_whitespace)
                             && is_digit(lexer.lookahead())
                         {
                             return emit(lexer, UNARY_MINUS_NUM);
                         }
                         if valid_symbols[UNARY_MINUS]
-                            && self.has_leading_whitespace
+                            && has_leading_whitespace
                             && !is_space(lexer.lookahead())
                         {
                             lexer.set_result_symbol(UNARY_MINUS as u16);
@@ -919,7 +986,7 @@ impl Scanner {
                 }
             }
             0x5b if valid_symbols[ELEMENT_REFERENCE_BRACKET]
-                && (!self.has_leading_whitespace || !valid_symbols[STRING_START]) =>
+                && (!has_leading_whitespace || !valid_symbols[STRING_START]) =>
             {
                 advance(lexer);
                 return emit(lexer, ELEMENT_REFERENCE_BRACKET);
@@ -928,7 +995,7 @@ impl Scanner {
         }
 
         if valid_symbols[STRING_START] {
-            return self.scan_literal_start(lexer, valid_symbols);
+            return self.scan_literal_start(lexer, valid_symbols, has_leading_whitespace);
         }
         false
     }
@@ -976,6 +1043,7 @@ impl Scanner {
         &mut self,
         lexer: &mut CachedLexer<'_>,
         valid_symbols: &[bool; NONE],
+        has_leading_whitespace: bool,
     ) -> bool {
         let mut literal = Literal {
             nesting_depth: 1,
@@ -999,7 +1067,7 @@ impl Scanner {
             self.open_heredocs.push(heredoc);
             return emit(lexer, HEREDOC_START);
         }
-        if self.scan_open_delimiter(lexer, &mut literal, valid_symbols) {
+        if Self::scan_open_delimiter(has_leading_whitespace, lexer, &mut literal, valid_symbols) {
             self.literal_stack.push(literal);
             return emit(lexer, usize::from(literal.kind));
         }
@@ -1013,22 +1081,64 @@ impl ExternalScanner for Scanner {
     }
 
     fn serialize(&mut self, buffer: &mut [u8]) -> usize {
-        // Most tokens have no open literal/heredoc. Keep their exact two-byte
-        // C snapshot on a small path, separate from the general stack writer.
-        if self.literal_stack.is_empty() && self.open_heredocs.is_empty() {
-            if let Some(header) = buffer.get_mut(..2) {
-                header.copy_from_slice(&[0, 0]);
-                return 2;
+        // Ordinary tokens and unnested strings have fixed-width snapshots.
+        // Keep their copies independent of the variable-depth writer.
+        if self.open_heredocs.is_empty() {
+            match self.literal_stack.as_slice() {
+                [] => {
+                    let Some(bytes) = buffer.get_mut(..2) else {
+                        return 0;
+                    };
+                    bytes.copy_from_slice(&[0, 0]);
+                    return 2;
+                }
+                [literal] => {
+                    let Some(bytes) = buffer.get_mut(..7) else {
+                        return 0;
+                    };
+                    bytes.copy_from_slice(&[
+                        1,
+                        literal.kind,
+                        literal.open_delimiter,
+                        literal.close_delimiter,
+                        literal.nesting_depth as u8,
+                        u8::from(literal.allows_interpolation),
+                        0,
+                    ]);
+                    return 7;
+                }
+                _ => {}
             }
-            return 0;
         }
         self.serialize_nonempty(buffer)
     }
 
     fn deserialize(&mut self, buffer: &[u8]) {
-        self.has_leading_whitespace = false;
         if buffer.is_empty() || buffer == [0, 0] {
             self.reset();
+        } else if let &[
+            1,
+            kind,
+            open_delimiter,
+            close_delimiter,
+            nesting_depth,
+            interpolation,
+            0,
+        ] = buffer
+            && let Some(top) = self.literal_stack.first_mut()
+        {
+            // Restore an existing one-literal stack in place. This is the common
+            // state between a string's start, content and end tokens. Matching
+            // the entire snapshot also excludes truncated heredoc states.
+            *top = Literal {
+                kind,
+                open_delimiter,
+                close_delimiter,
+                nesting_depth: i32::from(nesting_depth),
+                allows_interpolation: interpolation != 0,
+            };
+            self.literal_stack.truncate(1);
+            self.clear_heredocs();
         } else {
             self.deserialize_nonempty(buffer);
         }
@@ -1150,7 +1260,7 @@ pub(crate) fn create() -> Box<dyn ExternalScanner> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
 
     #[derive(Debug, PartialEq, Eq)]
     enum Call {
@@ -1165,6 +1275,8 @@ mod tests {
         end: Option<usize>,
         symbol: u16,
         range_start: bool,
+        range_starts: Vec<usize>,
+        range_calls: RefCell<Vec<usize>>,
         calls: Vec<Call>,
         lookahead_calls: Cell<usize>,
         eof_calls: Cell<usize>,
@@ -1178,6 +1290,8 @@ mod tests {
                 end: None,
                 symbol: u16::MAX,
                 range_start: false,
+                range_starts: Vec::new(),
+                range_calls: RefCell::new(Vec::new()),
                 calls: Vec::new(),
                 lookahead_calls: Cell::new(0),
                 eof_calls: Cell::new(0),
@@ -1211,7 +1325,8 @@ mod tests {
             panic!("Ruby's scanner does not call get_column")
         }
         fn is_at_included_range_start(&self) -> bool {
-            self.range_start
+            self.range_calls.borrow_mut().push(self.position);
+            self.range_start || self.range_starts.contains(&self.position)
         }
         fn eof(&self) -> bool {
             self.eof_calls.set(self.eof_calls.get() + 1);
@@ -1362,6 +1477,85 @@ mod tests {
     }
 
     #[test]
+    fn single_literal_snapshot_fast_writer_matches_general_writer() {
+        let mut scanner = Scanner::default();
+        scanner.literal_stack.push(Literal::default());
+        for byte in 0..=u8::MAX {
+            for depth in [i32::MIN, -1, 0, 1, 255, 256, 257, i32::MAX] {
+                scanner.literal_stack[0] = Literal {
+                    kind: byte,
+                    open_delimiter: byte.wrapping_add(1),
+                    close_delimiter: byte.wrapping_add(2),
+                    nesting_depth: depth,
+                    allows_interpolation: byte % 2 == 0,
+                };
+                let mut fast = [0xab; 9];
+                let mut general = fast;
+                assert_eq!(scanner.serialize(&mut fast), 7);
+                assert_eq!(scanner.serialize_nonempty(&mut general), 7);
+                assert_eq!(fast, general);
+                assert_eq!(&fast[7..], &[0xab; 2]);
+                for length in 0..7 {
+                    let mut short = [0xab; 7];
+                    assert_eq!(scanner.serialize(&mut short[..length]), 0);
+                    assert_eq!(short, [0xab; 7]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn single_literal_snapshot_restore_discards_stale_state_and_reuses_capacity() {
+        let mut fast = Scanner::default();
+        fast.literal_stack.reserve(16);
+        let capacity = fast.literal_stack.capacity();
+        let mut general = Scanner::default();
+        for byte in 0..=u8::MAX {
+            fast.literal_stack.resize(3, Literal::default());
+            fast.open_heredocs.push(heredoc(b"STALE", true, true));
+            let snapshot = [
+                1,
+                byte,
+                byte.wrapping_add(1),
+                byte.wrapping_add(2),
+                byte,
+                byte,
+                0,
+            ];
+            fast.deserialize(&snapshot);
+            general.deserialize_nonempty(&snapshot);
+            assert_eq!(fast.literal_stack, general.literal_stack);
+            assert_eq!(fast.open_heredocs, general.open_heredocs);
+            assert_eq!(fast.literal_stack.capacity(), capacity);
+            let mut canonical = [0; 7];
+            assert_eq!(fast.serialize(&mut canonical), 7);
+            assert_eq!(&canonical[..5], &snapshot[..5]);
+            assert_eq!(canonical[5], u8::from(byte != 0));
+            assert_eq!(canonical[6], 0);
+        }
+
+        // With no existing entry, use the allocating/general restore path.
+        fast.deserialize(&[]);
+        fast.deserialize(&[1, STRING_START as u8, b'"', b'"', 255, 1, 0]);
+        assert_eq!(fast.literal_stack.len(), 1);
+        assert_eq!(fast.literal_stack[0].nesting_depth, 255);
+        assert_eq!(fast.literal_stack.capacity(), capacity);
+
+        // A seven-byte prefix is not sufficient: both header counts and the
+        // full snapshot length must match before the fixed-size path is used.
+        for snapshot in [
+            &[1, 3, b'"', b'"', 1, 1, 1][..],
+            &[2, 3, b'"', b'"', 1, 1, 0][..],
+            &[1, 3, b'"', b'"', 1, 1, 0, 0][..],
+        ] {
+            fast.literal_stack.push(Literal::default());
+            fast.deserialize(snapshot);
+            assert!(fast.literal_stack.is_empty());
+            assert!(fast.open_heredocs.is_empty());
+        }
+    }
+
+    #[test]
     fn identifier_word_table_matches_c_locale_without_narrowing() {
         for codepoint in (-256..=1024).chain([i32::MIN, i32::MAX]) {
             assert_eq!(
@@ -1375,7 +1569,6 @@ mod tests {
     #[test]
     fn serialization_layout_and_unsigned_byte_restoration() {
         let mut scanner = Scanner {
-            has_leading_whitespace: true,
             literal_stack: vec![
                 literal(STRING_START, b'{', b'}', true),
                 Literal {
@@ -1405,7 +1598,6 @@ mod tests {
             ]
         );
         scanner.deserialize(&buffer[..size]);
-        assert!(!scanner.has_leading_whitespace);
         assert_eq!(scanner.literal_stack[1].open_delimiter, 40);
         assert_eq!(scanner.literal_stack[1].close_delimiter, 255);
         assert_eq!(scanner.literal_stack[1].nesting_depth, 2);
@@ -1428,7 +1620,6 @@ mod tests {
                 heredoc(b"FIRST", true, false),
                 heredoc(b"LAST", false, true),
             ],
-            ..Scanner::default()
         };
         scanner.literal_stack.reserve(32);
         scanner.open_heredocs.reserve(8);
@@ -1502,6 +1693,228 @@ mod tests {
             scanner.deserialize(bytes);
             assert!(scanner.literal_stack.is_empty());
             assert!(scanner.open_heredocs.is_empty());
+        }
+    }
+
+    // The C loop before splitting at its crossed_newline transition. Keep a
+    // separate implementation to check callback order as well as token results.
+    fn unsplit_whitespace(
+        scanner: &mut Scanner,
+        lexer: &mut CachedLexer<'_>,
+        valid_symbols: &[bool; NONE],
+    ) -> WhitespaceResult {
+        let mut has_leading_whitespace = false;
+        let heredoc_body_start_is_valid = !scanner.open_heredocs.is_empty()
+            && !scanner.open_heredocs[0].started
+            && valid_symbols[HEREDOC_BODY_START];
+        let line_break_is_valid = !valid_symbols[NO_LINE_BREAK] && valid_symbols[LINE_BREAK];
+        let mut crossed_newline = false;
+        loop {
+            if line_break_is_valid && lexer.is_at_included_range_start() {
+                lexer.mark_end();
+                return WhitespaceResult::LineBreak;
+            }
+            let lookahead = lexer.lookahead();
+            match lookahead {
+                0x20 | 0x09 => {
+                    has_leading_whitespace = true;
+                    lexer.advance(true);
+                } // ' ', '\t'
+                0x0d => {
+                    // '\r'
+                    if heredoc_body_start_is_valid {
+                        scanner.open_heredocs[0].started = true;
+                        return WhitespaceResult::HeredocStart;
+                    }
+                    {
+                        has_leading_whitespace = true;
+                        lexer.advance(true);
+                    };
+                }
+                0x0a => {
+                    // '\n'
+                    if heredoc_body_start_is_valid {
+                        scanner.open_heredocs[0].started = true;
+                        return WhitespaceResult::HeredocStart;
+                    } else if line_break_is_valid && !crossed_newline {
+                        lexer.mark_end();
+                        advance(lexer);
+                        crossed_newline = true;
+                    } else {
+                        {
+                            has_leading_whitespace = true;
+                            lexer.advance(true);
+                        };
+                    }
+                }
+                0x5c => {
+                    // '\\'
+                    advance(lexer);
+                    if lexer.lookahead() == i32::from(b'\r') {
+                        lexer.advance(true);
+                    }
+                    if is_space(lexer.lookahead()) {
+                        {
+                            has_leading_whitespace = true;
+                            lexer.advance(true);
+                        };
+                    } else {
+                        return WhitespaceResult::Failed;
+                    }
+                }
+                _ => {
+                    if crossed_newline {
+                        if lookahead != i32::from(b'.')
+                            && lookahead != i32::from(b'&')
+                            && lookahead != i32::from(b'#')
+                        {
+                            return WhitespaceResult::LineBreak;
+                        } else if lookahead == i32::from(b'.') {
+                            // A call operator suppresses the break; a range does not.
+                            advance(lexer);
+                            if !lexer.eof() && lexer.lookahead() == i32::from(b'.') {
+                                return WhitespaceResult::LineBreak;
+                            } else {
+                                return WhitespaceResult::Failed;
+                            }
+                        }
+                    }
+                    return WhitespaceResult::Skipped(has_leading_whitespace);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn whitespace_phases_preserve_unsplit_c_control_flow() {
+        let cases = [
+            "",
+            " ",
+            "\t\t",
+            "\r",
+            "\n",
+            "\r\n\n",
+            "\\\r x",
+            "\\\r\nx",
+            "\\\nx",
+            "\n\\\r\n&x",
+            "\n .x",
+            "\n ..x",
+            "\n ...x",
+            "\n&x",
+            "\n#x",
+            "\n\\x",
+            "\n\0",
+            "\n\u{b}",
+            "\n\\\u{b} ",
+            " \t\n\r &x",
+            " \n\\\r\u{c}#x",
+        ];
+        for source in cases {
+            for flags in 0..8 {
+                let mut valid = [false; NONE];
+                valid[LINE_BREAK] = flags & 1 != 0;
+                valid[NO_LINE_BREAK] = flags & 2 != 0;
+                valid[HEREDOC_BODY_START] = flags & 4 != 0;
+                for heredoc_state in 0..3 {
+                    for boundary in 0..=source.chars().count() + 1 {
+                        let mut fast = Scanner::default();
+                        let mut reference = Scanner::default();
+                        if heredoc_state != 0 {
+                            let make_heredoc = || Heredoc {
+                                word: b"END".to_vec(),
+                                started: heredoc_state == 2,
+                                ..Heredoc::default()
+                            };
+                            fast.open_heredocs.push(make_heredoc());
+                            reference.open_heredocs.push(make_heredoc());
+                        }
+                        let mut actual = TestLexer::new(source);
+                        let mut expected = TestLexer::new(source);
+                        actual.range_starts.push(boundary);
+                        expected.range_starts.push(boundary);
+                        assert_eq!(
+                            fast.scan_whitespace(&mut CachedLexer::new(&mut actual), &valid),
+                            unsplit_whitespace(
+                                &mut reference,
+                                &mut CachedLexer::new(&mut expected),
+                                &valid,
+                            ),
+                            "source={source:?} flags={flags} heredoc={heredoc_state} boundary={boundary}",
+                        );
+                        assert_eq!(actual.position, expected.position);
+                        assert_eq!(actual.end, expected.end);
+                        assert_eq!(actual.calls, expected.calls);
+                        assert_eq!(actual.range_calls, expected.range_calls);
+                        assert_eq!(actual.lookahead_calls, expected.lookahead_calls);
+                        assert_eq!(actual.eof_calls, expected.eof_calls);
+                        assert_eq!(fast.open_heredocs, reference.open_heredocs);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn identifier_runs_synchronize_lookahead_before_suffix_dispatch() {
+        for (source, token, position, end) in [
+            ("_abc123: x", Some(HASH_KEY_SYMBOL), 8, Some(7)),
+            ("a0::B", None, 3, Some(2)),
+            ("name! ", Some(IDENTIFIER_SUFFIX), 5, None),
+            ("Name! ", Some(CONSTANT_SUFFIX), 5, None),
+            ("name!=x", None, 5, None),
+            ("name\0!", None, 4, None),
+            ("nameé!", None, 4, None),
+            ("name", None, 4, None),
+        ] {
+            let mut scanner = Scanner::default();
+            let mut inner = TestLexer::new(source);
+            {
+                let mut lexer = CachedLexer::new(&mut inner);
+                assert_eq!(
+                    scanner.scan_cached(
+                        &mut lexer,
+                        &symbols(&[HASH_KEY_SYMBOL, IDENTIFIER_SUFFIX, CONSTANT_SUFFIX]),
+                    ),
+                    token.is_some(),
+                    "{source:?}",
+                );
+                assert_eq!(
+                    lexer.lookahead(),
+                    source.chars().nth(position).map_or(0, |c| c as i32),
+                    "{source:?}",
+                );
+            }
+            assert_eq!(inner.position, position, "{source:?}");
+            assert_eq!(inner.end, end, "{source:?}");
+            assert_eq!(inner.lookahead_calls.get(), position + 1, "{source:?}");
+            assert_eq!(inner.symbol, token.map_or(u16::MAX, |t| t as u16));
+            // Failed attempts must retain C's full lookahead distance too.
+            let advances: Vec<_> = inner
+                .calls
+                .iter()
+                .filter_map(|call| match call {
+                    Call::Advance(at, skip) => Some((*at, *skip)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                advances,
+                (0..position).map(|i| (i, false)).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn identifier_kinds_match_c_locale_start_and_suffix_rules() {
+        for codepoint in (-256..=1024).chain([i32::MIN, i32::MAX]) {
+            let expected = match codepoint {
+                0x30..=0x39 => 1,
+                0x61..=0x7a | 0x5f => 2,
+                0x41..=0x5a => 3,
+                _ => 0,
+            };
+            assert_eq!(word_char_kind(codepoint), expected, "{codepoint}");
         }
     }
 
