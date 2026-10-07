@@ -4,12 +4,13 @@ The seven reported fresh-CMake inputs had an `ERROR` child of `source_file` in
 C, but a `normal_command` in the port. The smallest was
 `Tests/RunCMake/Syntax/UnterminatedBrace1.cmake` (`set(var "${")`, followed by a
 newline). The bucket already passed at the original verification revision,
-`8fbaaf9`, and still passes at the current starting revision, `a4eea87`; no
+`8fbaaf9`, and still passes at the current starting revision, `25eece9`; no
 additional runtime or scanner behavior change is needed.
 
-## Latest revalidation at `a4eea87`
+## Latest revalidation at `25eece9`
 
-Reproducing the assignment at `a4eea87` found no remaining divergence. The
+All checks below were rerun at `25eece9`, rather than relying on the previous
+verification at `a4eea87`. Reproducing the assignment found no remaining divergence. The
 assigned bucket still passes on the starting checkout: **7/7 bucket**,
 **270/270 gate** (including incremental/query checks), and **9878/9878 fresh**
 inputs match C. Direct comparison with the current C scanner confirms that the
@@ -23,8 +24,8 @@ These existing parser regressions cover all five cases listed in the assignment,
 asserting ERROR grouping, exact recovery ranges, and zero progress-callback calls;
 no duplicate regression was added.
 The full `ts_port` suite also passes: 212 unit tests and all integration/doc
-tests, including both command-recovery regressions. Both tests also pass when
-run independently with `cargo test -p ts_port --test cmake_command_recovery`.
+tests, including both command-recovery regressions, run together with the scanner
+suite using `cargo test -p ts_port -p ts_port_cmake`.
 Strict all-targets clippy for `ts_port` and `ts_port_cmake` also passes. This
 revalidation changes only this record: no C deviations, unsafe code, new
 warnings, or generated-file changes were introduced.
