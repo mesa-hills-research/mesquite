@@ -94,10 +94,10 @@ inputs. Workspace all-targets checking passes (the pre-existing host-owned YAML
 warning remains); all-targets clippy for `ts_port` and `ts_port_cmake` passes with
 `-D warnings`. No runtime changes or new deviations from C were needed.
 
-## Latest revalidation at `9b9aa1b`
+## Latest revalidation at `99886f9`
 
 All four bucket inputs already pass at this starting revision, as they did at
-`55c2787`. The current C scanner still uses zero-initialization and resets both
+`9b9aa1b` and `55c2787`. The current C scanner still uses zero-initialization and resets both
 fields on invalid snapshot lengths, matching the merged Rust implementation; no
 further runtime fix is needed. Revalidated the bucket (**4/4**), full CMake gate (**270/270**, incremental
 and query checks), and fresh CMake inputs (**9878/9878**, query checks).
