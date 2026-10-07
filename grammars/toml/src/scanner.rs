@@ -11,6 +11,8 @@ const MULTILINE_LITERAL_STRING_END: Symbol = 4;
 /// The C scanner has no payload or serialized state.
 pub(crate) struct Scanner;
 
+// Keep quote-run callbacks and bookkeeping out of the line-ending scan path.
+#[inline(never)]
 fn scan_multiline_string_end(
     lexer: &mut dyn Lexer,
     delimiter: i32,
@@ -77,21 +79,26 @@ impl ExternalScanner for Scanner {
         if !valid_symbols[LINE_ENDING_OR_EOF as usize]
             || !matches!(lookahead, 0 | 0x09 | 0x0a | 0x0d | 0x20)
         {
-            // The parser ignores result_symbol when a scanner returns false.
-            // An immediate rejection need not write that unused output.
             return false;
         }
-        lexer.set_result_symbol(LINE_ENDING_OR_EOF);
         while matches!(lookahead, 0x20 | 0x09) {
             lexer.advance(true);
             lookahead = lexer.lookahead();
         }
-        if lookahead == 0x0d {
+        let accepted = if lookahead == 0x0d {
             lexer.advance(true);
-            return lexer.lookahead() == i32::from(b'\n');
+            lexer.lookahead() == i32::from(b'\n')
+        } else {
+            // C treats an embedded NUL as EOF here.
+            matches!(lookahead, 0 | 0x0a)
+        };
+        if accepted {
+            // The parser ignores result_symbol on failure. Defer the write
+            // so whitespace-prefixed failed scans do not make a virtual call
+            // solely to produce an unused symbol.
+            lexer.set_result_symbol(LINE_ENDING_OR_EOF);
         }
-        // C treats an embedded NUL as EOF here.
-        matches!(lookahead, 0 | 0x0a)
+        accepted
     }
 
     fn serialize(&mut self, _buffer: &mut [u8]) -> usize {
@@ -267,22 +274,87 @@ mod tests {
                 accepted,
                 "input {input:?}"
             );
-            // Immediate failures leave the unused result symbol untouched.
-            let mut expected = if accepted || advances != 0 {
-                vec![Event::Symbol(LINE_ENDING_OR_EOF)]
+            let mut expected: Vec<_> = (0..advances)
+                .map(|position| Event::Advance {
+                    position,
+                    skip: true,
+                })
+                .collect();
+            if accepted {
+                expected.push(Event::Symbol(LINE_ENDING_OR_EOF));
             } else {
-                vec![]
-            };
-            expected.extend((0..advances).map(|position| Event::Advance {
-                position,
-                skip: true,
-            }));
+                // Failed scans leave the unused result symbol untouched,
+                // even after skipping whitespace or a carriage return.
+                assert_eq!(lexer.symbol, Symbol::MAX);
+            }
             assert_eq!(lexer.events, expected, "input {input:?}");
             assert_eq!(lexer.position, advances);
 
             let mut disabled = TestLexer::new(input);
             assert!(!Scanner.scan(&mut disabled, &[false; 5]));
             assert!(disabled.events.is_empty());
+        }
+    }
+
+    #[test]
+    fn whitespace_prefixed_scans_write_a_symbol_only_on_acceptance() {
+        for length in 1..=6 {
+            for whitespace_mask in 0..(1 << length) {
+                let prefix: String = (0..length)
+                    .map(|i| {
+                        if whitespace_mask & (1 << i) == 0 {
+                            ' '
+                        } else {
+                            '\t'
+                        }
+                    })
+                    .collect();
+                for (suffix, accepted, consumes_cr) in [
+                    ("", true, false),
+                    ("\n", true, false),
+                    ("\0x", true, false),
+                    ("\r\n", true, true),
+                    ("\r", false, true),
+                    ("\r\0", false, true),
+                    ("\rx", false, true),
+                    ("x", false, false),
+                    ("#comment", false, false),
+                    ("\"\"\"", false, false),
+                    ("'''", false, false),
+                    ("\u{a0}\n", false, false),
+                ] {
+                    let input = format!("{prefix}{suffix}");
+                    for mask in 0..32 {
+                        let valid: [bool; 5] = std::array::from_fn(|i| mask & (1 << i) != 0);
+                        let enabled = valid[LINE_ENDING_OR_EOF as usize];
+                        let mut lexer = TestLexer::new(&input);
+                        let result = Scanner.scan(&mut lexer, &valid);
+                        assert_eq!(result, enabled && accepted, "{input:?}, mask {mask}");
+
+                        // C checks quotes only before whitespace is skipped;
+                        // quote validity must not turn a failed line-ending
+                        // attempt into a multiline string token.
+                        let advances = if enabled {
+                            length + usize::from(consumes_cr)
+                        } else {
+                            0
+                        };
+                        let mut expected: Vec<_> = (0..advances)
+                            .map(|position| Event::Advance {
+                                position,
+                                skip: true,
+                            })
+                            .collect();
+                        if result {
+                            expected.push(Event::Symbol(LINE_ENDING_OR_EOF));
+                        } else {
+                            assert_eq!(lexer.symbol, Symbol::MAX);
+                        }
+                        assert_eq!(lexer.events, expected, "{input:?}, mask {mask}");
+                        assert_eq!(lexer.lookahead_calls.get(), advances + 1);
+                    }
+                }
+            }
         }
     }
 
@@ -332,20 +404,20 @@ mod tests {
                         ],
                     )
                 } else if valid[LINE_ENDING_OR_EOF as usize] {
-                    // The sole omitted C event is a dead result-symbol write
-                    // on an immediate failure, which the runtime never reads.
-                    let mut events = if matches!(first, 0 | 0x09 | 0x0a | 0x0d | 0x20) {
-                        vec![Event::Symbol(LINE_ENDING_OR_EOF)]
-                    } else {
-                        vec![]
-                    };
+                    // Only successful scans write a result symbol. C writes
+                    // it earlier, but the runtime never reads it on failure.
+                    let mut events = vec![];
                     if matches!(first, 0x09 | 0x0d | 0x20) {
                         events.push(Event::Advance {
                             position: 0,
                             skip: true,
                         });
                     }
-                    (matches!(first, 0 | 0x0a), events)
+                    let accepted = matches!(first, 0 | 0x0a);
+                    if accepted {
+                        events.push(Event::Symbol(LINE_ENDING_OR_EOF));
+                    }
+                    (accepted, events)
                 } else {
                     (false, vec![])
                 };
