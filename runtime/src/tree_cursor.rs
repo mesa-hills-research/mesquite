@@ -113,14 +113,17 @@ fn iterate_children_at<'tree>(
 
 impl CursorChildIterator<'_> {
     #[inline]
-    fn edge_metadata(&self, child: &Subtree) -> (Symbol, FieldId, bool) {
-        let extra = ts_subtree_extra(child);
-        let alias = if extra || self.alias_sequence.is_empty() {
+    fn alias(&self, extra: bool) -> Symbol {
+        if extra || self.alias_sequence.is_empty() {
             0
         } else {
             self.alias_sequence[self.structural_child_index as usize]
-        };
-        let field_id = if extra {
+        }
+    }
+
+    #[inline]
+    fn field_id(&self, extra: bool) -> FieldId {
+        if extra {
             0
         } else {
             self.field_map
@@ -129,8 +132,18 @@ impl CursorChildIterator<'_> {
                     !map.inherited && u32::from(map.child_index) == self.structural_child_index
                 })
                 .map_or(self.inherited_field_id, |map| map.field_id)
-        };
-        (alias, field_id, alias != 0 || ts_subtree_visible(child))
+        }
+    }
+
+    #[inline]
+    fn edge_metadata(&self, child: &Subtree) -> (Symbol, FieldId, bool) {
+        let extra = ts_subtree_extra(child);
+        let alias = self.alias(extra);
+        (
+            alias,
+            self.field_id(extra),
+            alias != 0 || ts_subtree_visible(child),
+        )
     }
 }
 
@@ -254,25 +267,75 @@ pub(crate) fn ts_tree_cursor_delete(cursor: &mut TreeCursor<'_>) {
     cursor.stack = Vec::new();
 }
 
+// Find an edge to enter, rather than advancing an iterator past an edge that
+// traversal immediately returns. In particular, do not resolve fields or read
+// the following child's padding until we know they are needed.
+#[inline(always)]
+fn find_forward_child<'tree>(
+    mut iterator: CursorChildIterator<'tree>,
+) -> Option<(TreeCursorEntry<'tree>, TreeCursorStep)> {
+    loop {
+        let child = iterator.children.get(iterator.child_index as usize)?;
+        let extra = ts_subtree_extra(child);
+        let alias = iterator.alias(extra);
+        let visible = alias != 0 || ts_subtree_visible(child);
+        if visible || ts_subtree_visible_child_count(child) > 0 {
+            let field_id = iterator.field_id(extra);
+            return Some((
+                TreeCursorEntry {
+                    subtree: child,
+                    position: iterator.position,
+                    child_index: iterator.child_index,
+                    structural_child_index: iterator.structural_child_index,
+                    descendant_index: iterator.descendant_index,
+                    alias,
+                    field_id,
+                    visible,
+                },
+                if visible {
+                    TreeCursorStep::Visible
+                } else {
+                    TreeCursorStep::Hidden
+                },
+            ));
+        }
+        iterator.structural_child_index = iterator
+            .structural_child_index
+            .wrapping_add(u32::from(!extra));
+        iterator.descendant_index = iterator
+            .descendant_index
+            .wrapping_add(ts_subtree_visible_descendant_count(child));
+        iterator.position = length_add(iterator.position, ts_subtree_size(child));
+        iterator.child_index = iterator.child_index.wrapping_add(1);
+        if let Some(next) = iterator.children.get(iterator.child_index as usize) {
+            iterator.position = length_add(iterator.position, ts_subtree_padding(next));
+        }
+    }
+}
+
 #[inline(always)]
 pub(crate) fn ts_tree_cursor_goto_first_child_internal(
     cursor: &mut TreeCursor<'_>,
 ) -> TreeCursorStep {
-    let mut iterator = ts_tree_cursor_iterate_children(cursor);
-    while let Some((entry, visible)) = ts_tree_cursor_child_iterator_next(&mut iterator) {
-        if visible {
-            cursor.stack.push(entry);
-            return TreeCursorStep::Visible;
-        }
-        if ts_subtree_visible_child_count(entry.subtree) > 0 {
-            cursor.stack.push(entry);
-            return TreeCursorStep::Hidden;
-        }
+    let iterator = ts_tree_cursor_iterate_children(cursor);
+    if let Some((entry, step)) = find_forward_child(iterator) {
+        cursor.stack.push(entry);
+        step
+    } else {
+        TreeCursorStep::None
     }
-    TreeCursorStep::None
 }
 
+#[inline]
 pub(crate) fn ts_tree_cursor_goto_first_child(cursor: &mut TreeCursor<'_>) -> bool {
+    if ts_subtree_children(cursor.stack.last().expect("nonempty cursor").subtree).is_empty() {
+        return false;
+    }
+    goto_first_child_nonempty(cursor)
+}
+
+#[inline(never)]
+fn goto_first_child_nonempty(cursor: &mut TreeCursor<'_>) -> bool {
     loop {
         match ts_tree_cursor_goto_first_child_internal(cursor) {
             TreeCursorStep::Hidden => continue,
@@ -363,9 +426,7 @@ pub(crate) fn ts_tree_cursor_goto_first_child_for_point(
     ts_tree_cursor_goto_first_child_for_byte_and_point(cursor, 0, goal_point)
 }
 
-fn ts_tree_cursor_goto_sibling_internal<const REVERSE: bool>(
-    cursor: &mut TreeCursor<'_>,
-) -> TreeCursorStep {
+fn goto_previous_sibling_internal(cursor: &mut TreeCursor<'_>) -> TreeCursorStep {
     let initial_size = cursor.stack.len();
     let mut size = initial_size;
     while size > 1 {
@@ -376,36 +437,12 @@ fn ts_tree_cursor_goto_sibling_internal<const REVERSE: bool>(
         iterator.structural_child_index = entry.structural_child_index;
         iterator.position = entry.position;
         iterator.descendant_index = entry.descendant_index;
-        if REVERSE {
-            let visible = ts_tree_cursor_child_iterator_previous(&mut iterator)
-                .is_some_and(|(_, visible)| visible);
-            if visible && size + 1 < initial_size {
-                break;
-            }
-        } else {
-            if entry.visible && size + 1 < initial_size {
-                break;
-            }
-            // The current edge is already resolved. Advance over it without
-            // looking up its alias and field map for a second time.
-            iterator.child_index = entry.child_index.wrapping_add(1);
-            iterator.structural_child_index = entry
-                .structural_child_index
-                .wrapping_add(u32::from(!ts_subtree_extra(entry.subtree)));
-            iterator.descendant_index = entry
-                .descendant_index
-                .wrapping_add(ts_subtree_visible_descendant_count(entry.subtree))
-                .wrapping_add(u32::from(entry.visible));
-            iterator.position = length_add(entry.position, ts_subtree_size(entry.subtree));
-            if let Some(next) = iterator.children.get(iterator.child_index as usize) {
-                iterator.position = length_add(iterator.position, ts_subtree_padding(next));
-            }
+        let visible = ts_tree_cursor_child_iterator_previous(&mut iterator)
+            .is_some_and(|(_, visible)| visible);
+        if visible && size + 1 < initial_size {
+            break;
         }
-        while let Some((entry, visible)) = if REVERSE {
-            ts_tree_cursor_child_iterator_previous(&mut iterator)
-        } else {
-            ts_tree_cursor_child_iterator_next(&mut iterator)
-        } {
+        while let Some((entry, visible)) = ts_tree_cursor_child_iterator_previous(&mut iterator) {
             let step = if visible {
                 TreeCursorStep::Visible
             } else if ts_subtree_visible_child_count(entry.subtree) > 0 {
@@ -424,7 +461,39 @@ fn ts_tree_cursor_goto_sibling_internal<const REVERSE: bool>(
 pub(crate) fn ts_tree_cursor_goto_next_sibling_internal(
     cursor: &mut TreeCursor<'_>,
 ) -> TreeCursorStep {
-    ts_tree_cursor_goto_sibling_internal::<false>(cursor)
+    let initial_size = cursor.stack.len();
+    for size in (1..initial_size).rev() {
+        let entry = &cursor.stack[size];
+        if entry.visible && size + 1 < initial_size {
+            break;
+        }
+        let children = ts_subtree_children(cursor.stack[size - 1].subtree);
+        let child_index = entry.child_index.wrapping_add(1);
+        let Some(next) = children.get(child_index as usize) else {
+            continue;
+        };
+        let mut iterator = iterate_children_at(cursor, size - 1);
+        iterator.child_index = child_index;
+        iterator.structural_child_index = entry
+            .structural_child_index
+            .wrapping_add(u32::from(!ts_subtree_extra(entry.subtree)));
+        iterator.descendant_index = entry
+            .descendant_index
+            .wrapping_add(ts_subtree_visible_descendant_count(entry.subtree))
+            .wrapping_add(u32::from(entry.visible));
+        iterator.position = length_add(
+            length_add(entry.position, ts_subtree_size(entry.subtree)),
+            ts_subtree_padding(next),
+        );
+        if let Some((entry, step)) = find_forward_child(iterator) {
+            // This slot already exists: no capacity check or grow path is
+            // necessary when replacing the current edge by a sibling.
+            cursor.stack[size] = entry;
+            cursor.stack.truncate(size + 1);
+            return step;
+        }
+    }
+    TreeCursorStep::None
 }
 
 pub(crate) fn ts_tree_cursor_goto_next_sibling(cursor: &mut TreeCursor<'_>) -> bool {
@@ -441,7 +510,7 @@ pub(crate) fn ts_tree_cursor_goto_next_sibling(cursor: &mut TreeCursor<'_>) -> b
 pub(crate) fn ts_tree_cursor_goto_previous_sibling_internal(
     cursor: &mut TreeCursor<'_>,
 ) -> TreeCursorStep {
-    let step = ts_tree_cursor_goto_sibling_internal::<true>(cursor);
+    let step = goto_previous_sibling_internal(cursor);
     if step == TreeCursorStep::None {
         return step;
     }
@@ -795,6 +864,109 @@ mod tests {
         assert_eq!(iterator.descendant_index, 4);
         assert_eq!(iterator.position, length(21, 1, 16));
         assert!(ts_tree_cursor_child_iterator_next(&mut iterator).is_none());
+    }
+
+    #[test]
+    fn forward_seek_matches_iteration_through_uninteresting_edges() {
+        use ts_port_tables::FieldMapEntry;
+        // Include extras, line breaks, aliases, skipped leaves, and invisible
+        // branches. The seek path must retain exactly the iterator's position,
+        // structural index, descendant index, and inherited field semantics.
+        for skipped_count in 0..8 {
+            for selected in 0..6 {
+                let mut children = Vec::new();
+                for index in 0..skipped_count {
+                    children.push(Subtree::Heap(Arc::new(SubtreeHeapData {
+                        size: length(3, 1, 2),
+                        padding: length(2, 0, 2),
+                        extra: index % 2 == 0,
+                        children: Vec::new(),
+                        payload: SubtreePayload::Leaf,
+                        ..SubtreeHeapData::default()
+                    })));
+                }
+                children.push(match selected {
+                    0 => leaf(1, 2, VISIBLE),
+                    1 => leaf(1, 2, 0), // Made visible by an alias below.
+                    2 => Subtree::Heap(Arc::new(SubtreeHeapData {
+                        size: length(4, 2, 1),
+                        padding: length(2, 1, 1),
+                        children: Vec::new(),
+                        payload: SubtreePayload::Branch(BranchData {
+                            visible_child_count: 2,
+                            visible_descendant_count: 3,
+                            ..BranchData::default()
+                        }),
+                        ..SubtreeHeapData::default()
+                    })),
+                    3 => leaf(1, 2, EXTRA | VISIBLE),
+                    4 => leaf(1, 2, EXTRA),
+                    _ => leaf(1, 2, 0),
+                });
+                let parent = parent(children);
+                let aliases: &'static [Symbol] = if selected == 1 {
+                    match skipped_count / 2 {
+                        0 => &[7],
+                        1 => &[0, 7],
+                        2 => &[0, 0, 7],
+                        _ => &[0, 0, 0, 7],
+                    }
+                } else {
+                    &[]
+                };
+                let make_iterator = || {
+                    let mut iter = iterator(&parent, aliases);
+                    iter.position = length(11, 2, 4);
+                    iter.descendant_index = 17;
+                    iter.inherited_field_id = 8;
+                    iter.field_map = &[
+                        FieldMapEntry {
+                            field_id: 2,
+                            child_index: 1,
+                            inherited: true,
+                        },
+                        FieldMapEntry {
+                            field_id: 3,
+                            child_index: 1,
+                            inherited: false,
+                        },
+                    ];
+                    iter
+                };
+                let actual = find_forward_child(make_iterator());
+                let mut reference = make_iterator();
+                let expected = loop {
+                    let Some((entry, visible)) = ts_tree_cursor_child_iterator_next(&mut reference)
+                    else {
+                        break None;
+                    };
+                    if visible {
+                        break Some((entry, TreeCursorStep::Visible));
+                    }
+                    if ts_subtree_visible_child_count(entry.subtree) > 0 {
+                        break Some((entry, TreeCursorStep::Hidden));
+                    }
+                };
+                match (actual, expected) {
+                    (None, None) => (),
+                    (Some((actual, actual_step)), Some((expected, expected_step))) => {
+                        assert_eq!(actual_step, expected_step);
+                        assert!(std::ptr::eq(actual.subtree, expected.subtree));
+                        assert_eq!(actual.position, expected.position);
+                        assert_eq!(actual.child_index, expected.child_index);
+                        assert_eq!(
+                            actual.structural_child_index,
+                            expected.structural_child_index
+                        );
+                        assert_eq!(actual.descendant_index, expected.descendant_index);
+                        assert_eq!(actual.alias, expected.alias);
+                        assert_eq!(actual.field_id, expected.field_id);
+                        assert_eq!(actual.visible, expected.visible);
+                    }
+                    _ => panic!("seek and iterator disagree for {skipped_count}/{selected}"),
+                }
+            }
+        }
     }
 
     #[test]
