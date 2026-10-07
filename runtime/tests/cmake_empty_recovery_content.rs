@@ -1,0 +1,89 @@
+//! Regression for CMake oracle bucket f5e2762e.
+
+use std::ops::Range;
+use ts_port::{Language, ParseOptions, ParseState, Parser, Point};
+
+fn assert_empty_recovery_content(source: &str, prefix: &[(&str, Range<usize>)], end: Point) {
+    let language = Language::from(ts_port_cmake::language());
+    let mut parser = Parser::new();
+    parser.set_language(&language).unwrap();
+
+    // Check both initial scanner state and reuse after bracket argument/comment
+    // tokens. C zero-initializes the scanner and resets both state fields when
+    // there is no previous external token. Zero means BRACKET_ARGUMENT_OPEN,
+    // so recovery can emit content at EOF without an actual opening bracket.
+    for preceding_source in [None, Some("message([[value]])"), Some("#[=[comment]=]")] {
+        if let Some(preceding_source) = preceding_source {
+            let tree = parser.parse(preceding_source, None).unwrap();
+            assert!(!tree.root_node().has_error());
+        }
+
+        let mut progress_calls = 0;
+        let mut progress = |_: &ParseState| {
+            progress_calls += 1;
+            false
+        };
+        let tree = parser
+            .parse_with_options(
+                &mut |offset, _| source.as_bytes().get(offset..).unwrap_or_default(),
+                None,
+                Some(ParseOptions::new().progress_callback(&mut progress)),
+            )
+            .unwrap();
+        assert_eq!(progress_calls, 0);
+
+        let root = tree.root_node();
+        assert_eq!(root.kind(), "source_file");
+        assert_eq!(root.byte_range(), 0..source.len());
+        assert_eq!(root.start_position(), Point::new(0, 0));
+        assert_eq!(root.end_position(), end);
+        assert!(root.has_error());
+        assert_eq!(root.child_count(), 1);
+        assert_eq!(root.named_child_count(), 1);
+
+        let error = root.child(0).unwrap();
+        assert_eq!(error.kind(), "ERROR");
+        assert!(error.is_error());
+        assert!(error.is_extra());
+        assert_eq!(error.byte_range(), 0..source.len());
+        assert_eq!(error.start_position(), Point::new(0, 0));
+        assert_eq!(error.end_position(), end);
+        assert_eq!(error.child_count(), prefix.len() + 1);
+        assert_eq!(error.named_child_count(), 2);
+
+        for (index, (kind, bytes)) in prefix.iter().enumerate() {
+            let child = error.child(index).unwrap();
+            assert_eq!(child.kind(), *kind);
+            assert_eq!(child.byte_range(), *bytes);
+            assert_eq!(child.start_position(), Point::new(0, bytes.start));
+            assert_eq!(child.end_position(), Point::new(0, bytes.end));
+            assert_eq!(child.child_count(), 0);
+        }
+
+        let content = error.child(prefix.len()).unwrap();
+        assert_eq!(content.kind(), "bracket_argument_content");
+        assert_eq!(content.kind_id(), 37);
+        assert_eq!(content.byte_range(), source.len()..source.len());
+        assert_eq!(content.start_position(), end);
+        assert_eq!(content.end_position(), end);
+        assert_eq!(content.child_count(), 0);
+        assert_eq!(error.named_child(1), Some(content));
+        assert!(content.is_named());
+        assert!(!content.is_extra());
+        assert!(!content.is_error());
+        assert!(!content.has_error());
+        // This is a scanner-produced empty token, not a missing-node insertion.
+        assert!(!content.is_missing());
+    }
+}
+
+#[test]
+fn incomplete_commands_retain_zero_width_content_at_eof() {
+    assert_empty_recovery_content("a", &[("identifier", 0..1)], Point::new(0, 1));
+    assert_empty_recovery_content("message", &[("identifier", 0..7)], Point::new(0, 7));
+}
+
+#[test]
+fn incomplete_if_skips_trailing_newline_before_empty_content() {
+    assert_empty_recovery_content("if(\n", &[("if", 0..2), ("(", 2..3)], Point::new(1, 0));
+}
