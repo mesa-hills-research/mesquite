@@ -181,10 +181,10 @@ lexer warning noted above. This change only strengthens regression coverage;
 there are no runtime changes, C deviations, new unsafe code, or generated-file
 changes.
 
-### ERROR-range revalidation at `126e73b`
+### ERROR-range revalidation at `1cb9a86`
 
 Rechecked the previously resolved bucket at this starting revision; all checks
-below were rerun, rather than relying on the earlier verification at `9d5d6eb`.
+below were rerun, rather than relying on the earlier verification at `126e73b`.
 Bucket `e0b0bff8` already passes on this starting checkout. Comparing the current
 C scanner with Rust confirms the merged zero-valued creation/reset fix remains
 correct: `ts_calloc` initializes both fields, and empty or wrong-length snapshots
@@ -194,6 +194,10 @@ No new implementation change or duplicate regression is needed.
 Existing `cmake_error_ranges` tests cover both smallest inputs, fresh/reused
 scanners, whole/seven-byte/single-byte chunks, incremental EOF deletion and
 restoration, exact tree ranges/flags, boundary navigation, and zero progress calls.
+The scanner regression additionally checks that the final newline is consumed
+with `advance(false)` and included by `mark_end`, before and after empty-snapshot
+reset. These tests already cover the reported missing content and shortened ERROR
+ranges, so this revalidation does not add redundant test cases.
 
 Checks rerun at this revision:
 
