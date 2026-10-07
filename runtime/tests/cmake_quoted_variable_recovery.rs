@@ -1,14 +1,19 @@
-//! Regression for CMake oracle bucket 1b5a6fb7.
+//! Regressions for CMake oracle buckets 1b5a6fb7 and 4d6cc948.
 
 use ts_port::{InputEdit, Language, ParseOptions, ParseState, Parser, Point, Tree};
+
+const SOURCES: [&str; 3] = [
+    "message(\"${var\twith\ttab}\")\n",
+    "message(\"${var with space}\")\n",
+    // Reduced Registry-query.cmake: a valid second variable reference must
+    // stay within recovery content after whitespace in the first one's name.
+    "message(\"${CMAKE_ CURRENT_SOURCE_DIR}/${FILE_DIR}\")\n",
+];
 
 #[test]
 fn whitespace_in_quoted_variable_names_does_not_nest_errors() {
     let language = Language::from(ts_port_cmake::language());
-    for source in [
-        "message(\"${var\twith\ttab}\")\n",
-        "message(\"${var with space}\")\n",
-    ] {
+    for source in SOURCES {
         let mut parser = Parser::new();
         parser.set_language(&language).unwrap();
 
@@ -45,10 +50,7 @@ fn whitespace_in_quoted_variable_names_does_not_nest_errors() {
 #[test]
 fn repairing_and_restoring_quoted_variable_names_resets_recovery_state() {
     let language = Language::from(ts_port_cmake::language());
-    for source in [
-        "message(\"${var\twith\ttab}\")\n",
-        "message(\"${var with space}\")\n",
-    ] {
+    for source in SOURCES {
         let mut parser = Parser::new();
         parser.set_language(&language).unwrap();
         let mut tree = parser.parse(source, None).unwrap();
@@ -58,7 +60,7 @@ fn repairing_and_restoring_quoted_variable_names_resets_recovery_state() {
         // then restore it. Reusing the edited trees must neither retain the old
         // recovery-content state nor introduce a nested ERROR on restoration.
         let repaired = source.replace([' ', '\t'], "_");
-        let start = source.find("var").unwrap();
+        let start = source.find("${").unwrap() + 2;
         let end = source.find('}').unwrap();
         let edit = InputEdit {
             start_byte: start,
@@ -104,13 +106,19 @@ fn assert_quoted_variable_recovery(tree: &Tree, source: &str) {
     assert_eq!(error.child_count(), 6);
     assert_eq!(error.named_child_count(), 2);
 
+    let content_start = source.find([' ', '\t']).unwrap() + 1;
     for (index, (kind, id, named, bytes)) in [
         ("identifier", 35, true, 0..7),
         ("(", 14, false, 7..8),
         ("\"", 16, false, 8..9),
         ("$", 8, false, 9..10),
         ("{", 9, false, 10..11),
-        ("bracket_argument_content", 37, true, 15..source.len()),
+        (
+            "bracket_argument_content",
+            37,
+            true,
+            content_start..source.len(),
+        ),
     ]
     .into_iter()
     .enumerate()
