@@ -6,7 +6,7 @@ an exposed `(` in the port, around byte 3335 in a malformed quoted variable
 reference.
 
 The bucket already passed at revision `9b5a105` and was reverified after the
-merged fixes through `82828d1`. The scanner initialization/reset correction is
+merged fixes through `4390c9d`. The scanner initialization/reset correction is
 already merged; no additional runtime or scanner behavior change is needed.
 
 ## Root cause and existing correction
@@ -31,10 +31,10 @@ scanners.
 
 ## Verification
 
-All checks below were rerun at `82828d1`; the assigned input passed before
+All checks below were rerun at `4390c9d`; the assigned input passed before
 any changes. Existing scanner and parser regressions already cover the reduced
-Registry-query expression, so no duplicate test or further behavior change was
-needed.
+Registry-query expression, including single-byte input chunks and incremental
+repair/restoration, so no duplicate test or further behavior change was needed.
 
 - `run_oracle(inputs = "bucket:4d6cc948")`: 1/1 passes; incremental off,
   queries on.
@@ -51,8 +51,8 @@ needed.
 - `cargo test -p ts_port --test cmake_command_recovery`: 2 tests pass,
   covering malformed variable references with fresh and reused scanners.
 - `cargo test -p ts_port`: all 212 unit tests and all integration tests pass,
-  including both `cmake_quoted_variable_recovery` tests (also run separately),
-  which cover fresh/reused scanners and incremental repair/restoration.
+  including both `cmake_quoted_variable_recovery` tests, which cover fresh/reused
+  scanners, single-byte input chunks, and incremental repair/restoration.
 - `cargo clippy -p ts_port_cmake -p ts_port --all-targets -- -D warnings`: passes.
 
 This follow-up changes only this verification note; it introduces no deviation
