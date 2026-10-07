@@ -115,5 +115,16 @@ Before the operator stopped this run, the following checks completed:
 - `cargo test -p ts_port --test cmake_quoted_variable_recovery`: **3/3 pass**.
 - `cargo clippy -p ts_port -p ts_port_cmake --all-targets -- -D warnings`: passes.
 
-The full multi-language oracle was not rerun during this stop-time verification.
+After the workflow restarted at `60f946f`, verification completed:
+
+- `run_oracle(inputs = "all", languages = "cmake")`: **270/270 gate** inputs
+  pass with incremental and query checks; **9878/9878 fresh** inputs pass with
+  query checks.
+- `cargo check --workspace --all-targets`: passes with the same unchanged YAML
+  warning.
+- `cargo test -p ts_port -p ts_port_cmake`: **212 runtime unit tests**, **24 CMake
+  unit tests**, and **20 integration tests** pass; doc tests pass as well.
+- `cargo clippy -p ts_port -p ts_port_cmake --all-targets -- -D warnings`: passes.
+
 No code, generated files, or behavior changed; no bucket failure remains to fix.
+The unrelated languages' oracle sets were not rerun.
