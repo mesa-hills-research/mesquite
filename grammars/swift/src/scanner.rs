@@ -817,7 +817,10 @@ pub(crate) struct Scanner {
 }
 
 impl Scanner {
-    #[inline(never)]
+    // This is the only production caller's whitespace/comment path. Inline it
+    // so the stack-local ScanLexer does not require another call frame and
+    // the common operator dispatch keeps its known call-site arguments.
+    #[inline(always)]
     fn scan_tokens(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool; 34]) -> bool {
         let token_is_immediate = !should_treat_as_wspace(lexer.lookahead());
         let ws_directive = if token_is_immediate {
