@@ -18,6 +18,7 @@ pub(crate) struct NodeChildIterator<'tree> {
     pub alias_sequence: &'static [Symbol],
 }
 
+#[inline]
 pub(crate) fn ts_node_new<'tree>(
     tree: &'tree Tree,
     subtree: &'tree Subtree,
