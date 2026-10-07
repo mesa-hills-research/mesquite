@@ -36,6 +36,41 @@ const OPENING_PAREN: usize = 26;
 // ESAC = 27 is not used by the scanner.
 const ERROR_RECOVERY: usize = 28;
 
+type ValidSymbols = [bool; ERROR_RECOVERY + 1];
+const SPACE: u8 = 1;
+const ALPHA: u8 = 2;
+const DIGIT: u8 = 4;
+const CONCAT_END: u8 = 8;
+const IDENTIFIER: u8 = 16;
+
+// C-locale classes shared by the token tests at each input position.
+fn character_class(c: i32) -> u8 {
+    const CLASSES: [u8; 128] = {
+        let mut classes = [0; 128];
+        let mut c = 0;
+        while c < classes.len() {
+            if matches!(c, 0x09..=0x0d | 0x20) {
+                classes[c] |= SPACE | CONCAT_END;
+            }
+            if matches!(c, 0x41..=0x5a | 0x61..=0x7a) {
+                classes[c] |= ALPHA | IDENTIFIER;
+            }
+            if matches!(c, 0x30..=0x39) {
+                classes[c] |= DIGIT | IDENTIFIER;
+            }
+            if matches!(c, 0 | 0x3e | 0x3c | 0x29 | 0x28 | 0x3b | 0x26 | 0x7c) {
+                classes[c] |= CONCAT_END;
+            }
+            if c == 0x5f {
+                classes[c] |= IDENTIFIER;
+            }
+            c += 1;
+        }
+        classes
+    };
+    CLASSES.get(c as usize).copied().unwrap_or(0)
+}
+
 /// `lookahead` is a field in C, but a virtual call through the Rust lexer.
 /// Keep a scan-local copy, refreshed only when the input position advances, so
 /// the many token/character checks at each position are plain integer reads.
@@ -44,12 +79,17 @@ const ERROR_RECOVERY: usize = 28;
 struct ScannerLexer<'a> {
     inner: &'a mut dyn Lexer,
     lookahead: i32,
+    class: u8,
 }
 
 impl<'a> ScannerLexer<'a> {
     fn new(inner: &'a mut dyn Lexer) -> Self {
         let lookahead = inner.lookahead();
-        Self { inner, lookahead }
+        Self {
+            inner,
+            lookahead,
+            class: character_class(lookahead),
+        }
     }
 
     fn lookahead(&self) -> i32 {
@@ -59,6 +99,60 @@ impl<'a> ScannerLexer<'a> {
     fn advance(&mut self, skip: bool) {
         self.inner.advance(skip);
         self.lookahead = self.inner.lookahead();
+        self.class = character_class(self.lookahead);
+    }
+
+    fn is_space(&self) -> bool {
+        self.class & SPACE != 0
+    }
+    fn is_alpha(&self) -> bool {
+        self.class & ALPHA != 0
+    }
+    fn is_digit(&self) -> bool {
+        self.class & DIGIT != 0
+    }
+    fn is_alnum(&self) -> bool {
+        self.class & (ALPHA | DIGIT) != 0
+    }
+
+    // Commit the cache once per unconditional run, not once per character.
+    fn skip_whitespace<const NEWLINES: bool>(&mut self) {
+        if !self.is_space() || (!NEWLINES && self.lookahead == 0x0a) {
+            return;
+        }
+        let c = loop {
+            self.inner.advance(true);
+            let c = self.inner.lookahead();
+            if !matches!(c, 0x09..=0x0d | 0x20) || (!NEWLINES && c == 0x0a) {
+                break c;
+            }
+        };
+        self.lookahead = c;
+        self.class = character_class(c);
+    }
+
+    // After the numeric prefix, later digits cannot make a name numeric again.
+    #[inline(always)]
+    fn scan_identifier(&mut self) -> Option<bool> {
+        let mut c = self.lookahead;
+        let mut class = self.class;
+        if class & IDENTIFIER == 0 {
+            return None;
+        }
+        while class & DIGIT != 0 {
+            self.inner.advance(false);
+            c = self.inner.lookahead();
+            class = character_class(c);
+        }
+        let is_number = class & IDENTIFIER == 0;
+        while class & IDENTIFIER != 0 {
+            self.inner.advance(false);
+            c = self.inner.lookahead();
+            class = character_class(c);
+        }
+        self.lookahead = c;
+        self.class = class;
+        Some(is_number)
     }
 
     fn mark_end(&mut self) {
@@ -78,25 +172,25 @@ impl<'a> ScannerLexer<'a> {
     }
 
     fn eof(&self) -> bool {
-        self.inner.eof()
+        // Nonzero lookahead rules out EOF; zero still needs the NUL/EOF query.
+        self.lookahead == 0 && self.inner.eof()
     }
 }
 
 // The reference uses the default C locale, not Unicode character classes.
+#[cfg(test)]
 fn is_space(c: i32) -> bool {
     matches!(c, 0x09..=0x0d | 0x20)
 }
 
+#[cfg(test)]
 fn is_alpha(c: i32) -> bool {
     matches!(c, 0x41..=0x5a | 0x61..=0x7a)
 }
 
+#[cfg(test)]
 fn is_digit(c: i32) -> bool {
     matches!(c, 0x30..=0x39)
-}
-
-fn is_alnum(c: i32) -> bool {
-    is_alpha(c) || is_digit(c)
 }
 
 fn advance(lexer: &mut ScannerLexer<'_>) {
@@ -126,9 +220,7 @@ impl Heredoc {
     }
 
     fn scan_start(&mut self, lexer: &mut ScannerLexer<'_>) -> bool {
-        while is_space(lexer.lookahead()) {
-            skip(lexer);
-        }
+        lexer.skip_whitespace::<true>();
         lexer.set_result_symbol(HEREDOC_START as u16);
         self.is_raw = matches!(lexer.lookahead(), 0x27 | 0x22 | 0x5c);
         let found_delimiter = advance_word(lexer, &mut self.delimiter);
@@ -174,7 +266,7 @@ fn advance_word(lexer: &mut ScannerLexer<'_>, unquoted_word: &mut Vec<u8>) -> bo
         && !(if quote != 0 {
             lexer.lookahead() == quote || matches!(lexer.lookahead(), 0x0d | 0x0a)
         } else {
-            is_space(lexer.lookahead())
+            lexer.is_space()
         })
     {
         if lexer.lookahead() == i32::from(b'\\') {
@@ -195,14 +287,14 @@ fn advance_word(lexer: &mut ScannerLexer<'_>, unquoted_word: &mut Vec<u8>) -> bo
 }
 
 fn scan_bare_dollar(lexer: &mut ScannerLexer<'_>) -> bool {
-    while is_space(lexer.lookahead()) && lexer.lookahead() != i32::from(b'\n') && !lexer.eof() {
+    while lexer.is_space() && lexer.lookahead() != i32::from(b'\n') && !lexer.eof() {
         skip(lexer);
     }
     if lexer.lookahead() == i32::from(b'$') {
         advance(lexer);
         lexer.set_result_symbol(BARE_DOLLAR as u16);
         lexer.mark_end();
-        return is_space(lexer.lookahead()) || lexer.eof() || lexer.lookahead() == i32::from(b'"');
+        return lexer.is_space() || lexer.eof() || lexer.lookahead() == i32::from(b'"');
     }
     false
 }
@@ -216,6 +308,20 @@ pub(crate) struct Scanner {
 }
 
 impl Scanner {
+    #[cold]
+    fn push_heredoc(&mut self, allows_indent: bool) {
+        self.heredocs.push(Heredoc {
+            allows_indent,
+            ..Heredoc::default()
+        });
+    }
+
+    #[cold]
+    fn pop_heredoc(&mut self) {
+        self.heredocs.pop();
+    }
+
+    #[cold]
     fn scan_heredoc_content(
         &mut self,
         lexer: &mut ScannerLexer<'_>,
@@ -250,7 +356,7 @@ impl Scanner {
                         lexer.set_result_symbol(middle_type as u16);
                         heredoc.started = true;
                         advance(lexer);
-                        if is_alpha(lexer.lookahead()) || matches!(lexer.lookahead(), 0x7b | 0x28) {
+                        if lexer.is_alpha() || matches!(lexer.lookahead(), 0x7b | 0x28) {
                             return true;
                         }
                         continue;
@@ -270,7 +376,7 @@ impl Scanner {
                     }
                     did_advance = true;
                     if heredoc.allows_indent {
-                        while is_space(lexer.lookahead()) {
+                        while lexer.is_space() {
                             advance(lexer);
                         }
                     }
@@ -282,14 +388,14 @@ impl Scanner {
                     lexer.mark_end();
                     if heredoc.scan_end_identifier(lexer) {
                         if lexer.result_symbol() == HEREDOC_END as u16 {
-                            self.heredocs.pop();
+                            self.pop_heredoc();
                         }
                         return true;
                     }
                 }
                 _ => {
                     if lexer.get_column() == 0 {
-                        while is_space(lexer.lookahead()) {
+                        while lexer.is_space() {
                             if did_advance {
                                 advance(lexer);
                             } else {
@@ -318,16 +424,21 @@ impl Scanner {
     }
 }
 
-impl ExternalScanner for Scanner {
-    fn scan(&mut self, lexer: &mut dyn Lexer, valid: &[bool]) -> bool {
+impl Scanner {
+    #[inline(never)]
+    fn scan_inner<const ONLY_CONCAT: bool>(
+        &mut self,
+        lexer: &mut dyn Lexer,
+        valid: &ValidSymbols,
+    ) -> bool {
+        let valid = if ONLY_CONCAT {
+            &const { concat_symbols() }
+        } else {
+            valid
+        };
         let lexer = &mut ScannerLexer::new(lexer);
         if valid[CONCAT] && !valid[ERROR_RECOVERY] {
-            if !(lexer.lookahead() == 0
-                || is_space(lexer.lookahead())
-                || matches!(
-                    lexer.lookahead(),
-                    0x3e | 0x3c | 0x29 | 0x28 | 0x3b | 0x26 | 0x7c
-                )
+            if !(lexer.class & CONCAT_END != 0
                 || (lexer.lookahead() == i32::from(b'}') && valid[CLOSING_BRACE])
                 || (lexer.lookahead() == i32::from(b']') && valid[CLOSING_BRACKET]))
             {
@@ -345,7 +456,7 @@ impl ExternalScanner for Scanner {
                     if lexer.lookahead() == i32::from(b'`') {
                         advance(lexer);
                     }
-                    return is_space(lexer.lookahead()) || lexer.eof();
+                    return lexer.is_space() || lexer.eof();
                 }
                 if lexer.lookahead() == i32::from(b'\\') {
                     lexer.mark_end();
@@ -360,10 +471,14 @@ impl ExternalScanner for Scanner {
                     return true;
                 }
             }
-            if is_space(lexer.lookahead()) && valid[CLOSING_BRACE] && !valid[EXPANSION_WORD] {
+            if lexer.is_space() && valid[CLOSING_BRACE] && !valid[EXPANSION_WORD] {
                 lexer.set_result_symbol(CONCAT as u16);
                 return true;
             }
+        }
+
+        if ONLY_CONCAT {
+            return false;
         }
 
         if valid[IMMEDIATE_DOUBLE_HASH]
@@ -396,16 +511,12 @@ impl ExternalScanner for Scanner {
             while matches!(lexer.lookahead(), 0x23 | 0x3d | 0x21) {
                 advance(lexer);
             }
-            while is_space(lexer.lookahead()) {
-                skip(lexer);
-            }
+            lexer.skip_whitespace::<true>();
             return lexer.lookahead() == i32::from(b'}');
         }
 
         if valid[EMPTY_VALUE]
-            && (is_space(lexer.lookahead())
-                || lexer.eof()
-                || matches!(lexer.lookahead(), 0x3b | 0x26))
+            && (lexer.is_space() || lexer.eof() || matches!(lexer.lookahead(), 0x3b | 0x26))
         {
             lexer.set_result_symbol(EMPTY_VALUE as u16);
             return true;
@@ -421,7 +532,7 @@ impl ExternalScanner for Scanner {
             && let Some(heredoc) = self.heredocs.last_mut()
             && heredoc.scan_end_identifier(lexer)
         {
-            self.heredocs.pop();
+            self.pop_heredoc();
             lexer.set_result_symbol(HEREDOC_END as u16);
             return true;
         }
@@ -439,9 +550,7 @@ impl ExternalScanner for Scanner {
         }
 
         if valid[TEST_OPERATOR] && !valid[EXPANSION_WORD] {
-            while is_space(lexer.lookahead()) && lexer.lookahead() != i32::from(b'\n') {
-                skip(lexer);
-            }
+            lexer.skip_whitespace::<false>();
             if lexer.lookahead() == i32::from(b'\\') {
                 if valid[EXTGLOB_PATTERN] {
                     return self.scan_extglob_pattern(lexer, valid);
@@ -463,24 +572,20 @@ impl ExternalScanner for Scanner {
                 } else {
                     return false;
                 }
-                while is_space(lexer.lookahead()) {
-                    skip(lexer);
-                }
+                lexer.skip_whitespace::<true>();
             }
             if lexer.lookahead() == i32::from(b'\n') && !valid[NEWLINE] {
                 skip(lexer);
-                while is_space(lexer.lookahead()) {
-                    skip(lexer);
-                }
+                lexer.skip_whitespace::<true>();
             }
             if lexer.lookahead() == i32::from(b'-') {
                 advance(lexer);
                 let mut advanced_once = false;
-                while is_alpha(lexer.lookahead()) {
+                while lexer.is_alpha() {
                     advanced_once = true;
                     advance(lexer);
                 }
-                if is_space(lexer.lookahead()) && advanced_once {
+                if lexer.is_space() && advanced_once {
                     lexer.mark_end();
                     advance(lexer);
                     if lexer.lookahead() == i32::from(b'}') && valid[CLOSING_BRACE] {
@@ -494,7 +599,7 @@ impl ExternalScanner for Scanner {
                     lexer.set_result_symbol(TEST_OPERATOR as u16);
                     return true;
                 }
-                if is_space(lexer.lookahead()) && valid[EXTGLOB_PATTERN] {
+                if lexer.is_space() && valid[EXTGLOB_PATTERN] {
                     lexer.set_result_symbol(EXTGLOB_PATTERN as u16);
                     return true;
                 }
@@ -548,7 +653,7 @@ impl ExternalScanner for Scanner {
                 ) {
                     return false;
                 }
-                if valid[EXTGLOB_PATTERN] && is_space(lexer.lookahead()) {
+                if valid[EXTGLOB_PATTERN] && lexer.is_space() {
                     lexer.mark_end();
                     lexer.set_result_symbol(EXTGLOB_PATTERN as u16);
                     return true;
@@ -561,15 +666,12 @@ impl ExternalScanner for Scanner {
                     advance(lexer);
                     if lexer.lookahead() == i32::from(b'-') {
                         advance(lexer);
-                        self.heredocs.push(Heredoc {
-                            allows_indent: true,
-                            ..Heredoc::default()
-                        });
+                        self.push_heredoc(true);
                         lexer.set_result_symbol(HEREDOC_ARROW_DASH as u16);
                     } else if matches!(lexer.lookahead(), 0x3c | 0x3d) {
                         return false;
                     } else {
-                        self.heredocs.push(Heredoc::default());
+                        self.push_heredoc(false);
                         lexer.set_result_symbol(HEREDOC_ARROW as u16);
                     }
                     return true;
@@ -577,13 +679,7 @@ impl ExternalScanner for Scanner {
                 return false;
             }
 
-            let mut is_number = true;
-            if is_digit(lexer.lookahead()) {
-                advance(lexer);
-            } else if is_alpha(lexer.lookahead()) || lexer.lookahead() == i32::from(b'_') {
-                is_number = false;
-                advance(lexer);
-            } else {
+            let Some(is_number) = lexer.scan_identifier() else {
                 if lexer.lookahead() == i32::from(b'{') {
                     return scan_brace_start(lexer, valid);
                 }
@@ -594,17 +690,7 @@ impl ExternalScanner for Scanner {
                     return self.scan_extglob_pattern(lexer, valid);
                 }
                 return false;
-            }
-            loop {
-                if is_digit(lexer.lookahead()) {
-                    advance(lexer);
-                } else if is_alpha(lexer.lookahead()) || lexer.lookahead() == i32::from(b'_') {
-                    is_number = false;
-                    advance(lexer);
-                } else {
-                    break;
-                }
-            }
+            };
             if is_number && valid[FILE_DESCRIPTOR] && matches!(lexer.lookahead(), 0x3e | 0x3c) {
                 lexer.set_result_symbol(FILE_DESCRIPTOR as u16);
                 return true;
@@ -639,7 +725,7 @@ impl ExternalScanner for Scanner {
                     lexer.mark_end();
                     advance(lexer);
                     lexer.set_result_symbol(VARIABLE_NAME as u16);
-                    return is_alpha(lexer.lookahead());
+                    return lexer.is_alpha();
                 }
             }
             return false;
@@ -649,6 +735,23 @@ impl ExternalScanner for Scanner {
             return true;
         }
         self.scan_regex(lexer, valid)
+    }
+}
+
+const fn concat_symbols() -> ValidSymbols {
+    let mut symbols = [false; ERROR_RECOVERY + 1];
+    symbols[CONCAT] = true;
+    symbols
+}
+
+impl ExternalScanner for Scanner {
+    fn scan(&mut self, lexer: &mut dyn Lexer, valid: &[bool]) -> bool {
+        let valid: &ValidSymbols = valid.first_chunk().unwrap();
+        if valid[CONCAT] && !valid[TEST_OPERATOR] && valid == &const { concat_symbols() } {
+            self.scan_inner::<true>(lexer, valid)
+        } else {
+            self.scan_inner::<false>(lexer, valid)
+        }
     }
 
     fn serialize(&mut self, buffer: &mut [u8]) -> usize {
@@ -673,7 +776,24 @@ impl ExternalScanner for Scanner {
         size
     }
 
+    // Header-only snapshots are common; keep the stack restoration outlined.
     fn deserialize(&mut self, buffer: &[u8]) {
+        if let [depth, in_quote, outside_quote, 0] = buffer {
+            self.last_glob_paren_depth = *depth;
+            self.ext_was_in_double_quote = *in_quote != 0;
+            self.ext_saw_outside_quote = *outside_quote != 0;
+        } else if buffer.is_empty() && self.heredocs.is_empty() {
+            // C leaves the glob fields alone on an empty snapshot.
+        } else {
+            self.deserialize_heredocs(buffer);
+        }
+    }
+}
+
+impl Scanner {
+    #[inline(never)]
+    #[cold]
+    fn deserialize_heredocs(&mut self, buffer: &[u8]) {
         if buffer.is_empty() {
             for heredoc in &mut self.heredocs {
                 heredoc.reset();
@@ -710,14 +830,12 @@ impl ExternalScanner for Scanner {
 impl Scanner {
     // The C labels regex, extglob_pattern, expansion_word and brace_start are
     // forward-only jumps. These helpers preserve both jumps and fallthrough.
-    fn scan_regex(&mut self, lexer: &mut ScannerLexer<'_>, valid: &[bool]) -> bool {
+    fn scan_regex(&mut self, lexer: &mut ScannerLexer<'_>, valid: &ValidSymbols) -> bool {
         if (valid[REGEX] || valid[REGEX_NO_SLASH] || valid[REGEX_NO_SPACE])
             && !valid[ERROR_RECOVERY]
         {
             if valid[REGEX] || valid[REGEX_NO_SPACE] {
-                while is_space(lexer.lookahead()) {
-                    skip(lexer);
-                }
+                lexer.skip_whitespace::<true>();
             }
             if !matches!(lexer.lookahead(), 0x22 | 0x27)
                 || (matches!(lexer.lookahead(), 0x24 | 0x27) && valid[REGEX_NO_SLASH])
@@ -798,7 +916,7 @@ impl Scanner {
                     }
                     if !state.done {
                         if valid[REGEX] {
-                            let was_space = !state.in_single_quote && is_space(lexer.lookahead());
+                            let was_space = !state.in_single_quote && lexer.is_space();
                             advance(lexer);
                             state.advanced_once = true;
                             if !was_space || state.paren_depth > 0 {
@@ -818,8 +936,7 @@ impl Scanner {
                                     lexer.mark_end();
                                 }
                             } else {
-                                let was_space =
-                                    !state.in_single_quote && is_space(lexer.lookahead());
+                                let was_space = !state.in_single_quote && lexer.is_space();
                                 advance(lexer);
                                 state.advanced_once = true;
                                 if !was_space {
@@ -840,20 +957,19 @@ impl Scanner {
                                 if lexer.lookahead() == i32::from(b'(') {
                                     return false;
                                 }
-                                if is_space(lexer.lookahead()) {
+                                if lexer.is_space() {
                                     lexer.set_result_symbol(REGEX_NO_SPACE as u16);
                                     lexer.mark_end();
                                     return true;
                                 }
                             } else {
-                                let was_space =
-                                    !state.in_single_quote && is_space(lexer.lookahead());
+                                let was_space = !state.in_single_quote && lexer.is_space();
                                 if was_space && state.paren_depth == 0 {
                                     lexer.mark_end();
                                     lexer.set_result_symbol(REGEX_NO_SPACE as u16);
                                     return state.found_non_alnumdollarunderdash;
                                 }
-                                if !is_alnum(lexer.lookahead())
+                                if !lexer.is_alnum()
                                     && !matches!(lexer.lookahead(), 0x24 | 0x2d | 0x5f)
                                 {
                                     state.found_non_alnumdollarunderdash = true;
@@ -879,19 +995,17 @@ impl Scanner {
         self.scan_extglob_pattern(lexer, valid)
     }
 
-    fn scan_extglob_pattern(&mut self, lexer: &mut ScannerLexer<'_>, valid: &[bool]) -> bool {
+    fn scan_extglob_pattern(&mut self, lexer: &mut ScannerLexer<'_>, valid: &ValidSymbols) -> bool {
         if valid[EXTGLOB_PATTERN] && !valid[ERROR_RECOVERY] {
-            while is_space(lexer.lookahead()) {
-                skip(lexer);
-            }
+            lexer.skip_whitespace::<true>();
             if matches!(
                 lexer.lookahead(),
                 0x3f | 0x2a | 0x2b | 0x40 | 0x21 | 0x2d | 0x29 | 0x5c | 0x2e | 0x5b
-            ) || is_alpha(lexer.lookahead())
+            ) || lexer.is_alpha()
             {
                 if lexer.lookahead() == i32::from(b'\\') {
                     advance(lexer);
-                    if (is_space(lexer.lookahead()) || lexer.lookahead() == i32::from(b'"'))
+                    if (lexer.is_space() || lexer.lookahead() == i32::from(b'"'))
                         && !matches!(lexer.lookahead(), 0x0d | 0x0a)
                     {
                         advance(lexer);
@@ -902,12 +1016,12 @@ impl Scanner {
                 if lexer.lookahead() == i32::from(b')') && self.last_glob_paren_depth == 0 {
                     lexer.mark_end();
                     advance(lexer);
-                    if is_space(lexer.lookahead()) {
+                    if lexer.is_space() {
                         return false;
                     }
                 }
                 lexer.mark_end();
-                let was_non_alpha = !is_alpha(lexer.lookahead());
+                let was_non_alpha = !lexer.is_alpha();
                 if lexer.lookahead() != i32::from(b'[') {
                     // Do not accept esac followed by whitespace.
                     if lexer.lookahead() == i32::from(b'e') {
@@ -919,7 +1033,7 @@ impl Scanner {
                                 advance(lexer);
                                 if lexer.lookahead() == i32::from(b'c') {
                                     advance(lexer);
-                                    if is_space(lexer.lookahead()) {
+                                    if lexer.is_space() {
                                         return false;
                                     }
                                 }
@@ -932,7 +1046,7 @@ impl Scanner {
                 if lexer.lookahead() == i32::from(b'-') {
                     lexer.mark_end();
                     advance(lexer);
-                    while is_alnum(lexer.lookahead()) {
+                    while lexer.is_alnum() {
                         advance(lexer);
                     }
                     if matches!(lexer.lookahead(), 0x29 | 0x5c | 0x2e) {
@@ -944,12 +1058,12 @@ impl Scanner {
                 if lexer.lookahead() == i32::from(b')') && self.last_glob_paren_depth == 0 {
                     lexer.mark_end();
                     advance(lexer);
-                    if is_space(lexer.lookahead()) {
+                    if lexer.is_space() {
                         lexer.set_result_symbol(EXTGLOB_PATTERN as u16);
                         return was_non_alpha;
                     }
                 }
-                if is_space(lexer.lookahead()) {
+                if lexer.is_space() {
                     lexer.mark_end();
                     lexer.set_result_symbol(EXTGLOB_PATTERN as u16);
                     self.last_glob_paren_depth = 0;
@@ -969,7 +1083,7 @@ impl Scanner {
                     lexer.set_result_symbol(EXTGLOB_PATTERN as u16);
                     return true;
                 }
-                if !is_alnum(lexer.lookahead())
+                if !lexer.is_alnum()
                     && !matches!(
                         lexer.lookahead(),
                         0x28 | 0x22 | 0x5b | 0x3f | 0x2f | 0x5c | 0x5f | 0x2a
@@ -1029,12 +1143,10 @@ impl Scanner {
                         }
                     }
                     if !state.done {
-                        let was_space = is_space(lexer.lookahead());
+                        let was_space = lexer.is_space();
                         if lexer.lookahead() == i32::from(b'$') {
                             lexer.mark_end();
-                            if !is_alpha(lexer.lookahead())
-                                && !matches!(lexer.lookahead(), 0x2e | 0x5c)
-                            {
+                            if !lexer.is_alpha() && !matches!(lexer.lookahead(), 0x2e | 0x5c) {
                                 state.saw_non_alphadot = true;
                             }
                             advance(lexer);
@@ -1057,19 +1169,15 @@ impl Scanner {
                             return state.saw_non_alphadot;
                         }
                         if lexer.lookahead() == i32::from(b'\\') {
-                            if !is_alpha(lexer.lookahead())
-                                && !matches!(lexer.lookahead(), 0x2e | 0x5c)
-                            {
+                            if !lexer.is_alpha() && !matches!(lexer.lookahead(), 0x2e | 0x5c) {
                                 state.saw_non_alphadot = true;
                             }
                             advance(lexer);
-                            if is_space(lexer.lookahead()) || lexer.lookahead() == i32::from(b'"') {
+                            if lexer.is_space() || lexer.lookahead() == i32::from(b'"') {
                                 advance(lexer);
                             }
                         } else {
-                            if !is_alpha(lexer.lookahead())
-                                && !matches!(lexer.lookahead(), 0x2e | 0x5c)
-                            {
+                            if !lexer.is_alpha() && !matches!(lexer.lookahead(), 0x2e | 0x5c) {
                                 state.saw_non_alphadot = true;
                             }
                             advance(lexer);
@@ -1089,7 +1197,7 @@ impl Scanner {
         self.scan_expansion_word(lexer, valid)
     }
 
-    fn scan_expansion_word(&mut self, lexer: &mut ScannerLexer<'_>, valid: &[bool]) -> bool {
+    fn scan_expansion_word(&mut self, lexer: &mut ScannerLexer<'_>, valid: &ValidSymbols) -> bool {
         if valid[EXPANSION_WORD] {
             let mut advanced_once = false;
             let mut advance_once_space = false;
@@ -1100,9 +1208,7 @@ impl Scanner {
                 if lexer.lookahead() == i32::from(b'$') {
                     lexer.mark_end();
                     advance(lexer);
-                    if matches!(lexer.lookahead(), 0x7b | 0x28 | 0x27)
-                        || is_alnum(lexer.lookahead())
-                    {
+                    if matches!(lexer.lookahead(), 0x7b | 0x28 | 0x27) || lexer.is_alnum() {
                         lexer.set_result_symbol(EXPANSION_WORD as u16);
                         return advanced_once;
                     }
@@ -1120,16 +1226,14 @@ impl Scanner {
                         if lexer.lookahead() == i32::from(b'$') {
                             lexer.mark_end();
                             advance(lexer);
-                            if matches!(lexer.lookahead(), 0x7b | 0x28 | 0x27)
-                                || is_alnum(lexer.lookahead())
-                            {
+                            if matches!(lexer.lookahead(), 0x7b | 0x28 | 0x27) || lexer.is_alnum() {
                                 lexer.set_result_symbol(EXPANSION_WORD as u16);
                                 return advanced_once;
                             }
                             advanced_once = true;
                         } else {
-                            advanced_once = advanced_once || !is_space(lexer.lookahead());
-                            advance_once_space = advance_once_space || is_space(lexer.lookahead());
+                            advanced_once = advanced_once || !lexer.is_space();
+                            advance_once_space = advance_once_space || lexer.is_space();
                             advance(lexer);
                         }
                     }
@@ -1151,8 +1255,8 @@ impl Scanner {
                 if lexer.eof() {
                     return false;
                 }
-                advanced_once = advanced_once || !is_space(lexer.lookahead());
-                advance_once_space = advance_once_space || is_space(lexer.lookahead());
+                advanced_once = advanced_once || !lexer.is_space();
+                advance_once_space = advance_once_space || lexer.is_space();
                 advance(lexer);
             }
         }
@@ -1160,17 +1264,15 @@ impl Scanner {
     }
 }
 
-fn scan_brace_start(lexer: &mut ScannerLexer<'_>, valid: &[bool]) -> bool {
+fn scan_brace_start(lexer: &mut ScannerLexer<'_>, valid: &ValidSymbols) -> bool {
     if valid[BRACE_START] && !valid[ERROR_RECOVERY] {
-        while is_space(lexer.lookahead()) {
-            skip(lexer);
-        }
+        lexer.skip_whitespace::<true>();
         if lexer.lookahead() != i32::from(b'{') {
             return false;
         }
         advance(lexer);
         lexer.mark_end();
-        while is_digit(lexer.lookahead()) {
+        while lexer.is_digit() {
             advance(lexer);
         }
         if lexer.lookahead() != i32::from(b'.') {
@@ -1181,7 +1283,7 @@ fn scan_brace_start(lexer: &mut ScannerLexer<'_>, valid: &[bool]) -> bool {
             return false;
         }
         advance(lexer);
-        while is_digit(lexer.lookahead()) {
+        while lexer.is_digit() {
             advance(lexer);
         }
         if lexer.lookahead() != i32::from(b'}') {
@@ -1329,6 +1431,69 @@ mod tests {
         let lexer = ScannerLexer::new(&mut inner);
         assert_eq!(lexer.lookahead(), 'é' as i32);
         assert_eq!(inner.lookahead_calls.get(), 6);
+    }
+
+    #[test]
+    fn cached_character_classes_match_c_locale_for_all_codepoints() {
+        for c in -1..=0x10ffff {
+            let class = character_class(c);
+            assert_eq!(class & SPACE != 0, is_space(c));
+            assert_eq!(class & ALPHA != 0, is_alpha(c));
+            assert_eq!(class & DIGIT != 0, is_digit(c));
+            assert_eq!(
+                class & IDENTIFIER != 0,
+                is_alpha(c) || is_digit(c) || c == 0x5f
+            );
+            assert_eq!(
+                class & CONCAT_END != 0,
+                is_space(c) || matches!(c, 0 | 0x3e | 0x3c | 0x29 | 0x28 | 0x3b | 0x26 | 0x7c)
+            );
+        }
+        assert_eq!(character_class(i32::MIN), 0);
+        assert_eq!(character_class(i32::MAX), 0);
+    }
+
+    #[test]
+    fn identifier_runs_preserve_numeric_status_and_cache_boundary() {
+        for (input, numeric, end) in [
+            ("123>", Some(true), 3),
+            ("12a3=", Some(false), 4),
+            ("abc123_+", Some(false), 7),
+            ("_12=", Some(false), 3),
+            ("12é", Some(true), 2),
+            ("é", None, 0),
+            ("12\0", Some(true), 2),
+            ("", None, 0),
+        ] {
+            let mut inner = TestLexer::new(input);
+            let mut lexer = ScannerLexer::new(&mut inner);
+            assert_eq!(lexer.scan_identifier(), numeric, "{input:?}");
+            assert_eq!(lexer.class, character_class(lexer.lookahead));
+            assert_eq!(inner.position, end);
+            assert_eq!(inner.lookahead_calls.get(), end + 1);
+            assert_eq!(
+                inner.events,
+                (0..end).map(|_| Event::Advance(false)).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn whitespace_runs_preserve_skip_flags_and_newline_boundary() {
+        let mut inner = TestLexer::new(" \t\r\n x");
+        let mut lexer = ScannerLexer::new(&mut inner);
+        lexer.skip_whitespace::<false>();
+        assert_eq!(lexer.lookahead(), 0x0a);
+        assert!(lexer.is_space());
+        lexer.skip_whitespace::<true>();
+        assert_eq!(lexer.lookahead(), i32::from(b'x'));
+        assert!(lexer.is_alpha());
+        assert_eq!(inner.position, 5);
+        assert_eq!(inner.lookahead_calls.get(), 6);
+        assert_eq!(
+            inner.events,
+            (0..5).map(|_| Event::Advance(true)).collect::<Vec<_>>()
+        );
     }
 
     #[test]
