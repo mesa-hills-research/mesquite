@@ -1,6 +1,6 @@
 //! CMake recovery regressions from oracle buckets 1b5a6fb7, f5e2762e, and 6c68c51b.
 
-use ts_port::{ParseOptions, ParseState, Parser, Point};
+use ts_port::{InputEdit, ParseOptions, ParseState, Parser, Point};
 
 #[test]
 fn quoted_variable_whitespace_keeps_error_children_flat() {
@@ -138,6 +138,55 @@ fn unfinished_commands_keep_zero_width_bracket_content_at_eof() {
             assert_eq!(content.child_count(), 0);
             assert_eq!(content.named_child_count(), 0);
             assert_eq!(error.named_child(1), Some(content));
+            assert!(content.next_sibling().is_none());
+        }
+    }
+}
+
+#[test]
+fn eof_content_tracks_incremental_whitespace_edits() {
+    let language = ts_port_cmake::language().into();
+    let mut parser = Parser::new();
+    parser.set_language(&language).unwrap();
+
+    for (source, eof) in [("a", Point::new(0, 1)), ("if(\n", Point::new(1, 0))] {
+        let mut tree = parser.parse(source, None).unwrap();
+        let original_sexp = tree.root_node().to_sexp();
+        let extended = format!("{source}\n");
+        let extended_eof = Point::new(eof.row + 1, 0);
+
+        // Inserting and removing whitespace at EOF must move the ordinary
+        // zero-width content leaf, not discard it or turn it into a missing
+        // node. Parsing with an old tree also exercises scanner-state restore.
+        for (text, old_end, new_end) in [
+            (extended.as_str(), eof, extended_eof),
+            (source, extended_eof, eof),
+        ] {
+            tree.edit(&InputEdit {
+                start_byte: source.len(),
+                old_end_byte: tree.root_node().end_byte(),
+                new_end_byte: text.len(),
+                start_position: eof,
+                old_end_position: old_end,
+                new_end_position: new_end,
+            });
+            tree = parser.parse(text, Some(&tree)).unwrap();
+            let root = tree.root_node();
+            assert_eq!(root.to_sexp(), original_sexp);
+            assert_eq!(root.byte_range(), 0..text.len());
+            assert_eq!(root.end_position(), new_end);
+
+            let error = root.child(0).unwrap();
+            assert!(error.is_error());
+            let content = error.named_child(1).unwrap();
+            assert_eq!(content.kind(), "bracket_argument_content");
+            assert_eq!(content.byte_range(), text.len()..text.len());
+            assert_eq!(content.start_position(), new_end);
+            assert_eq!(content.end_position(), new_end);
+            assert!(!content.is_missing());
+            assert!(!content.is_extra());
+            assert!(!content.has_error());
+            assert_eq!(content.child_count(), 0);
             assert!(content.next_sibling().is_none());
         }
     }
