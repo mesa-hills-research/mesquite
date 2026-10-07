@@ -30,6 +30,13 @@ macro_rules! tag_types {
                 TYPES[usize::from(byte)]
             }
 
+            fn name(self) -> &'static [u8] {
+                match self {
+                    $($(Self::$variant => $name,)?)*
+                    _ => &[],
+                }
+            }
+
             fn for_name(name: &[u8]) -> Self {
                 // A byte-slice match lets the compiler dispatch by length and
                 // bytes instead of searching all 126 entries for every tag.
@@ -325,6 +332,18 @@ impl TagStack {
         })
     }
 
+    fn last_matches_name(&self, name: &[u8]) -> bool {
+        self.last().is_some_and(|tag| {
+            if tag.kind == TagType::Custom {
+                tag.custom_tag_name == name && TagType::for_name(name) == TagType::Custom
+            } else {
+                // Sentinels have no spelling, and cannot match the empty
+                // custom name produced when an implicit scan reaches EOF.
+                !name.is_empty() && tag.kind.name() == name
+            }
+        })
+    }
+
     fn push(&mut self, tag: Tag<'_>) {
         self.snapshot.len = 0;
         self.kinds.push(tag.kind as u8);
@@ -510,14 +529,14 @@ impl Scanner {
         if self.tag_name.is_empty() && !lexer.eof() {
             return false;
         }
-        let next_tag = Tag::for_name(&self.tag_name);
-
         if is_closing_tag {
-            // A matching topmost tag is handled by the explicit end-tag scanner.
-            if self.tags.last() == Some(next_tag) {
+            // Most closing tags match their parent. Compare its spelling
+            // directly instead of searching the full builtin name map.
+            if self.tags.last_matches_name(&self.tag_name) {
                 return false;
             }
 
+            let next_tag = Tag::for_name(&self.tag_name);
             // Recovery deliberately compares only types here, not custom names.
             // Only one stack entry is removed, even if the match is much deeper.
             if self
@@ -532,7 +551,7 @@ impl Scanner {
                 return true;
             }
         } else if self.tags.last().is_some_and(|parent| {
-            !parent.can_contain(&next_tag)
+            !parent.can_contain(&Tag::for_name(&self.tag_name))
                 || (matches!(parent.kind, TagType::Html | TagType::Head | TagType::Body)
                     && lexer.eof())
         }) {
@@ -566,8 +585,7 @@ impl Scanner {
             return false;
         }
 
-        let tag = Tag::for_name(&self.tag_name);
-        if self.tags.last() == Some(tag) {
+        if self.tags.last_matches_name(&self.tag_name) {
             self.tags.pop();
             lexer.set_result_symbol(END_TAG_NAME as u16);
         } else {
@@ -894,6 +912,48 @@ mod tests {
         assert_eq!(Tag::default().kind as u8, 127);
         for name in [b"".as_slice(), b"END_", b"div", b"DIV\0", b"X-A"] {
             assert_eq!(Tag::for_name(name).kind, TagType::Custom);
+        }
+    }
+
+    #[test]
+    fn parent_name_comparison_matches_tag_classification() {
+        let mut parents: Vec<_> = TAG_TYPES_BY_TAG_NAME
+            .iter()
+            .map(|&(name, _)| Tag::for_name(name))
+            .collect();
+        parents.extend([
+            Tag::default(),
+            Tag {
+                kind: TagType::EndOfVoidTags,
+                custom_tag_name: &[],
+            },
+            Tag::for_name(b""),
+            Tag::for_name(b"X-A"),
+            Tag::for_name(b"DIV\0"),
+            // Snapshots can restore a custom tag whose bytes spell a builtin.
+            // The C comparison still requires the tag types to match.
+            Tag {
+                kind: TagType::Custom,
+                custom_tag_name: b"DIV",
+            },
+        ]);
+        let mut names: Vec<_> = TAG_TYPES_BY_TAG_NAME
+            .iter()
+            .map(|&(name, _)| name)
+            .collect();
+        names.extend([b"".as_slice(), b"X-A", b"X-B", b"DIV\0", b"div", b"END_"]);
+        for parent in parents {
+            let stack = TagStack::from_iter([parent]);
+            for &name in &names {
+                assert_eq!(
+                    stack.last_matches_name(name),
+                    parent == Tag::for_name(name),
+                    "parent={parent:?}, name={name:?}",
+                );
+            }
+        }
+        for name in names {
+            assert!(!TagStack::default().last_matches_name(name));
         }
     }
 
