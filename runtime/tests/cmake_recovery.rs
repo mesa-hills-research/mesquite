@@ -241,6 +241,87 @@ fn non_utf8_bom_input_recovers_as_one_bracket_content_leaf() {
 }
 
 #[test]
+fn malformed_variable_commands_recover_as_top_level_errors() {
+    let language = ts_port_cmake::language().into();
+    for (source, child_count, named_child_count, content_start) in [
+        ("set(var \"${\")\n", 7, 3, 11),
+        ("message(${var\twith\ttab})\n", 5, 2, 14),
+        ("message(${var with space})\n", 5, 2, 14),
+    ] {
+        for warmup in [
+            None,
+            Some("message([==[prior]==])\n"),
+            Some("#[=[prior]=]\n"),
+        ] {
+            let mut parser = Parser::new();
+            parser.set_language(&language).unwrap();
+            if let Some(warmup) = warmup {
+                let tree = parser.parse(warmup, None).unwrap();
+                assert!(!tree.root_node().has_error());
+            }
+
+            for chunk_size in [source.len(), 1] {
+                let mut progress_calls = 0;
+                let mut progress = |_: &ParseState| {
+                    progress_calls += 1;
+                    false
+                };
+                let mut read = |byte: usize, _: Point| {
+                    let start = byte.min(source.len());
+                    &source.as_bytes()[start..(start + chunk_size).min(source.len())]
+                };
+                let options = ParseOptions::new().progress_callback(&mut progress);
+                let tree = parser
+                    .parse_with_options(&mut read, None, Some(options))
+                    .unwrap();
+                assert_eq!(progress_calls, 0);
+
+                // UnterminatedBrace1.cmake, NameWithTabs.cmake, and
+                // NameWithSpaces.cmake from bucket 6c68c51b. With an inert
+                // initial scanner token these incorrectly became normal_command
+                // nodes. C's zero token instead permits bracket content during
+                // recovery, consuming the command's remainder through EOF.
+                let root = tree.root_node();
+                assert_eq!(root.kind(), "source_file");
+                assert_eq!(root.byte_range(), 0..source.len());
+                assert_eq!(root.start_position(), Point::new(0, 0));
+                assert_eq!(root.end_position(), Point::new(1, 0));
+                assert!(root.has_error());
+                assert_eq!(root.child_count(), 1);
+                assert_eq!(root.named_child_count(), 1);
+
+                let error = root.child(0).unwrap();
+                assert!(error.is_error(), "{source:?}");
+                assert!(error.is_named());
+                assert!(error.is_extra());
+                assert!(!error.is_missing());
+                assert!(error.has_error());
+                assert_eq!(error.range(), root.range());
+                assert_eq!(error.child_count(), child_count);
+                assert_eq!(error.named_child_count(), named_child_count);
+                assert_eq!(error.child(0).unwrap().kind(), "identifier");
+
+                let content = error.child(child_count - 1).unwrap();
+                assert_eq!(content.kind(), "bracket_argument_content");
+                assert_eq!(content.kind_id(), 37);
+                assert_eq!(content.byte_range(), content_start..source.len());
+                assert_eq!(content.start_position(), Point::new(0, content_start));
+                assert_eq!(content.end_position(), Point::new(1, 0));
+                assert!(content.is_named());
+                assert!(!content.is_error());
+                assert!(!content.is_extra());
+                assert!(!content.is_missing());
+                assert!(!content.has_error());
+                assert_eq!(content.child_count(), 0);
+                assert_eq!(content.named_child_count(), 0);
+                assert_eq!(error.named_child(named_child_count - 1), Some(content));
+                assert!(content.next_sibling().is_none());
+            }
+        }
+    }
+}
+
+#[test]
 fn eof_content_tracks_incremental_whitespace_edits() {
     let language = ts_port_cmake::language().into();
     let mut parser = Parser::new();
