@@ -1601,7 +1601,13 @@ impl Scanner {
                 self.sch_stt = SCH_STT_FRZ; // must be ResultSchema::String
             }
 
-            self.mrk_end(lexer);
+            // ASCII letters are unconditional content in both scalar contexts.
+            // Their next run will overwrite this prefix mark before it can stop
+            // or speculate. Keep all other rollback marks without doing a full
+            // block/flow character classification merely to elide a mark.
+            if !(i32::from(b'a')..=i32::from(b'z')).contains(&(self.lookahead | 0x20)) {
+                self.mrk_end(lexer);
+            }
 
             loop {
                 if !is_nwl(self.lookahead)
@@ -2997,6 +3003,146 @@ mod tests {
         check(&" ".repeat(65539), 0, i16::MAX);
         check(&"\r\n".repeat(32769), i16::MAX, 0);
         check(&format!(" \t{}#", " ".repeat(32768)), -1, -1);
+    }
+
+    #[test]
+    fn scalar_prefix_marks_coalesce_only_before_unconditional_content() {
+        type ScalarCase = (&'static str, usize, usize, usize, usize, &'static [usize]);
+        let cases: &[ScalarCase] = &[
+            (
+                "alpha: x",
+                R_SGL_PLN_STR_BLK,
+                R_SGL_PLN_STR_BLK,
+                5,
+                6,
+                &[0, 5],
+            ),
+            (
+                "123: x",
+                R_SGL_PLN_STR_BLK,
+                R_SGL_PLN_INT_BLK,
+                3,
+                4,
+                &[0, 1, 3],
+            ),
+            (
+                "1.5e2: x",
+                R_SGL_PLN_STR_BLK,
+                R_SGL_PLN_FLT_BLK,
+                5,
+                6,
+                &[0, 1, 5],
+            ),
+            (
+                "a#b",
+                R_SGL_PLN_STR_BLK,
+                R_SGL_PLN_STR_BLK,
+                3,
+                3,
+                &[0, 1, 3],
+            ),
+            ("---x", R_SGL_PLN_STR_BLK, R_SGL_PLN_STR_BLK, 4, 4, &[0, 4]),
+            ("...x", R_SGL_PLN_STR_BLK, R_SGL_PLN_STR_BLK, 4, 4, &[0, 4]),
+            ("a: x", R_SGL_PLN_STR_BLK, R_SGL_PLN_STR_BLK, 1, 2, &[0, 1]),
+            (
+                "a # comment",
+                R_SGL_PLN_STR_BLK,
+                R_SGL_PLN_STR_BLK,
+                1,
+                2,
+                &[0, 1],
+            ),
+            (
+                "a b",
+                R_SGL_PLN_STR_BLK,
+                R_SGL_PLN_STR_BLK,
+                3,
+                3,
+                &[0, 1, 3],
+            ),
+            (
+                "alpha, next",
+                R_SGL_PLN_STR_FLW,
+                R_SGL_PLN_STR_FLW,
+                5,
+                5,
+                &[0, 5],
+            ),
+            (
+                "false, next",
+                R_SGL_PLN_STR_FLW,
+                R_SGL_PLN_BOL_BLK + 3,
+                5,
+                5,
+                &[0, 5],
+            ),
+            (
+                "a, next",
+                R_SGL_PLN_STR_FLW,
+                R_SGL_PLN_STR_FLW,
+                1,
+                1,
+                &[0, 1],
+            ),
+        ];
+        for &(input, allowed, symbol, end, position, marks) in cases {
+            let mut scanner = scanner();
+            let mut lexer = TestLexer::new(input);
+            assert!(scanner.scan(&mut lexer, &valid(&[allowed])), "{input:?}");
+            assert_eq!(lexer.symbol as usize, symbol, "{input:?}");
+            assert_eq!((lexer.end, lexer.position), (end, position), "{input:?}");
+            assert_eq!((scanner.row, scanner.col), (0, end as i16), "{input:?}");
+            let actual_marks: Vec<_> = lexer
+                .events
+                .iter()
+                .filter_map(|event| {
+                    if let Event::MarkEnd(position) = event {
+                        Some(*position)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            assert_eq!(actual_marks, marks, "{input:?}");
+            // Coalescing marks does not remove even speculative advances or
+            // introduce skipped characters into the token.
+            let advances: Vec<_> = lexer
+                .events
+                .iter()
+                .filter_map(|event| {
+                    if let Event::Advance(position, skip) = event {
+                        Some((*position, *skip))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            assert_eq!(
+                advances,
+                (0..position).map(|i| (i, false)).collect::<Vec<_>>()
+            );
+            assert_eq!(lexer.lookahead_calls.get(), position + 1);
+        }
+    }
+
+    #[test]
+    fn scalar_prefix_rollback_survives_wrapping_columns() {
+        for (input, end, position) in [("1#x: z", 3, 4), ("\u{1}#x", 1, 1)] {
+            let mut scanner = scanner();
+            scanner.col = i16::MAX;
+            let mut lexer = TestLexer::new(input);
+            assert!(scanner.scan(&mut lexer, &valid(&[R_SGL_PLN_STR_BLK])));
+            // The C scanner's promoted column subtraction is no longer 1
+            // after the first advance wraps. It therefore freezes as String,
+            // even for the numeric or invalid first character above.
+            assert_eq!(lexer.symbol as usize, R_SGL_PLN_STR_BLK);
+            assert_eq!((lexer.end, lexer.position), (end, position));
+            assert_eq!(scanner.col, i16::MAX.wrapping_add(end as i16));
+            let mut bytes = [0; SERIALIZATION_BUFFER_SIZE];
+            let size = scanner.serialize(&mut bytes);
+            assert_eq!(size, 10);
+            assert_eq!(&bytes[2..4], &scanner.col.to_ne_bytes());
+        }
     }
 
     #[test]
