@@ -1020,6 +1020,7 @@ pub(crate) fn ts_parser__shift(
     }
 }
 
+#[inline]
 pub(crate) fn ts_parser__reduce(
     parser: &mut Parser,
     version: StackVersion,

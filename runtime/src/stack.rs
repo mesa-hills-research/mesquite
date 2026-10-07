@@ -270,6 +270,7 @@ pub(crate) fn stack__subtree_node_count(subtree: &Subtree) -> u32 {
     count
 }
 
+#[inline]
 pub(crate) fn stack_node_new(
     arena: &mut StackArena,
     previous_node: Option<StackNodeId>,
@@ -681,6 +682,7 @@ pub(crate) fn ts_stack_node_count_since_error(stack: &mut Stack, version: StackV
     node_count - head.node_count_at_last_error
 }
 
+#[inline]
 pub(crate) fn ts_stack_push(
     stack: &mut Stack,
     _pool: &mut SubtreePool,
@@ -726,6 +728,7 @@ pub(crate) fn ts_stack_pop_count(
 /// be committed to replacing that version (no alternative reduction/shift).
 /// Refuse shared or branching prefixes without changing anything, so the full
 /// graph traversal can handle them with its usual ordering and limits.
+#[inline]
 pub(crate) fn ts_stack_pop_count_in_place(
     stack: &mut Stack,
     count: u32,
@@ -734,6 +737,28 @@ pub(crate) fn ts_stack_pop_count_in_place(
         return None;
     }
     let top = stack.heads[0].node;
+    // A one-symbol reduction with no leading extras can transfer its sole edge
+    // immediately. There is no longer prefix whose ownership needs preflight.
+    if count == 1 {
+        let data = stack.arena.node_mut(top);
+        if data.ref_count != 1 || data.link_count != 1 {
+            return None;
+        }
+        let link = data.links[0].as_ref().expect("initialized stack link");
+        if !ts_subtree_extra(&link.subtree) {
+            let link = data.links[0].take().expect("initialized stack link");
+            stack.arena.nodes[top.0] = None;
+            stack.arena.free.push(top);
+            stack.heads[0].node = link.node;
+            stack.slices.clear();
+            stack.iterators.clear();
+            return Some(if link.subtree.is_null() {
+                Vec::new()
+            } else {
+                vec![link.subtree]
+            });
+        }
+    }
     let mut node = top;
     let mut remaining = count;
     let mut subtree_count = 0;
@@ -2134,6 +2159,29 @@ mod stack_1_tests {
         assert_eq!(stack.arena.node(shared).ref_count, 1);
         assert_eq!(stack.arena.node(shared).link_count, 2);
         ts_stack_delete(&mut stack, &mut pool);
+    }
+
+    #[test]
+    fn in_place_single_link_pop_moves_null_and_visible_tokens() {
+        for tree in [Subtree::Null, leaf(1, VISIBLE)] {
+            let mut stack = ts_stack_new();
+            let mut pool = SubtreePool::default();
+            let base = stack.heads[0].node;
+            let is_null = tree.is_null();
+            ts_stack_push(&mut stack, &mut pool, 0, tree, false, 2);
+            let top = stack.heads[0].node;
+            let children = ts_stack_pop_count_in_place(&mut stack, 1).unwrap();
+            assert_eq!(children.len(), usize::from(!is_null));
+            if !is_null {
+                assert_eq!(ts_subtree_symbol(&children[0]), 1);
+            }
+            assert_eq!(stack.heads[0].node, base);
+            assert_eq!(stack.arena.free, [top]);
+            assert!(stack.arena.nodes[top.0].is_none());
+            assert_eq!(stack.arena.node(base).ref_count, 2);
+            assert!(stack.slices.is_empty());
+            ts_stack_delete(&mut stack, &mut pool);
+        }
     }
 
     #[test]
