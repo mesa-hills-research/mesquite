@@ -263,6 +263,7 @@ impl<'tree> Node<'tree> {
     pub fn id(&self) -> usize {
         std::ptr::from_ref(self.subtree) as usize
     }
+    #[inline]
     pub fn kind_id(&self) -> u16 {
         ts_node_symbol(*self)
     }
@@ -278,6 +279,7 @@ impl<'tree> Node<'tree> {
     pub fn language(&self) -> LanguageRef<'_> {
         LanguageRef(ts_node_language(*self))
     }
+    #[inline]
     pub fn is_named(&self) -> bool {
         ts_node_is_named(*self)
     }
@@ -302,9 +304,11 @@ impl<'tree> Node<'tree> {
     pub fn is_missing(&self) -> bool {
         ts_node_is_missing(*self)
     }
+    #[inline]
     pub fn start_byte(&self) -> usize {
         ts_node_start_byte(*self) as usize
     }
+    #[inline]
     pub fn end_byte(&self) -> usize {
         ts_node_end_byte(*self) as usize
     }
@@ -319,9 +323,11 @@ impl<'tree> Node<'tree> {
             end_point: self.end_position(),
         }
     }
+    #[inline]
     pub fn start_position(&self) -> Point {
         ts_node_start_point(*self).into()
     }
+    #[inline]
     pub fn end_position(&self) -> Point {
         ts_node_end_point(*self).into()
     }
@@ -462,9 +468,11 @@ impl<'tree> Node<'tree> {
 }
 
 impl<'cursor> TreeCursor<'cursor> {
+    #[inline]
     pub fn node(&self) -> Node<'cursor> {
         ts_tree_cursor_current_node(self)
     }
+    #[inline]
     pub fn field_id(&self) -> Option<FieldId> {
         FieldId::new(ts_tree_cursor_current_field_id(self))
     }
@@ -477,12 +485,14 @@ impl<'cursor> TreeCursor<'cursor> {
     pub fn descendant_index(&self) -> usize {
         ts_tree_cursor_current_descendant_index(self) as usize
     }
+    #[inline]
     pub fn goto_first_child(&mut self) -> bool {
         ts_tree_cursor_goto_first_child(self)
     }
     pub fn goto_last_child(&mut self) -> bool {
         ts_tree_cursor_goto_last_child(self)
     }
+    #[inline]
     pub fn goto_parent(&mut self) -> bool {
         ts_tree_cursor_goto_parent(self)
     }

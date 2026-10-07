@@ -545,6 +545,7 @@ pub(crate) fn ts_tree_cursor_goto_previous_sibling(cursor: &mut TreeCursor<'_>) 
     }
 }
 
+#[inline]
 pub(crate) fn ts_tree_cursor_goto_parent(cursor: &mut TreeCursor<'_>) -> bool {
     for i in (0..cursor.stack.len() - 1).rev() {
         if ts_tree_cursor_is_entry_visible(cursor, i as u32) {

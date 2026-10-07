@@ -18,6 +18,7 @@ pub(crate) struct NodeChildIterator<'tree> {
     pub alias_sequence: &'static [Symbol],
 }
 
+#[inline]
 pub(crate) fn ts_node_new<'tree>(
     tree: &'tree Tree,
     subtree: &'tree Subtree,
@@ -36,10 +37,12 @@ pub(crate) fn ts_node__null<'tree>() -> Option<Node<'tree>> {
     None
 }
 
+#[inline]
 pub(crate) fn ts_node_start_byte(node: Node<'_>) -> u32 {
     node.position.bytes
 }
 
+#[inline]
 pub(crate) fn ts_node_start_point(node: Node<'_>) -> Point {
     node.position.extent
 }
@@ -400,10 +403,12 @@ pub(crate) fn ts_node__descendant_for_point_range(
 #[path = "node1_tests.rs"]
 mod node1_tests;
 
+#[inline]
 pub(crate) fn ts_node_end_byte(node: Node<'_>) -> u32 {
     ts_node_start_byte(node).wrapping_add(subtree::ts_subtree_size(ts_node__subtree(node)).bytes)
 }
 
+#[inline]
 pub(crate) fn ts_node_end_point(node: Node<'_>) -> Point {
     point::point_add(
         ts_node_start_point(node),
@@ -411,6 +416,7 @@ pub(crate) fn ts_node_end_point(node: Node<'_>) -> Point {
     )
 }
 
+#[inline]
 pub(crate) fn ts_node_symbol(node: Node<'_>) -> Symbol {
     let alias = ts_node__alias(&node);
     let symbol = if alias != 0 {
@@ -469,6 +475,7 @@ pub(crate) fn ts_node_is_extra(node: Node<'_>) -> bool {
     subtree::ts_subtree_extra(ts_node__subtree(node))
 }
 
+#[inline]
 pub(crate) fn ts_node_is_named(node: Node<'_>) -> bool {
     let alias = ts_node__alias(&node);
     if alias != 0 {
