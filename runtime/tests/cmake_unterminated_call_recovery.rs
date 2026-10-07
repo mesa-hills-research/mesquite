@@ -6,7 +6,7 @@
 //! inserted missing delimiters, rather than the reference's top-level ERROR.
 
 use std::ops::Range;
-use ts_port::{Language, ParseOptions, ParseState, Parser, Point};
+use ts_port::{InputEdit, Language, ParseOptions, ParseState, Parser, Point};
 
 fn assert_root_error(
     source: &[u8],
@@ -106,6 +106,67 @@ fn point_at(source: &[u8], byte: usize) -> Point {
     })
 }
 
+fn assert_incremental_repair_and_undo(
+    source: &[u8],
+    edit_bytes: Range<usize>,
+    replacement: &[u8],
+    recovery_bytes: Range<usize>,
+) {
+    let language = Language::from(ts_port_cmake::language());
+    let mut parser = Parser::new();
+    parser.set_language(&language).unwrap();
+    let mut tree = parser.parse(source, None).unwrap();
+    let expected_sexp = tree.root_node().to_sexp();
+
+    let mut repaired_source = source.to_vec();
+    repaired_source.splice(edit_bytes.clone(), replacement.iter().copied());
+    let repair = InputEdit {
+        start_byte: edit_bytes.start,
+        old_end_byte: edit_bytes.end,
+        new_end_byte: edit_bytes.start + replacement.len(),
+        start_position: point_at(source, edit_bytes.start),
+        old_end_position: point_at(source, edit_bytes.end),
+        new_end_position: point_at(&repaired_source, edit_bytes.start + replacement.len()),
+    };
+    let undo = InputEdit {
+        start_byte: repair.start_byte,
+        old_end_byte: repair.new_end_byte,
+        new_end_byte: repair.old_end_byte,
+        start_position: repair.start_position,
+        old_end_position: repair.new_end_position,
+        new_end_position: repair.old_end_position,
+    };
+
+    // Reuse the edited tree, not just the parser. Repair removes the recovery
+    // token; undo must recreate it from the reset scanner state, including the
+    // zero-width token at EOF in the unterminated calls.
+    for _ in 0..2 {
+        tree.edit(&repair);
+        tree = parser.parse(&repaired_source, Some(&tree)).unwrap();
+        assert_eq!(tree.root_node().kind(), "source_file");
+        assert!(!tree.root_node().has_error());
+
+        tree.edit(&undo);
+        tree = parser.parse(source, Some(&tree)).unwrap();
+        let root = tree.root_node();
+        assert_eq!(root.kind(), "ERROR");
+        assert!(root.is_error());
+        assert_eq!(root.to_sexp(), expected_sexp);
+        assert_eq!(root.byte_range(), 0..source.len());
+        assert_eq!(root.end_position(), point_at(source, source.len()));
+        let content = root.child(root.child_count() - 1).unwrap();
+        assert_eq!(content.kind(), "bracket_argument_content");
+        assert_eq!(content.byte_range(), recovery_bytes);
+        assert_eq!(
+            content.start_position(),
+            point_at(source, recovery_bytes.start)
+        );
+        assert_eq!(content.end_position(), point_at(source, recovery_bytes.end));
+        assert!(!content.is_missing());
+        assert!(!content.has_error());
+    }
+}
+
 #[test]
 fn unterminated_call_retains_top_level_error() {
     let source = b"message(\n\n\nmessage(\"Additional message\")\n";
@@ -124,6 +185,12 @@ fn unterminated_call_retains_top_level_error() {
             chunk_size,
         );
     }
+    assert_incremental_repair_and_undo(
+        source,
+        source.len()..source.len(),
+        b")",
+        source.len()..source.len(),
+    );
 }
 
 #[test]
@@ -144,6 +211,12 @@ fn unterminated_call_after_valid_command_retains_top_level_error() {
             chunk_size,
         );
     }
+    assert_incremental_repair_and_undo(
+        source,
+        source.len()..source.len(),
+        b")",
+        source.len()..source.len(),
+    );
 }
 
 #[test]
@@ -164,4 +237,5 @@ fn nul_in_argument_is_recovery_content_not_eof() {
             chunk_size,
         );
     }
+    assert_incremental_repair_and_undo(source, 20..21, b" ", 20..source.len());
 }
