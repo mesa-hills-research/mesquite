@@ -135,9 +135,14 @@ worklist/pool algorithm; null and inline releases do not clear pool scratch.
 ## Graph-structured stack
 
 The stack is a parser-local arena. `StackNodeId(usize)` indexes
-`StackArena.nodes: Vec<Option<StackNode>>`; links and heads store IDs, never Rust
-references into the reallocating Vec. Nodes have explicit C-style u32 refcounts,
-a `StackLinks` storage and link_count, with the same eight-link limit as C.
+`StackArena.nodes: Vec<StackNode>`; links and heads store IDs, never Rust
+references into the reallocating Vec. A zero refcount marks a vacant slot. Such
+slots own no links, but may retain inert scalar values until reinitialization;
+only live slots may be dereferenced through graph edges or heads. Node accessors
+check this invariant in debug builds. Reusing a slot overwrites every scalar
+header field directly rather than copying an owning temporary node. Nodes have
+explicit C-style u32 refcounts, a `StackLinks` storage and link_count, with the
+same eight-link limit as C.
 `StackLinks` keeps the first `Option<StackLink>` inline and lazily allocates a
 boxed array for the other seven slots only when multiple predecessors are added.
 This keeps single-predecessor nodes compact without a per-push allocation and

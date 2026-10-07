@@ -2944,7 +2944,7 @@ mod parser3_tests {
                 assert_eq!(parser.stack.slices.capacity(), capacity);
                 ts_stack_renumber_version(&mut parser.stack, &mut parser.tree_pool, version, 0);
                 let head = parser.stack.heads[0].node;
-                let node = parser.stack.arena.nodes[head.0].as_ref().unwrap();
+                let node = &parser.stack.arena.nodes[head.0];
                 let tree = &node.links[0].as_ref().unwrap().subtree;
                 let Subtree::Heap(data) = tree else {
                     panic!("reduced branch")
@@ -3000,14 +3000,14 @@ mod parser3_tests {
             ts_stack_renumber_version(&mut parser.stack, &mut parser.tree_pool, version, 0);
             let mut node = parser.stack.heads[0].node;
             for symbol in [3, 2] {
-                let link = parser.stack.arena.nodes[node.0].as_ref().unwrap().links[0]
+                let link = parser.stack.arena.nodes[node.0].links[0]
                     .as_ref()
                     .unwrap();
                 assert_eq!(ts_subtree_symbol(&link.subtree), symbol);
                 assert!(ts_subtree_extra(&link.subtree));
                 node = link.node;
             }
-            let tree = &parser.stack.arena.nodes[node.0].as_ref().unwrap().links[0]
+            let tree = &parser.stack.arena.nodes[node.0].links[0]
                 .as_ref()
                 .unwrap()
                 .subtree;
@@ -3466,7 +3466,7 @@ mod parser3_tests {
                 );
                 ts_stack_renumber_version(&mut parser.stack, &mut parser.tree_pool, version, 0);
                 let node = parser.stack.heads[0].node;
-                let tree = &parser.stack.arena.nodes[node.0].as_ref().unwrap().links[0]
+                let tree = &parser.stack.arena.nodes[node.0].links[0]
                     .as_ref()
                     .unwrap()
                     .subtree;

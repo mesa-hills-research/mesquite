@@ -263,54 +263,71 @@ impl<'tree> Node<'tree> {
     pub fn id(&self) -> usize {
         std::ptr::from_ref(self.subtree) as usize
     }
+    #[inline]
     pub fn kind_id(&self) -> u16 {
         ts_node_symbol(*self)
     }
+    #[inline]
     pub fn grammar_id(&self) -> u16 {
         ts_node_grammar_symbol(*self)
     }
+    #[inline]
     pub fn kind(&self) -> &'static str {
         ts_node_type(*self)
     }
+    #[inline]
     pub fn grammar_name(&self) -> &'static str {
         ts_node_grammar_type(*self)
     }
+    #[inline]
     pub fn language(&self) -> LanguageRef<'_> {
         LanguageRef(ts_node_language(*self))
     }
+    #[inline]
     pub fn is_named(&self) -> bool {
         ts_node_is_named(*self)
     }
+    #[inline]
     pub fn is_extra(&self) -> bool {
         ts_node_is_extra(*self)
     }
+    #[inline]
     pub fn has_changes(&self) -> bool {
         ts_node_has_changes(*self)
     }
+    #[inline]
     pub fn has_error(&self) -> bool {
         ts_node_has_error(*self)
     }
+    #[inline]
     pub fn is_error(&self) -> bool {
         ts_node_is_error(*self)
     }
+    #[inline]
     pub fn parse_state(&self) -> u16 {
         ts_node_parse_state(*self)
     }
+    #[inline]
     pub fn next_parse_state(&self) -> u16 {
         ts_node_next_parse_state(*self)
     }
+    #[inline]
     pub fn is_missing(&self) -> bool {
         ts_node_is_missing(*self)
     }
+    #[inline]
     pub fn start_byte(&self) -> usize {
         ts_node_start_byte(*self) as usize
     }
+    #[inline]
     pub fn end_byte(&self) -> usize {
         ts_node_end_byte(*self) as usize
     }
+    #[inline]
     pub fn byte_range(&self) -> core::ops::Range<usize> {
         self.start_byte()..self.end_byte()
     }
+    #[inline]
     pub fn range(&self) -> Range {
         Range {
             start_byte: self.start_byte(),
@@ -319,21 +336,25 @@ impl<'tree> Node<'tree> {
             end_point: self.end_position(),
         }
     }
+    #[inline]
     pub fn start_position(&self) -> Point {
         ts_node_start_point(*self).into()
     }
+    #[inline]
     pub fn end_position(&self) -> Point {
         ts_node_end_point(*self).into()
     }
     pub fn child(&self, i: usize) -> Option<Self> {
         ts_node_child(*self, i as u32)
     }
+    #[inline]
     pub fn child_count(&self) -> usize {
         ts_node_child_count(*self) as usize
     }
     pub fn named_child(&self, i: usize) -> Option<Self> {
         ts_node_named_child(*self, i as u32)
     }
+    #[inline]
     pub fn named_child_count(&self) -> usize {
         ts_node_named_child_count(*self) as usize
     }
@@ -462,30 +483,38 @@ impl<'tree> Node<'tree> {
 }
 
 impl<'cursor> TreeCursor<'cursor> {
+    #[inline]
     pub fn node(&self) -> Node<'cursor> {
         ts_tree_cursor_current_node(self)
     }
+    #[inline]
     pub fn field_id(&self) -> Option<FieldId> {
         FieldId::new(ts_tree_cursor_current_field_id(self))
     }
+    #[inline]
     pub fn field_name(&self) -> Option<&'static str> {
         ts_tree_cursor_current_field_name(self)
     }
+    #[inline]
     pub fn depth(&self) -> u32 {
         ts_tree_cursor_current_depth(self)
     }
+    #[inline]
     pub fn descendant_index(&self) -> usize {
         ts_tree_cursor_current_descendant_index(self) as usize
     }
+    #[inline]
     pub fn goto_first_child(&mut self) -> bool {
         ts_tree_cursor_goto_first_child(self)
     }
     pub fn goto_last_child(&mut self) -> bool {
         ts_tree_cursor_goto_last_child(self)
     }
+    #[inline]
     pub fn goto_parent(&mut self) -> bool {
         ts_tree_cursor_goto_parent(self)
     }
+    #[inline]
     pub fn goto_next_sibling(&mut self) -> bool {
         ts_tree_cursor_goto_next_sibling(self)
     }

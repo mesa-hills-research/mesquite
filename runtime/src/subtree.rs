@@ -1573,6 +1573,7 @@ impl Subtree {
     }
 }
 
+#[inline]
 pub(crate) fn ts_subtree_visible(tree: &Subtree) -> bool {
     match tree {
         Subtree::Inline(d) => d.flags & VISIBLE != 0,
@@ -1581,6 +1582,7 @@ pub(crate) fn ts_subtree_visible(tree: &Subtree) -> bool {
     }
 }
 
+#[inline]
 pub(crate) fn ts_subtree_named(tree: &Subtree) -> bool {
     match tree {
         Subtree::Inline(d) => d.flags & NAMED != 0,
@@ -1589,6 +1591,7 @@ pub(crate) fn ts_subtree_named(tree: &Subtree) -> bool {
     }
 }
 
+#[inline]
 pub(crate) fn ts_subtree_extra(tree: &Subtree) -> bool {
     match tree {
         Subtree::Inline(d) => d.flags & EXTRA != 0,
@@ -1621,6 +1624,7 @@ pub(crate) fn ts_subtree_is_keyword(tree: &Subtree) -> bool {
     }
 }
 
+#[inline]
 pub(crate) fn ts_subtree_symbol(tree: &Subtree) -> Symbol {
     match tree {
         Subtree::Inline(d) => d.symbol as Symbol,
@@ -1674,6 +1678,7 @@ pub(crate) fn ts_subtree_named_child_count(tree: &Subtree) -> u32 {
     tree.branch().map_or(0, |d| d.named_child_count)
 }
 
+#[inline]
 pub(crate) fn ts_subtree_visible_descendant_count(tree: &Subtree) -> u32 {
     tree.branch().map_or(0, |d| d.visible_descendant_count)
 }
@@ -1706,9 +1711,11 @@ pub(crate) fn ts_subtree_repeat_depth(tree: &Subtree) -> u32 {
     }
 }
 
+#[inline]
 pub(crate) fn ts_subtree_children(tree: &Subtree) -> &[Subtree] {
     tree.heap().map_or(&[], |d| d.children.as_slice())
 }
+#[inline]
 pub(crate) fn ts_subtree_child_count(tree: &Subtree) -> u32 {
     ts_subtree_children(tree).len() as u32
 }
@@ -1738,6 +1745,7 @@ pub(crate) fn ts_subtree_leaf_parse_state(tree: &Subtree) -> StateId {
             |d| d.first_leaf.parse_state,
         )
 }
+#[inline]
 pub(crate) fn ts_subtree_padding(tree: &Subtree) -> Length {
     match tree {
         Subtree::Inline(d) => Length {
@@ -1751,6 +1759,7 @@ pub(crate) fn ts_subtree_padding(tree: &Subtree) -> Length {
         Subtree::Null => length_zero(),
     }
 }
+#[inline]
 pub(crate) fn ts_subtree_size(tree: &Subtree) -> Length {
     match tree {
         Subtree::Inline(d) => Length {

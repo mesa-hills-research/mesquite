@@ -318,6 +318,7 @@ pub(crate) fn ts_language_is_reserved_word(
     false
 }
 
+#[inline]
 pub(crate) fn ts_language_symbol_metadata(language: &Language, symbol: Symbol) -> SymbolMetadata {
     match symbol {
         BUILTIN_SYM_ERROR => SymbolMetadata {
@@ -330,6 +331,7 @@ pub(crate) fn ts_language_symbol_metadata(language: &Language, symbol: Symbol) -
     }
 }
 
+#[inline]
 pub(crate) fn ts_language_public_symbol(language: &Language, symbol: Symbol) -> Symbol {
     if symbol == BUILTIN_SYM_ERROR {
         symbol

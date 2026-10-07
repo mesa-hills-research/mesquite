@@ -65,7 +65,7 @@ impl std::ops::IndexMut<usize> for StackLinks {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct StackNode {
     pub state: StateId,
     pub position: Length,
@@ -78,7 +78,9 @@ pub(crate) struct StackNode {
 }
 #[derive(Debug, Default)]
 pub(crate) struct StackArena {
-    pub nodes: Vec<Option<StackNode>>,
+    // A zero refcount denotes a vacant slot with no owning links. Keeping its
+    // inert scalar fields avoids zeroing the whole header during recycling.
+    pub nodes: Vec<StackNode>,
     pub free: Vec<StackNodeId>,
 }
 #[derive(Clone, Debug)]
@@ -134,11 +136,15 @@ pub(crate) struct SummarizeStackSession<'a> {
 
 impl StackArena {
     fn node(&self, id: StackNodeId) -> &StackNode {
-        self.nodes[id.0].as_ref().expect("live stack node")
+        let node = &self.nodes[id.0];
+        debug_assert_ne!(node.ref_count, 0, "live stack node");
+        node
     }
 
     fn node_mut(&mut self, id: StackNodeId) -> &mut StackNode {
-        self.nodes[id.0].as_mut().expect("live stack node")
+        let node = &mut self.nodes[id.0];
+        debug_assert_ne!(node.ref_count, 0, "live stack node");
+        node
     }
 }
 
@@ -216,7 +222,8 @@ pub(crate) fn stack_node_release(
                 if data.ref_count == 0 {
                     if data.link_count <= 1 {
                         let first = data.links[0].take();
-                        arena.nodes[node.0] = None;
+                        data.link_count = 0;
+                        data.links.rest = None;
                         if let Some(first) = first {
                             if !first.subtree.is_null() {
                                 ts_subtree_release(subtree_pool, first.subtree);
@@ -227,7 +234,7 @@ pub(crate) fn stack_node_release(
                         }
                         arena.free.push(node);
                     } else {
-                        let mut data = arena.nodes[node.0].take().expect("live stack node");
+                        let mut data = std::mem::take(&mut arena.nodes[node.0]);
                         let first = data.links[0].as_ref().expect("initialized stack link");
                         pending.push(Release::Node(first.node));
                         pending.push(Release::Recycle(node));
@@ -284,7 +291,7 @@ pub(crate) fn stack_node_new(
         id
     } else {
         let id = StackNodeId(arena.nodes.len());
-        arena.nodes.push(None);
+        arena.nodes.push(StackNode::default());
         id
     };
     // Compute the scalar header before constructing the owning node. Updating
@@ -318,26 +325,22 @@ pub(crate) fn stack_node_new(
             (length_zero(), 0, 0, 0)
         };
     let slot = &mut arena.nodes[id.0];
-    assert!(slot.is_none());
-    *slot = Some(StackNode {
-        state,
-        position,
-        links: StackLinks {
-            // Transfer the old head's ownership to this edge, without retaining
-            // either the predecessor or the subtree a second time.
-            first: previous_node.map(|node| StackLink {
-                node,
-                subtree,
-                is_pending,
-            }),
-            rest: None,
-        },
-        link_count: u16::from(previous_node.is_some()),
-        ref_count: 1,
-        error_cost,
-        node_count,
-        dynamic_precedence,
+    debug_assert_eq!(slot.ref_count, 0);
+    debug_assert!(slot.links.first.is_none() && slot.links.rest.is_none());
+    slot.state = state;
+    slot.position = position;
+    slot.error_cost = error_cost;
+    slot.node_count = node_count;
+    slot.dynamic_precedence = dynamic_precedence;
+    // The vacant slot has no owning links. Reinitialize it directly, without
+    // zeroing or copying the scalar fields through a temporary owning node.
+    slot.links.first = previous_node.map(|node| StackLink {
+        node,
+        subtree,
+        is_pending,
     });
+    slot.link_count = u16::from(previous_node.is_some());
+    slot.ref_count = 1;
     id
 }
 
@@ -685,7 +688,7 @@ pub(crate) fn ts_stack_single_active_error_cost(stack: &mut Stack) -> Option<u32
     if head.status != StackStatus::Active {
         return None;
     }
-    let node = stack.arena.nodes[head.node.0].as_ref().expect("live stack node");
+    let node = &stack.arena.nodes[head.node.0];
     head.node_count_at_last_error = head.node_count_at_last_error.min(node.node_count);
     Some(if node.state == ERROR_STATE {
         u32::MAX
@@ -696,7 +699,7 @@ pub(crate) fn ts_stack_single_active_error_cost(stack: &mut Stack) -> Option<u32
 
 pub(crate) fn ts_stack_error_cost(stack: &Stack, version: StackVersion) -> u32 {
     let head = &stack.heads[version as usize];
-    let node = stack.arena.nodes[head.node.0].as_ref().unwrap();
+    let node = &stack.arena.nodes[head.node.0];
     let mut result = node.error_cost;
     if head.status == StackStatus::Paused
         || (node.state == ERROR_STATE && node.links[0].as_ref().unwrap().subtree.is_null())
@@ -709,7 +712,7 @@ pub(crate) fn ts_stack_error_cost(stack: &Stack, version: StackVersion) -> u32 {
 pub(crate) fn ts_stack_node_count_since_error(stack: &mut Stack, version: StackVersion) -> u32 {
     // C's const Stack pointer still permits this mutation of its head array.
     let head = &mut stack.heads[version as usize];
-    let node_count = stack.arena.nodes[head.node.0].as_ref().unwrap().node_count;
+    let node_count = stack.arena.nodes[head.node.0].node_count;
     if node_count < head.node_count_at_last_error {
         head.node_count_at_last_error = node_count;
     }
@@ -730,7 +733,7 @@ pub(crate) fn ts_stack_push(
     // Transfer the head's node reference to the new node's predecessor link.
     let new_node = stack_node_new(&mut stack.arena, Some(head.node), subtree, pending, state);
     if is_error {
-        head.node_count_at_last_error = stack.arena.nodes[new_node.0].as_ref().unwrap().node_count;
+        head.node_count_at_last_error = stack.arena.nodes[new_node.0].node_count;
     }
     head.node = new_node;
 }
@@ -956,7 +959,10 @@ pub(crate) fn ts_stack_reduce_many_for_version(
             if node == slot {
                 break;
             }
-            stack.arena.nodes[node.0] = None;
+            data.ref_count = 0;
+            data.link_count = 0;
+            data.links.first = None;
+            debug_assert!(data.links.rest.is_none());
             stack.arena.free.push(node);
             node = next;
         }
@@ -999,7 +1005,7 @@ pub(crate) fn ts_stack_pop_count_in_place(
         if data.ref_count == 1 && data.link_count == 1 {
             let link = data.links.first.as_ref().expect("initialized stack link");
             if link.subtree.is_null() || !ts_subtree_extra(&link.subtree) {
-                let data = stack.arena.nodes[top.0].take().expect("live stack node");
+                let data = std::mem::take(&mut stack.arena.nodes[top.0]);
                 let link = data.links.first.expect("initialized stack link");
                 stack.heads[0].node = link.node;
                 stack.arena.free.push(top);
@@ -1048,7 +1054,7 @@ fn pop_count_in_place_general(stack: &mut Stack, count: u32) -> Option<Vec<Subtr
         // Each removed node has exactly one owner. Transfer its link's node
         // ownership to the head, and its subtree ownership to the result,
         // instead of retaining and immediately releasing both after reduction.
-        stack.arena.nodes[node.0] = None;
+        stack.arena.nodes[node.0] = StackNode::default();
         stack.arena.free.push(node);
         if !link.subtree.is_null() {
             subtrees.push(link.subtree);
@@ -1111,9 +1117,7 @@ pub(crate) fn ts_stack_pop_error(
     pool: &mut SubtreePool,
     version: StackVersion,
 ) -> Vec<Subtree> {
-    let node = stack.arena.nodes[stack.heads[version as usize].node.0]
-        .as_ref()
-        .unwrap();
+    let node = &stack.arena.nodes[stack.heads[version as usize].node.0];
     let has_error_link = node.links.iter().take(node.link_count as usize).any(|link| {
         let subtree = &link.as_ref().unwrap().subtree;
         !subtree.is_null() && ts_subtree_is_error(subtree)
@@ -1138,7 +1142,7 @@ pub(crate) fn ts_stack_pop_error(
 }
 
 pub(crate) fn pop_all_callback(arena: &StackArena, iterator: &StackIterator) -> StackAction {
-    if arena.nodes[iterator.node.0].as_ref().unwrap().link_count == 0 {
+    if arena.nodes[iterator.node.0].link_count == 0 {
         STACK_ACTION_POP
     } else {
         STACK_ACTION_NONE
@@ -1158,7 +1162,7 @@ pub(crate) fn summarize_stack_callback(
     arena: &StackArena,
     iterator: &StackIterator,
 ) -> StackAction {
-    let node = arena.nodes[iterator.node.0].as_ref().unwrap();
+    let node = &arena.nodes[iterator.node.0];
     let state = node.state;
     let depth = iterator.subtree_count;
     if depth > session.max_depth {
@@ -1207,14 +1211,12 @@ pub(crate) fn ts_stack_get_summary(stack: &Stack, version: StackVersion) -> Opti
 
 pub(crate) fn ts_stack_dynamic_precedence(stack: &Stack, version: StackVersion) -> i32 {
     stack.arena.nodes[stack.heads[version as usize].node.0]
-        .as_ref()
-        .unwrap()
         .dynamic_precedence
 }
 
 pub(crate) fn ts_stack_has_advanced_since_error(stack: &Stack, version: StackVersion) -> bool {
     let head = &stack.heads[version as usize];
-    let mut node = stack.arena.nodes[head.node.0].as_ref().unwrap();
+    let mut node = &stack.arena.nodes[head.node.0];
     if node.error_cost == 0 {
         return true;
     }
@@ -1227,7 +1229,7 @@ pub(crate) fn ts_stack_has_advanced_since_error(stack: &Stack, version: StackVer
                 } else if node.node_count > head.node_count_at_last_error
                     && ts_subtree_error_cost(&link.subtree) == 0
                 {
-                    node = stack.arena.nodes[link.node.0].as_ref().unwrap();
+                    node = &stack.arena.nodes[link.node.0];
                     continue;
                 }
             }
@@ -1325,8 +1327,8 @@ pub(crate) fn ts_stack_merge_contents(
     let node1 = stack.heads[version1 as usize].node;
     let node2 = stack.heads[version2 as usize].node;
     let mut i = 0;
-    while i < stack.arena.nodes[node2.0].as_ref().unwrap().link_count as usize {
-        let link = stack.arena.nodes[node2.0].as_ref().unwrap().links[i]
+    while i < stack.arena.nodes[node2.0].link_count as usize {
+        let link = stack.arena.nodes[node2.0].links[i]
             .as_ref()
             .unwrap();
         // StackLink owns its subtree handle, but copying its node ID does not
@@ -1339,7 +1341,7 @@ pub(crate) fn ts_stack_merge_contents(
         stack_node_add_link(&mut stack.arena, node1, link, pool);
         i += 1;
     }
-    let node = stack.arena.nodes[node1.0].as_ref().unwrap();
+    let node = &stack.arena.nodes[node1.0];
     if node.state == ERROR_STATE {
         stack.heads[version1 as usize].node_count_at_last_error = node.node_count;
     }
@@ -1353,8 +1355,8 @@ pub(crate) fn ts_stack_can_merge(
 ) -> bool {
     let head1 = &stack.heads[version1 as usize];
     let head2 = &stack.heads[version2 as usize];
-    let node1 = stack.arena.nodes[head1.node.0].as_ref().unwrap();
-    let node2 = stack.arena.nodes[head2.node.0].as_ref().unwrap();
+    let node1 = &stack.arena.nodes[head1.node.0];
+    let node2 = &stack.arena.nodes[head2.node.0];
     head1.status == StackStatus::Active
         && head2.status == StackStatus::Active
         && node1.state == node2.state
@@ -1379,7 +1381,7 @@ pub(crate) fn ts_stack_pause(
     let head = &mut stack.heads[version as usize];
     head.status = StackStatus::Paused;
     head.lookahead_when_paused = lookahead;
-    head.node_count_at_last_error = stack.arena.nodes[head.node.0].as_ref().unwrap().node_count;
+    head.node_count_at_last_error = stack.arena.nodes[head.node.0].node_count;
 }
 
 pub(crate) fn ts_stack_is_active(stack: &Stack, version: StackVersion) -> bool {
@@ -1481,7 +1483,7 @@ pub(crate) fn ts_stack_print_dot_graph(
                 continue;
             }
             all_iterators_done = false;
-            let node = stack.arena.nodes[node_id.0].as_ref().unwrap();
+            let node = &stack.arena.nodes[node_id.0];
             write!(output, "node_0x{:x} [", node_id.0)?;
             if node.state == ERROR_STATE {
                 write!(output, "label=\"?\"")?;
@@ -1611,7 +1613,7 @@ mod stack2_tests {
             slices: Vec::new(),
             iterators: Vec::new(),
             arena: StackArena {
-                nodes: vec![Some(base), Some(error), Some(top)],
+                nodes: vec![base, error, top],
                 free: Vec::new(),
             },
             base_node: StackNodeId(0),
@@ -1757,6 +1759,14 @@ mod stack2_tests {
                         let (parent, state) = build(children, ts_stack_state(&stack, 0));
                         ts_stack_push(&mut stack, &mut pool, 0, parent, false, state);
                     }
+                    // Vacant slots retain inert scalar values for reuse; only
+                    // live nodes and ownership are part of the stack snapshot.
+                    for node in &mut stack.arena.nodes {
+                        if node.ref_count == 0 {
+                            assert!(node.links.first.is_none() && node.links.rest.is_none());
+                            *node = StackNode::default();
+                        }
+                    }
                     snapshots.push(format!("{stack:?}"));
                     ts_stack_delete(&mut stack, &mut pool);
                 }
@@ -1862,7 +1872,7 @@ mod stack2_tests {
         assert_eq!(Arc::strong_count(&heap), 2, "the child handle was moved");
         assert_eq!(stack.heads[0].node, base);
         assert_eq!(stack.arena.node(base).ref_count, 2);
-        assert!(stack.arena.nodes[old_head.0].is_none());
+        assert!(stack.arena.nodes[old_head.0].ref_count == 0);
         assert_eq!(stack.arena.free.last(), Some(&old_head));
         drop(children);
         assert_eq!(Arc::strong_count(&heap), 1);
@@ -1948,10 +1958,10 @@ mod stack2_tests {
         assert_eq!(ts_stack_error_cost(&stack, 0), 600);
         stack.heads[0].status = StackStatus::Paused;
         assert_eq!(ts_stack_error_cost(&stack, 0), 600);
-        stack.arena.nodes[1].as_mut().unwrap().error_cost = u32::MAX;
+        stack.arena.nodes[1].error_cost = u32::MAX;
         assert_eq!(ts_stack_error_cost(&stack, 0), 499);
         stack.heads[0].status = StackStatus::Active;
-        stack.arena.nodes[1].as_mut().unwrap().links[0]
+        stack.arena.nodes[1].links[0]
             .as_mut()
             .unwrap()
             .subtree = leaf(0);
@@ -1965,7 +1975,7 @@ mod stack2_tests {
         stack.heads[0].node_count_at_last_error = 10;
         assert_eq!(ts_stack_node_count_since_error(&mut stack, 0), 0);
         assert_eq!(stack.heads[0].node_count_at_last_error, 5);
-        stack.arena.nodes[2].as_mut().unwrap().node_count = 7;
+        stack.arena.nodes[2].node_count = 7;
         assert_eq!(ts_stack_node_count_since_error(&mut stack, 0), 2);
     }
 
@@ -2033,7 +2043,7 @@ mod stack2_tests {
             summarize_stack_callback(&mut session, &stack.arena, &iter),
             STACK_ACTION_NONE
         );
-        stack.arena.nodes[2].as_mut().unwrap().position.bytes = 42;
+        stack.arena.nodes[2].position.bytes = 42;
         summarize_stack_callback(&mut session, &stack.arena, &iter);
         assert_eq!(session.summary.len(), 1);
         assert_eq!(session.summary[0].position.bytes, 0);
@@ -2059,7 +2069,7 @@ mod stack2_tests {
     fn progress_walks_only_zero_width_error_free_first_links() {
         let mut stack = stack();
         assert!(!ts_stack_has_advanced_since_error(&stack, 0));
-        stack.arena.nodes[1].as_mut().unwrap().links[0]
+        stack.arena.nodes[1].links[0]
             .as_mut()
             .unwrap()
             .subtree = leaf(1);
@@ -2067,14 +2077,14 @@ mod stack2_tests {
         stack.heads[0].node_count_at_last_error = 5;
         assert!(!ts_stack_has_advanced_since_error(&stack, 0));
         stack.heads[0].node_count_at_last_error = 4;
-        let top = stack.arena.nodes[2].as_mut().unwrap();
+        let top = &mut stack.arena.nodes[2];
         top.links[0].as_mut().unwrap().subtree = Subtree::Inline(InlineLeaf {
             flags: MISSING,
             ..InlineLeaf::default()
         });
         link(top, 0, leaf(1));
         assert!(!ts_stack_has_advanced_since_error(&stack, 0));
-        stack.arena.nodes[2].as_mut().unwrap().error_cost = 0;
+        stack.arena.nodes[2].error_cost = 0;
         assert!(ts_stack_has_advanced_since_error(&stack, 0));
     }
 
@@ -2204,7 +2214,7 @@ mod stack_1_tests {
         stack_node_release(&mut arena, top, &mut pool);
         assert!(arena.free.is_empty());
         stack_node_release(&mut arena, top, &mut pool);
-        assert!(arena.nodes.iter().all(Option::is_none));
+        assert!(arena.nodes.iter().all(|node| node.ref_count == 0));
         assert_eq!(arena.free, [right, top, left, base]);
         let reused = stack_node_new(&mut arena, None, Subtree::Null, false, 7);
         assert_eq!(reused, base);
@@ -2213,6 +2223,81 @@ mod stack_1_tests {
         assert_eq!(arena.node(reused).ref_count, 1);
         assert_eq!(arena.node(reused).link_count, 0);
         assert!(arena.node(reused).links.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn recycled_slots_overwrite_inert_headers_and_initialize_links() {
+        let mut arena = StackArena::default();
+        let mut pool = SubtreePool::default();
+        let base = stack_node_new(&mut arena, None, Subtree::Null, false, 1);
+        let parent = stack_node_new(&mut arena, Some(base), leaf(1, VISIBLE), false, 2);
+        stack_node_retain(&mut arena, parent);
+        let tree = Subtree::Heap(Arc::new(SubtreeHeapData {
+            padding: Length {
+                bytes: 2,
+                ..Length::default()
+            },
+            size: Length {
+                bytes: 4,
+                ..Length::default()
+            },
+            error_cost: 13,
+            visible: true,
+            children: vec![leaf(3, VISIBLE)],
+            payload: SubtreePayload::Branch(BranchData {
+                visible_descendant_count: 9,
+                dynamic_precedence: 11,
+                ..BranchData::default()
+            }),
+            ..SubtreeHeapData::default()
+        }));
+        let top = stack_node_new(&mut arena, Some(parent), tree, true, 3);
+        let header = arena.node(top);
+        assert_eq!(header.position.bytes, 7);
+        assert_eq!(header.error_cost, 13);
+        assert_eq!(header.node_count, 11);
+        assert_eq!(header.dynamic_precedence, 11);
+        stack_node_release(&mut arena, top, &mut pool);
+        assert_eq!(arena.free, [top]);
+        let vacant = &arena.nodes[top.0];
+        assert_eq!(vacant.ref_count, 0);
+        assert_eq!(vacant.link_count, 0);
+        assert!(vacant.links.first.is_none() && vacant.links.rest.is_none());
+
+        // An independent base must not inherit any of the old cumulative data.
+        let reused = stack_node_new(&mut arena, None, Subtree::Null, false, 7);
+        assert_eq!(reused, top);
+        let header = arena.node(reused);
+        assert_eq!(header.state, 7);
+        assert_eq!(header.position, length_zero());
+        assert_eq!(header.error_cost, 0);
+        assert_eq!(header.node_count, 0);
+        assert_eq!(header.dynamic_precedence, 0);
+        assert_eq!(header.ref_count, 1);
+        assert_eq!(header.link_count, 0);
+        assert!(header.links.first.is_none() && header.links.rest.is_none());
+        stack_node_release(&mut arena, reused, &mut pool);
+
+        // Reusing that base as an ordinary slot must install a fresh edge and
+        // derive the entire header from its actual predecessor, not stale data.
+        let reused = stack_node_new(&mut arena, Some(parent), leaf(5, VISIBLE), false, 8);
+        assert_eq!(reused, top);
+        let header = arena.node(reused);
+        assert_eq!(header.state, 8);
+        assert_eq!(header.position.bytes, 2);
+        assert_eq!(header.error_cost, 0);
+        assert_eq!(header.node_count, 2);
+        assert_eq!(header.dynamic_precedence, 0);
+        assert_eq!(header.ref_count, 1);
+        assert_eq!(header.link_count, 1);
+        let link = header.links.first.as_ref().unwrap();
+        assert_eq!(link.node, parent);
+        assert_eq!(ts_subtree_symbol(&link.subtree), 5);
+        assert!(!link.is_pending);
+        stack_node_release(&mut arena, reused, &mut pool);
+        assert!(arena.nodes.iter().all(|node| {
+            node.ref_count == 0 && node.links.first.is_none() && node.links.rest.is_none()
+        }));
     }
 
     #[test]
@@ -2271,7 +2356,7 @@ mod stack_1_tests {
                 }
                 stack_node_release(&mut arena, top, &mut pool);
                 assert_eq!(arena.free.len(), 50_001);
-                assert!(arena.nodes.iter().all(Option::is_none));
+                assert!(arena.nodes.iter().all(|node| node.ref_count == 0));
             })
             .unwrap()
             .join()
@@ -2463,7 +2548,7 @@ mod stack_1_tests {
             assert_eq!(arena.node(previous).ref_count, 1);
             stack_node_release(&mut arena, previous, &mut pool);
         }
-        assert!(arena.nodes.iter().all(Option::is_none));
+        assert!(arena.nodes.iter().all(|node| node.ref_count == 0));
     }
 
     #[test]
@@ -2488,7 +2573,7 @@ mod stack_1_tests {
         assert_eq!(arena.node(top).dynamic_precedence, 7);
         stack_node_release(&mut arena, right, &mut pool);
         stack_node_release(&mut arena, top, &mut pool);
-        assert!(arena.nodes.iter().all(Option::is_none));
+        assert!(arena.nodes.iter().all(|node| node.ref_count == 0));
     }
 
     #[test]
