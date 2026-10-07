@@ -71,7 +71,7 @@ bucket failures remain.
 
 ## Registry-query bucket `4d6cc948`
 
-Reverified at `cc2ad64` (current assigned baseline): the assigned
+Reverified at `bc28827` (current assigned baseline): the assigned
 `Tests/RunCMake/find_package/Registry-query.cmake` already passes on the starting
 checkout. Its malformed `${CMAKE_ CURRENT_SOURCE_DIR}/${FILE_DIR}` reference
 exercised the same incorrect scanner initialization/reset described above:
@@ -86,7 +86,7 @@ regressions check fresh/reused scanners, whole-input and one-byte chunks, two
 incremental repair/restore cycles, tree ranges/flags, and progress counts. No
 duplicate test was added.
 
-Checks rerun for this assignment at `cc2ad64` (all results below are from this
+Checks rerun for this assignment at `bc28827` (all results below are from this
 checkout, not inherited from the earlier verification):
 
 - `run_oracle(inputs = "bucket:4d6cc948")`: **1/1 pass**, queries enabled.
@@ -124,12 +124,12 @@ No bucket work remains. The broader oracle was not rerun in this stop-time
 verification; the all-input results above belong to their stated earlier
 revisions. No deviations from C, unsafe code, or generated-file edits were made.
 
-## Current verification at `a7ea279`
+## Current verification at `f4d1c6f`
 
 Rechecked the reassigned bucket on the current merged baseline against the C
-scanner source. The initialization/reset correction and regression tests are
-already present, so no further behavior change or duplicate test is needed.
-All checks below were rerun on this checkout:
+scanner source, superseding the verification at `a7ea279`. The initialization/reset
+correction and regression tests are already present, so no further behavior
+change or duplicate test is needed. All checks below were rerun on this checkout:
 
 - `run_oracle(inputs = "bucket:1b5a6fb7")`: **4/4 inputs pass**, with query
   checks enabled and incremental checks off.
