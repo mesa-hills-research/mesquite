@@ -324,6 +324,10 @@ grammar kind. Anonymous, hidden, missing, extra, and ERROR semantics are distinc
 TreeCursor borrows the Tree and maintains a Vec of borrowed TreeCursorEntry slots.
 Entries carry both child and structural-child indices and descendant index; keep
 all three. Hidden-node flattening and aliases must be translated, not approximated.
+Public-cursor entries also cache immutable alias, visibility, and resolved field
+metadata when visited. Fields propagate from an invisible non-extra wrapper only
+when the child's own non-inherited field map has no match; roots have field zero.
+The changed-range walker uses its own visibility rules and ignores these caches.
 For changed-range traversal only, cursor.tree may be None; that iterator owns its
 Language separately and operates directly on subtree entries, never constructing
 public Nodes. `current_status` returns a CursorStatus record in place of six out
