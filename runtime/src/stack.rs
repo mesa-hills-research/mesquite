@@ -97,8 +97,30 @@ impl StackArena {
     }
 }
 
+impl StackIterator {
+    #[inline]
+    fn advance(&mut self, link: &StackLink, include_subtrees: bool) {
+        self.node = link.node;
+        if !link.subtree.is_null() {
+            if include_subtrees {
+                self.subtrees.push(link.subtree.clone());
+            }
+            if !ts_subtree_extra(&link.subtree) {
+                self.subtree_count = self.subtree_count.wrapping_add(1);
+                if !link.is_pending {
+                    self.is_pending = false;
+                }
+            }
+        } else {
+            self.subtree_count = self.subtree_count.wrapping_add(1);
+            self.is_pending = false;
+        }
+    }
+}
+
 // The public helper borrows its array, but iteration can transfer it without
 // copying. Keep the slice/version ordering algorithm in this owning helper.
+#[inline]
 fn stack_add_slice_owned(
     stack: &mut Stack,
     original_version: StackVersion,
@@ -407,7 +429,7 @@ pub(crate) fn stack__iter(
     stack: &mut Stack,
     pool: &mut SubtreePool,
     version: StackVersion,
-    callback: &mut dyn FnMut(&StackArena, &StackIterator) -> StackAction,
+    callback: &mut impl FnMut(&StackArena, &StackIterator) -> StackAction,
     goal_subtree_count: i32,
 ) -> Vec<StackSlice> {
     stack.slices.clear();
@@ -419,12 +441,44 @@ pub(crate) fn stack__iter(
         // The Rust header is a separate allocation; only children go here.
         subtrees.reserve(goal_subtree_count as usize);
     }
-    stack.iterators.push(StackIterator {
+    // Most reductions walk a single path. Keep that iterator local until a
+    // branch actually needs the breadth-first frontier; repeatedly indexing
+    // the frontier for each predecessor otherwise dominates this short walk.
+    let mut iterator = StackIterator {
         node: stack.heads[version as usize].node,
         subtrees,
         subtree_count: 0,
         is_pending: true,
-    });
+    };
+    loop {
+        let node = stack.arena.node(iterator.node);
+        if node.link_count > 1 {
+            break;
+        }
+        let action = callback(&stack.arena, &iterator);
+        let should_pop = action & STACK_ACTION_POP != 0;
+        let should_stop = action & STACK_ACTION_STOP != 0 || node.link_count == 0;
+        if should_pop {
+            let mut subtrees = if should_stop {
+                std::mem::take(&mut iterator.subtrees)
+            } else {
+                iterator.subtrees.clone()
+            };
+            subtrees.reverse();
+            stack_add_slice_owned(stack, version, iterator.node, subtrees);
+        }
+        if should_stop {
+            if !should_pop {
+                ts_subtree_array_delete(pool, &mut iterator.subtrees);
+            }
+            return std::mem::take(&mut stack.slices);
+        }
+        let link = stack.arena.node(iterator.node).links[0]
+            .as_ref()
+            .expect("initialized stack link");
+        iterator.advance(link, include_subtrees);
+    }
+    stack.iterators.push(iterator);
     while !stack.iterators.is_empty() {
         // Branches appended during this pass are not visited until the next
         // pass. Erasing a stopped iterator shifts the remaining original ones.
@@ -467,21 +521,7 @@ pub(crate) fn stack__iter(
                     .as_ref()
                     .expect("initialized stack link");
                 let next = &mut stack.iterators[iterator_index];
-                next.node = link.node;
-                if !link.subtree.is_null() {
-                    if include_subtrees {
-                        next.subtrees.push(link.subtree.clone());
-                    }
-                    if !ts_subtree_extra(&link.subtree) {
-                        next.subtree_count = next.subtree_count.wrapping_add(1);
-                        if !link.is_pending {
-                            next.is_pending = false;
-                        }
-                    }
-                } else {
-                    next.subtree_count = next.subtree_count.wrapping_add(1);
-                    next.is_pending = false;
-                }
+                next.advance(link, include_subtrees);
             }
             i += 1;
         }
@@ -1732,6 +1772,62 @@ mod stack_1_tests {
         assert_eq!(zero_pop.len(), 1);
         assert!(zero_pop[0].subtrees.is_empty());
         assert_eq!(symbols(&slices[0].subtrees), [1, 3]);
+    }
+
+    #[test]
+    fn linear_prefix_preserves_iterator_state_when_entering_a_branch() {
+        let mut stack = ts_stack_new();
+        let mut pool = SubtreePool::default();
+        let base = stack.base_node;
+        let a = stack_node_new(&mut stack.arena, Some(base), leaf(1, VISIBLE), true, 2);
+        stack_node_retain(&mut stack.arena, base);
+        let b = stack_node_new(&mut stack.arena, Some(base), leaf(2, VISIBLE), true, 3);
+        let fork = stack_node_new(&mut stack.arena, Some(a), leaf(3, VISIBLE), true, 4);
+        stack_node_add_link(
+            &mut stack.arena,
+            fork,
+            StackLink {
+                node: b,
+                subtree: leaf(4, VISIBLE),
+                is_pending: false,
+            },
+            &mut pool,
+        );
+        stack_node_release(&mut stack.arena, b, &mut pool);
+        let prefix = stack_node_new(&mut stack.arena, Some(fork), leaf(5, VISIBLE), true, 5);
+        let extra = stack_node_new(&mut stack.arena, Some(prefix), leaf(6, EXTRA), false, 6);
+        stack.heads[0].node = extra;
+
+        let mut visited = Vec::new();
+        let slices = stack__iter(
+            &mut stack,
+            &mut pool,
+            0,
+            &mut |arena, it| {
+                visited.push((arena.node(it.node).state, it.subtree_count, it.is_pending));
+                pop_count_callback(3, it)
+            },
+            3,
+        );
+        assert_eq!(
+            visited,
+            [
+                (6, 0, true),
+                (5, 0, true),
+                (4, 1, true),
+                (2, 2, true),
+                (3, 2, false),
+                (1, 3, true),
+                (1, 3, false),
+            ]
+        );
+        assert_eq!(slices.len(), 2);
+        assert_eq!(slices[0].version, slices[1].version);
+        assert_eq!(symbols(&slices[0].subtrees), [1, 3, 5, 6]);
+        assert_eq!(symbols(&slices[1].subtrees), [2, 4, 5, 6]);
+        assert!(stack.slices.is_empty());
+        assert!(stack.iterators.is_empty());
+        ts_stack_delete(&mut stack, &mut pool);
     }
 
     #[test]
