@@ -59,11 +59,11 @@ This follow-up changes only this verification note; it introduces no deviation
 from C and no new unsafe code.
 
 
-### Revalidation of `4d6cc948` at `9c27be8`
+### Revalidation of `4d6cc948` at `88489b8`
 
-The assigned Registry-query input still passes before any new changes. Direct
-comparison with the current C scanner confirms that the merged zero-valued
-creation/reset behavior above is the required correction; no additional
+The assigned Registry-query input still passes before any new changes, as it did
+at `9c27be8`. Direct comparison with the current C scanner confirms that the
+merged zero-valued creation/reset behavior above is the required correction; no additional
 runtime change is warranted. The checks below were rerun at this revision,
 including the parser regression with both fresh and reused scanner state,
 single-byte input chunks, and incremental repair/restoration. The reduced
@@ -180,9 +180,32 @@ lexer warning noted above. This change only strengthens regression coverage;
 there are no runtime changes, C deviations, new unsafe code, or generated-file
 changes.
 
+### ERROR-range revalidation at `512817f`
+
+Bucket `e0b0bff8` already passes on this starting checkout. Comparing the current
+C scanner with Rust confirms the merged zero-valued creation/reset fix remains
+correct; no new implementation change or duplicate regression is needed.
+Existing `cmake_error_ranges` tests cover both smallest inputs, fresh/reused
+scanners, whole/seven-byte/single-byte chunks, incremental EOF deletion and
+restoration, exact tree ranges/flags, and zero progress calls.
+
+Checks rerun at this revision:
+
+- Assigned bucket: **5/5 pass** (query checks enabled).
+- All CMake inputs: **270/270 gate** (incremental/query checks) and
+  **9878/9878 fresh** (query checks) pass.
+- `cargo check --workspace --all-targets`: passes; the pre-existing warning in
+  host-owned `grammars/yaml/src/lex.rs:20` remains unchanged.
+- `cargo test -p ts_port_cmake -p ts_port`: passes, including 212 runtime unit
+  tests, all integration/doc tests, both ERROR-range tests, and 24 CMake tests.
+- `cargo clippy -p ts_port_cmake -p ts_port --all-targets -- -D warnings`: passes.
+
+This follow-up only records verification: no behavior changes, C deviations,
+new unsafe code, warnings, or generated-file modifications are introduced.
+
 ## Empty recovery-content bucket `f5e2762e`
 
-Reverified at `fd1848c`: all 16 reported inputs already pass. The merged scanner
+Reverified at `511f5ba`: all 16 reported inputs already pass. The merged scanner
 initialization/reset correction above allows `bracket_argument_content` at EOF
 without an opener, including after `a` and after skipping the newline in `if(\n`.
 This zero-width token is a real scanner token, not an inserted missing node.
@@ -194,19 +217,22 @@ both with fresh scanners and after parsing bracket arguments/comments. Scanner
 unit tests additionally check the EOF callback order and snapshot reset behavior.
 The existing parser-level whitespace cases also cover CRLF, lone CR, spaces/tabs,
 and multiple newlines, asserting exact EOF byte and point ranges after skipping
-that whitespace with both fresh and reused scanners. All three integration tests run
-with whole-source and byte-at-a-time input callbacks, covering whitespace and
+that whitespace with both fresh and reused scanners. The three fresh-parse tests
+run with whole-source and byte-at-a-time input callbacks, covering whitespace and
 CRLF split across chunks without changing the zero-width token's EOF position.
 The block/while cases additionally verify that a complete header remains a sibling
 of the empty recovery content when its terminating command is missing. Tree
-cursor assertions confirm that the empty token remains traversable at EOF.
+cursor assertions confirm that the empty token remains traversable at EOF. A fourth
+integration test repairs each incomplete command/block by inserting at EOF, then
+undoes the edit twice using the previous tree. It verifies that recovery recreates
+the empty external token with the original kind, flags, and byte/point ranges.
 
 The current C source was compared directly with the Rust scanner: creation uses
 `ts_calloc`, and empty/wrong-length deserialization clears both state fields.
 The matching implementation and all regression cases were already present at
 this starting revision, so no duplicate test or behavior change was warranted.
 
-Checks rerun for this bucket at `fd1848c`:
+Checks rerun for this bucket at `511f5ba`:
 
 - `run_oracle(inputs = "bucket:f5e2762e")`: 16/16 pass.
 - `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs
@@ -214,7 +240,8 @@ Checks rerun for this bucket at `fd1848c`:
 - `cargo check --workspace --all-targets`: passes with the pre-existing warning
   in host-owned `grammars/yaml/src/lex.rs:20` noted above.
 - `cargo test -p ts_port_cmake`: 24 tests pass.
-- `cargo test -p ts_port --test cmake_empty_recovery_content`: 3 tests pass.
+- `cargo test -p ts_port --test cmake_empty_recovery_content`: 4 tests pass.
+- `cargo test -p ts_port`: all 212 unit tests and all integration/doc tests pass.
 - `cargo clippy -p ts_port_cmake -p ts_port --all-targets -- -D warnings`: passes.
 
 This follow-up only updates the verification record: the implementation and
