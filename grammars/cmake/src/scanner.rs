@@ -203,6 +203,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn recovery_content_consumes_non_utf8_boms_and_embedded_nuls() {
+        // UTF-16/32 encodings of "m\n", passed to the runtime as UTF-8 bytes.
+        // Each FE/FF byte decodes to TS_DECODE_ERROR (-1). The zero bytes
+        // are actual NUL lookahead, not EOF. All must remain in one content
+        // token during recovery, both on creation and after an empty reset.
+        for input in [
+            &b"\xfe\xff\0m\0\n"[..],
+            &b"\xff\xfem\0\n\0"[..],
+            &b"\0\0\xfe\xff\0\0\0m\0\0\0\n"[..],
+            &b"\xff\xfe\0\0m\0\0\0\n\0\0\0"[..],
+        ] {
+            let mut scanner = create();
+            for _ in 0..2 {
+                let mut lexer = TestLexer {
+                    input: input
+                        .iter()
+                        .map(|&byte| if byte.is_ascii() { i32::from(byte) } else { -1 })
+                        .collect(),
+                    ..TestLexer::new("")
+                };
+                assert!(scanner.scan(&mut lexer, &[true; 7]));
+                assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
+                assert_eq!(lexer.position, input.len());
+                assert_eq!(lexer.end, Some(input.len()));
+                assert!(lexer.eof());
+                scanner.deserialize(&[]);
+            }
+        }
+    }
+
     #[derive(Debug, PartialEq, Eq)]
     enum Event {
         Advance(usize, bool),
@@ -459,21 +490,31 @@ mod tests {
 
     #[test]
     fn fresh_and_reset_scanners_emit_zero_width_content_at_eof() {
-        let mut scanner = create();
-        for reset in [false, true] {
-            if reset {
-                // The previous scan changed token to CONTENT; resetting must
-                // allow the same zero-width recovery token to be emitted again.
-                scanner.deserialize(&[]);
+        // Recovery after `a` starts at EOF; after `if(\n` it first skips the
+        // trailing newline. Both must emit empty content without mark_end.
+        for trailing in ["", "\n", "\r\n", " \t\n"] {
+            let mut scanner = create();
+            for reset in [false, true] {
+                if reset {
+                    // The previous scan changed token to CONTENT; resetting
+                    // must allow the zero-width recovery token again.
+                    scanner.deserialize(&[]);
+                }
+                let mut lexer = TestLexer::new(trailing);
+                assert!(scanner.scan(&mut lexer, &[true; 7]));
+                assert_eq!(lexer.position, trailing.len());
+                assert_eq!(lexer.end, None);
+                let expected: Vec<_> = (0..trailing.len())
+                    .map(|position| Event::Advance(position, true))
+                    .chain([Event::Symbol(BRACKET_ARGUMENT_CONTENT as u16)])
+                    .collect();
+                assert_eq!(lexer.events, expected);
+
+                // Once emitted, content cannot repeat without a state reset.
+                lexer.events.clear();
+                assert!(!scanner.scan(&mut lexer, &[true; 7]));
+                assert!(lexer.events.is_empty());
             }
-            let mut lexer = TestLexer::new("");
-            assert!(scanner.scan(&mut lexer, &[true; 7]));
-            assert_eq!(lexer.position, 0);
-            assert_eq!(lexer.end, None);
-            assert_eq!(
-                lexer.events,
-                [Event::Symbol(BRACKET_ARGUMENT_CONTENT as u16)]
-            );
         }
     }
 
