@@ -1171,7 +1171,7 @@ pub(crate) fn ts_stack_print_dot_graph(
             let state = ts_subtree_external_scanner_state(&head.last_external_token)
                 .expect("last external token must have scanner state");
             write!(output, "\nexternal_scanner_state:")?;
-            for &byte in ts_external_scanner_state_data(state) {
+            for &byte in state {
                 // C promotes each signed char to int before formatting as %X.
                 write!(output, " {:2X}", byte as i8 as i32 as u32)?;
             }
@@ -1395,7 +1395,7 @@ mod stack2_tests {
     fn error_callback_pops_only_the_first_error_path() {
         let error = Subtree::Heap(Arc::new(SubtreeHeapData {
             symbol: ts_port_tables::BUILTIN_SYM_ERROR,
-            children: Vec::new(),
+            children: Vec::new().into(),
             payload: SubtreePayload::Leaf,
             ..SubtreeHeapData::default()
         }));
@@ -1623,7 +1623,7 @@ mod stack_1_tests {
         let heap = |symbol| {
             let data = Arc::new(SubtreeHeapData {
                 symbol,
-                children: Vec::new(),
+                children: Vec::new().into(),
                 payload: SubtreePayload::Leaf,
                 ..SubtreeHeapData::default()
             });
@@ -1715,7 +1715,7 @@ mod stack_1_tests {
                 extent: Point { row: 2, column: 2 },
             },
             error_cost: 23,
-            children: vec![leaf(2, VISIBLE)],
+            children: vec![leaf(2, VISIBLE)].into(),
             payload: SubtreePayload::Branch(BranchData {
                 visible_descendant_count: 3,
                 dynamic_precedence: -7,
@@ -1754,7 +1754,7 @@ mod stack_1_tests {
         let error = Subtree::Heap(Arc::new(SubtreeHeapData {
             symbol: 9,
             error_cost: 1,
-            children: Vec::new(),
+            children: Vec::new().into(),
             payload: SubtreePayload::Leaf,
             ..SubtreeHeapData::default()
         }));
@@ -2026,7 +2026,7 @@ mod stack_1_tests {
         let heap = Subtree::Heap(Arc::new(SubtreeHeapData {
             symbol: 3,
             visible: true,
-            children: Vec::new(),
+            children: Vec::new().into(),
             payload: SubtreePayload::Leaf,
             size: Length {
                 bytes: 3,

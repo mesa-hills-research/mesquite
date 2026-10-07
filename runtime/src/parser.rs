@@ -430,7 +430,7 @@ pub(crate) fn ts_parser__external_scanner_deserialize(
     external_token: &Subtree,
 ) {
     let data = ts_subtree_external_scanner_state(external_token)
-        .map_or(&[][..], ts_external_scanner_state_data);
+        .unwrap_or(&[]);
     scanner.deserialize(data);
 }
 
@@ -547,7 +547,7 @@ pub(crate) fn ts_parser__lex(
                         version,
                     ))
                         .map_or(bytes.is_empty(), |state| {
-                            ts_external_scanner_state_eq(state, bytes)
+                            state == bytes
                         });
                 // Empty external tokens are allowed only if they change scanner state,
                 // or can advance parsing outside error recovery without being extras.
@@ -683,9 +683,9 @@ pub(crate) fn ts_parser__lex(
             let data = result
                 .heap_mut()
                 .expect("external tokens are heap subtrees");
-            data.payload = SubtreePayload::External(ts_external_scanner_state_init(
+            data.payload = ts_external_scanner_state_init(
                 &parser.scanner_buffer[..external_scanner_state_len as usize],
-            ));
+            ).into();
             data.has_external_scanner_state_change = external_scanner_state_changed;
         }
         result
@@ -2606,7 +2606,7 @@ mod parser3_tests {
     fn branch(symbol: Symbol, children: Vec<Subtree>) -> Subtree {
         Subtree::Heap(Arc::new(SubtreeHeapData {
             symbol,
-            children,
+            children: children.into(),
             payload: SubtreePayload::Branch(BranchData::default()),
             ..SubtreeHeapData::default()
         }))

@@ -697,7 +697,7 @@ mod tests {
 
     fn parent(children: Vec<Subtree>) -> Subtree {
         Subtree::Heap(Arc::new(SubtreeHeapData {
-            children,
+            children: children.into(),
             payload: SubtreePayload::Leaf,
             ..SubtreeHeapData::default()
         }))
@@ -721,7 +721,7 @@ mod tests {
     fn forward_iteration_counts_aliases_extras_and_hidden_descendants() {
         let hidden = Subtree::Heap(Arc::new(SubtreeHeapData {
             size: length(3, 0, 3),
-            children: Vec::new(),
+            children: Vec::new().into(),
             payload: SubtreePayload::Branch(BranchData {
                 visible_descendant_count: 2,
                 ..BranchData::default()
@@ -832,7 +832,7 @@ mod tests {
                 padding: length(3, 1, 1),
                 size: length(1, 0, 1),
                 visible: true,
-                children: Vec::new(),
+                children: Vec::new().into(),
                 payload: SubtreePayload::Leaf,
                 ..SubtreeHeapData::default()
             })),
