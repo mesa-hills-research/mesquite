@@ -1995,7 +1995,18 @@ pub(crate) fn ts_parser__advance(
     }
 }
 
+#[inline]
 pub(crate) fn ts_parser__condense_stack(parser: &mut Parser) -> u32 {
+    // An active sole version cannot merge, be pruned, or need resuming. Keep
+    // the version-status read: it also lowers the saved error node baseline.
+    if ts_stack_version_count(&parser.stack) == 1 && ts_stack_is_active(&parser.stack, 0) {
+        let status = ts_parser__version_status(parser, 0);
+        return if status.is_in_error { u32::MAX } else { status.cost };
+    }
+    ts_parser__condense_stack_general(parser)
+}
+
+fn ts_parser__condense_stack_general(parser: &mut Parser) -> u32 {
     let mut made_changes = false;
     let mut min_error_cost = u32::MAX;
     let mut i = 0;
@@ -2777,6 +2788,118 @@ mod parser3_tests {
             );
             assert!(parser.stack.slices.is_empty());
             ts_parser_reset(&mut parser);
+        }
+    }
+
+    #[test]
+    fn committed_reductions_match_general_reductions_including_empty_extras() {
+        let language = reduction_language();
+        let symbol = language.tables.token_count as Symbol;
+        for state in [ERROR_STATE, 1] {
+            for count in [0, 1, 3] {
+                for fragile in [false, true] {
+                    for end_of_extra in [false, true] {
+                        let mut snapshots = Vec::new();
+                        for replace_version in [false, true] {
+                            let mut parser = ts_parser_new();
+                            parser.language = Some(language);
+                            // Leave a prefix below the reduction, including a
+                            // valid link when reducing in the error state.
+                            ts_stack_push(
+                                &mut parser.stack,
+                                &mut parser.tree_pool,
+                                0,
+                                Subtree::Null,
+                                false,
+                                state,
+                            );
+                            for i in 0..count {
+                                for flags in [VISIBLE | NAMED, EXTRA, EXTRA] {
+                                    ts_stack_push(
+                                        &mut parser.stack,
+                                        &mut parser.tree_pool,
+                                        0,
+                                        Subtree::Inline(InlineLeaf {
+                                            symbol: (i + 1) as u8,
+                                            size_bytes: 1,
+                                            flags,
+                                            ..InlineLeaf::default()
+                                        }),
+                                        false,
+                                        state,
+                                    );
+                                }
+                            }
+                            let version = ts_parser__reduce(
+                                &mut parser,
+                                0,
+                                symbol,
+                                count,
+                                -3,
+                                0,
+                                fragile,
+                                end_of_extra,
+                                replace_version,
+                            );
+                            ts_stack_renumber_version(
+                                &mut parser.stack,
+                                &mut parser.tree_pool,
+                                version,
+                                0,
+                            );
+                            let final_state = ts_stack_state(&parser.stack, 0);
+                            let slices = ts_stack_pop_all(&mut parser.stack, &mut parser.tree_pool, 0);
+                            // Debug includes every subtree header/branch field
+                            // recursively, not Arc addresses or arena indices.
+                            snapshots.push((final_state, format!("{:?}", slices[0].subtrees)));
+                            ts_parser_reset(&mut parser);
+                        }
+                        assert_eq!(snapshots[0], snapshots[1]);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn condense_single_active_version_preserves_error_baseline_updates() {
+        for state in [ERROR_STATE, 1, 2] {
+            for null in [false, true] {
+                for baseline in [0, 17] {
+                    let mut snapshots = Vec::new();
+                    for fast in [false, true] {
+                        let mut parser = ts_parser_new();
+                        let tree = if null {
+                            Subtree::Null
+                        } else {
+                            Subtree::Inline(InlineLeaf {
+                                flags: VISIBLE,
+                                size_bytes: 1,
+                                ..InlineLeaf::default()
+                            })
+                        };
+                        ts_stack_push(
+                            &mut parser.stack,
+                            &mut parser.tree_pool,
+                            0,
+                            tree,
+                            false,
+                            state,
+                        );
+                        parser.stack.heads[0].node_count_at_last_error = baseline;
+                        let cost = if fast {
+                            ts_parser__condense_stack(&mut parser)
+                        } else {
+                            ts_parser__condense_stack_general(&mut parser)
+                        };
+                        snapshots.push((cost, parser.stack.heads[0].node_count_at_last_error));
+                        assert_eq!(ts_stack_version_count(&parser.stack), 1);
+                        assert!(ts_stack_is_active(&parser.stack, 0));
+                        ts_parser_reset(&mut parser);
+                    }
+                    assert_eq!(snapshots[0], snapshots[1]);
+                }
+            }
         }
     }
 
