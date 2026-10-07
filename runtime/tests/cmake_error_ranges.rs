@@ -2,7 +2,7 @@
 
 use ts_port::{Language, ParseOptions, ParseState, Parser, Point};
 
-fn assert_recovery_range(source: &str, identifier_end: usize, eof: Point) {
+fn assert_recovery_range(source: &str, identifier_end: usize, eof: Point, chunk_size: usize) {
     let mut parser = Parser::new();
     parser
         .set_language(&Language::from(ts_port_cmake::language()))
@@ -24,7 +24,10 @@ fn assert_recovery_range(source: &str, identifier_end: usize, eof: Point) {
         };
         let tree = parser
             .parse_with_options(
-                &mut |offset, _| source.as_bytes().get(offset..).unwrap_or_default(),
+                &mut |offset, _| {
+                    let remaining = source.as_bytes().get(offset..).unwrap_or_default();
+                    &remaining[..remaining.len().min(chunk_size)]
+                },
                 None,
                 Some(ParseOptions::new().progress_callback(&mut progress)),
             )
@@ -89,7 +92,11 @@ fn error_after_identifier_includes_content_through_final_newline() {
         "\nAvailable commands:\n",
     );
     assert_eq!(source.len(), 72);
-    assert_recovery_range(source, 5, Point::new(2, 0));
+    // Fragment escaped bracket sequences and the final newline across input
+    // callbacks. Recovery content must retain the same range and progress count.
+    for chunk_size in [source.len(), 7, 1] {
+        assert_recovery_range(source, 5, Point::new(2, 0), chunk_size);
+    }
 }
 
 #[test]
@@ -106,5 +113,7 @@ fn error_at_start_keeps_multiline_content_in_one_node() {
         "\n",
     );
     assert_eq!(source.len(), 248);
-    assert_recovery_range(source, 0, Point::new(8, 0));
+    for chunk_size in [source.len(), 7, 1] {
+        assert_recovery_range(source, 0, Point::new(8, 0), chunk_size);
+    }
 }
