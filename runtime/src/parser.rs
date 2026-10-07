@@ -771,28 +771,6 @@ pub(crate) fn ts_parser__set_cached_token(
     parser.token_cache.byte_index = byte_index;
 }
 
-// A scanner snapshot normally survives many internal tokens. Replacing a cache
-// entry with that very same handle would clone and release it unnecessarily.
-#[inline]
-fn cache_token_for_version(
-    parser: &mut Parser,
-    version: StackVersion,
-    byte_index: u32,
-    token: Subtree,
-) {
-    let last_external = ts_stack_last_external_token(&parser.stack, version);
-    if parser.token_cache.last_external_token.ptr_eq(last_external) {
-        let old_token = std::mem::replace(&mut parser.token_cache.token, token);
-        if !old_token.is_null() {
-            ts_subtree_release(&mut parser.tree_pool, old_token);
-        }
-        parser.token_cache.byte_index = byte_index;
-    } else {
-        let last_external = last_external.clone();
-        ts_parser__set_cached_token(parser, byte_index, last_external, token);
-    }
-}
-
 pub(crate) fn ts_parser__has_included_range_difference(
     parser: &Parser,
     start_position: u32,
@@ -1850,7 +1828,12 @@ pub(crate) fn ts_parser__advance(
                 return false;
             }
             let symbol = if !lookahead.is_null() {
-                cache_token_for_version(parser, version, position, lookahead.clone());
+                ts_parser__set_cached_token(
+                    parser,
+                    position,
+                    ts_stack_last_external_token(&parser.stack, version).clone(),
+                    lookahead.clone(),
+                );
                 ts_subtree_symbol(&lookahead)
             } else {
                 // Null lookahead terminates a non-terminal extra; its fixed
@@ -2016,9 +1999,8 @@ pub(crate) fn ts_parser__advance(
 pub(crate) fn ts_parser__condense_stack(parser: &mut Parser) -> u32 {
     // An active sole version cannot merge, be pruned, or need resuming. Keep
     // the version-status read: it also lowers the saved error node baseline.
-    if ts_stack_version_count(&parser.stack) == 1 && ts_stack_is_active(&parser.stack, 0) {
-        let status = ts_parser__version_status(parser, 0);
-        return if status.is_in_error { u32::MAX } else { status.cost };
+    if let Some(cost) = ts_stack_single_active_error_cost(&mut parser.stack) {
+        return cost;
     }
     ts_parser__condense_stack_general(parser)
 }

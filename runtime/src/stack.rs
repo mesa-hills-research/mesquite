@@ -660,6 +660,17 @@ pub(crate) fn ts_stack_set_last_external_token(
     }
 }
 
+/// The single active head needs only its cost and error-baseline update during
+/// condensation, not the full version-comparison record.
+#[inline]
+pub(crate) fn ts_stack_single_active_error_cost(stack: &mut Stack) -> Option<u32> {
+    let [head] = stack.heads.as_mut_slice() else { return None };
+    if head.status != StackStatus::Active { return None; }
+    let node = stack.arena.nodes[head.node.0].as_ref().expect("live stack node");
+    head.node_count_at_last_error = head.node_count_at_last_error.min(node.node_count);
+    Some(if node.state == ERROR_STATE { u32::MAX } else { node.error_cost })
+}
+
 pub(crate) fn ts_stack_error_cost(stack: &Stack, version: StackVersion) -> u32 {
     let head = &stack.heads[version as usize];
     let node = stack.arena.nodes[head.node.0].as_ref().unwrap();
