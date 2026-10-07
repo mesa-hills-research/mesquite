@@ -190,6 +190,19 @@ pub(crate) fn create() -> Box<dyn ExternalScanner> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn bare_backslash_is_bracket_content_during_recovery() {
+        let mut scanner = create();
+        for _ in 0..2 {
+            let mut lexer = TestLexer::new("\\");
+            assert!(scanner.scan(&mut lexer, &[true; 7]));
+            assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
+            assert_eq!(lexer.position, 1);
+            assert_eq!(lexer.end, Some(1));
+            scanner.deserialize(&[]);
+        }
+    }
+
     #[derive(Debug, PartialEq, Eq)]
     enum Event {
         Advance(usize, bool),
@@ -306,8 +319,9 @@ mod tests {
 
         // Recovery enables every external symbol. C's zero token allows a
         // content token even when there has not been an opening bracket.
-        // Embedded NULs remain content rather than being mistaken for EOF.
-        for input in ["text\\\0\nmore", "", "text", "text\\\0\nmore"] {
+        // Embedded NULs remain content rather than being mistaken for EOF,
+        // including when recovery starts at a backslash immediately before one.
+        for input in ["text\\\0\nmore", "", "text", "\\\0\nmore", "\0", "\0more"] {
             let mut lexer = TestLexer::new(input);
             assert!(scanner.scan(&mut lexer, &[true; 7]));
             assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
@@ -315,13 +329,35 @@ mod tests {
             assert_eq!(lexer.end, (!input.is_empty()).then_some(input.len()));
             assert_eq!(scanner.serialize(&mut snapshot), STATE_SIZE);
             assert_eq!(&snapshot[..4], &0u32.to_ne_bytes());
-            assert_eq!(&snapshot[4..], &(BRACKET_ARGUMENT_CONTENT as u32).to_ne_bytes());
+            assert_eq!(
+                &snapshot[4..],
+                &(BRACKET_ARGUMENT_CONTENT as u32).to_ne_bytes()
+            );
 
             // Content changed the token; an empty snapshot must reset it so
             // that the next scan can emit content again, even at EOF.
             scanner.deserialize(&[]);
             assert_eq!(scanner.serialize(&mut snapshot), STATE_SIZE);
             assert_eq!(snapshot, [0; STATE_SIZE]);
+        }
+    }
+
+    #[test]
+    fn recovery_content_does_not_treat_nul_as_eof() {
+        let mut scanner = create();
+        for input in ["\0", "\0tail", "text\0tail"] {
+            // Recovery permits content without an opener in the zero state.
+            // Unlike line comments, bracket content checks eof(), not a zero
+            // lookahead, so embedded NULs must be consumed along with the tail.
+            let mut lexer = TestLexer::new(input);
+            assert!(scanner.scan(&mut lexer, &[true; 7]));
+            assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
+            assert_eq!(lexer.position, input.len());
+            assert_eq!(lexer.end, Some(input.len()));
+
+            // Exercise both initial state and the empty-snapshot reset used
+            // when recovering without a previous external token.
+            scanner.deserialize(&[]);
         }
     }
 
@@ -491,6 +527,21 @@ mod tests {
         scanner.token = BRACKET_ARGUMENT_OPEN as u32;
         assert!(scanner.scan(&mut lexer, &valid(&[BRACKET_ARGUMENT_CONTENT])));
         assert_eq!(lexer.end, Some(5));
+    }
+
+    #[test]
+    fn recovery_content_includes_trailing_newline() {
+        let mut scanner = create();
+        for reset in [false, true] {
+            if reset {
+                scanner.deserialize(&[]);
+            }
+            let mut lexer = TestLexer::new(")\n");
+            assert!(scanner.scan(&mut lexer, &[true; 7]));
+            assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
+            assert_eq!(lexer.end, Some(2));
+            assert_eq!(lexer.position, 2);
+        }
     }
 
     #[test]
