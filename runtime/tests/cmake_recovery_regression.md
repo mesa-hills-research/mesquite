@@ -211,7 +211,7 @@ new unsafe code, warnings, or generated-file modifications are introduced.
 
 ## Empty recovery-content bucket `f5e2762e`
 
-Reverified at `6e5a78d` (previously at `b7af341`):
+Reverified at `3c5ffd5` (previously at `6e5a78d`):
 all 16 reported inputs already pass on the starting checkout. The merged scanner
 initialization/reset correction above allows `bracket_argument_content` at EOF
 without an opener, including after `a` and after skipping the newline in `if(\n`.
@@ -239,7 +239,7 @@ The current C source was compared directly with the Rust scanner: creation uses
 The matching implementation and all regression cases were already present at
 this starting revision, so no duplicate test or behavior change was warranted.
 
-Checks rerun for this bucket at `6e5a78d`:
+Checks rerun for this bucket at `3c5ffd5`:
 
 - `run_oracle(inputs = "bucket:f5e2762e")`: 16/16 pass.
 - `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs
