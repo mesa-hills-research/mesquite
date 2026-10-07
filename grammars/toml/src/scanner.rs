@@ -12,42 +12,94 @@ const MULTILINE_LITERAL_STRING_END: Symbol = 4;
 pub(crate) struct Scanner;
 
 // Keep quote-run callbacks and bookkeeping out of the line-ending scan path.
+// Specialize the two delimiters so their token IDs and code points do not
+// occupy registers across the lexer callbacks. Quote runs are uncommon
+// compared with the scanner's ordinary LF tokens.
+#[cold]
 #[inline(never)]
-fn scan_multiline_string_end(
+fn scan_multiline_string_end<
+    const DELIMITER: i32,
+    const CONTENT_SYMBOL: Symbol,
+    const END_SYMBOL: Symbol,
+>(
     lexer: &mut dyn Lexer,
-    delimiter: i32,
-    content_symbol: Symbol,
-    end_symbol: Symbol,
 ) -> bool {
     // The caller has checked the end token and first delimiter.
     lexer.advance(false);
     lexer.mark_end();
 
-    if lexer.lookahead() != delimiter {
-        lexer.set_result_symbol(content_symbol);
+    if lexer.lookahead() != DELIMITER {
+        lexer.set_result_symbol(CONTENT_SYMBOL);
         return true;
     }
 
     lexer.advance(false);
 
-    if lexer.lookahead() != delimiter {
+    if lexer.lookahead() != DELIMITER {
         lexer.mark_end();
-        lexer.set_result_symbol(content_symbol);
+        lexer.set_result_symbol(CONTENT_SYMBOL);
         return true;
     }
 
     lexer.advance(false);
 
-    if lexer.lookahead() != delimiter {
+    if lexer.lookahead() != DELIMITER {
         lexer.mark_end();
-        lexer.set_result_symbol(end_symbol);
+        lexer.set_result_symbol(END_SYMBOL);
         return true;
     }
 
     // Four or more quotes: keep the mark after the first quote so the
     // remaining quotes can be scanned again as content or a closing delimiter.
-    lexer.set_result_symbol(content_symbol);
+    lexer.set_result_symbol(CONTENT_SYMBOL);
     true
+}
+
+// LF takes the direct path in scan. Dispatch the remaining starts only
+// when needed. Marking these helpers cold lets the enabled LF path fall
+// through the entry checks instead of branching around failure returns.
+#[cold]
+#[inline(never)]
+fn scan_non_newline(lexer: &mut dyn Lexer, valid_symbols: &[bool; 5], mut lookahead: i32) -> bool {
+    match lookahead {
+        0x22 => {
+            return valid_symbols[MULTILINE_BASIC_STRING_END as usize]
+                && scan_multiline_string_end::<
+                    0x22,
+                    MULTILINE_BASIC_STRING_CONTENT,
+                    MULTILINE_BASIC_STRING_END,
+                >(lexer);
+        }
+        0x27 => {
+            return valid_symbols[MULTILINE_LITERAL_STRING_END as usize]
+                && scan_multiline_string_end::<
+                    0x27,
+                    MULTILINE_LITERAL_STRING_CONTENT,
+                    MULTILINE_LITERAL_STRING_END,
+                >(lexer);
+        }
+        0 | 0x09 | 0x0d | 0x20 if valid_symbols[LINE_ENDING_OR_EOF as usize] => {}
+        _ => return false,
+    }
+
+    while matches!(lookahead, 0x20 | 0x09) {
+        lexer.advance(true);
+        lookahead = lexer.lookahead();
+    }
+    let accepted = if lookahead == 0x0d {
+        lexer.advance(true);
+        lexer.lookahead() == i32::from(b'\n')
+    } else {
+        // C treats an embedded NUL as EOF here.
+        matches!(lookahead, 0 | 0x0a)
+    };
+    if accepted {
+        // The parser ignores result_symbol on failure. Defer the write
+        // so whitespace-prefixed failed scans do not make a virtual call
+        // solely to produce an unused symbol.
+        lexer.set_result_symbol(LINE_ENDING_OR_EOF);
+    }
+    accepted
 }
 
 impl ExternalScanner for Scanner {
@@ -55,50 +107,16 @@ impl ExternalScanner for Scanner {
         let Some(valid_symbols) = valid_symbols.first_chunk::<5>() else {
             return false;
         };
-        let mut lookahead = lexer.lookahead();
-        match lookahead {
-            0x22 if valid_symbols[MULTILINE_BASIC_STRING_END as usize] => {
-                return scan_multiline_string_end(
-                    lexer,
-                    lookahead,
-                    MULTILINE_BASIC_STRING_CONTENT,
-                    MULTILINE_BASIC_STRING_END,
-                );
+        let lookahead = lexer.lookahead();
+        if lookahead == 0x0a {
+            let accepted = valid_symbols[LINE_ENDING_OR_EOF as usize];
+            if accepted {
+                lexer.set_result_symbol(LINE_ENDING_OR_EOF);
             }
-            0x27 if valid_symbols[MULTILINE_LITERAL_STRING_END as usize] => {
-                return scan_multiline_string_end(
-                    lexer,
-                    lookahead,
-                    MULTILINE_LITERAL_STRING_CONTENT,
-                    MULTILINE_LITERAL_STRING_END,
-                );
-            }
-            _ => {}
-        }
-
-        if !valid_symbols[LINE_ENDING_OR_EOF as usize]
-            || !matches!(lookahead, 0 | 0x09 | 0x0a | 0x0d | 0x20)
-        {
-            return false;
-        }
-        while matches!(lookahead, 0x20 | 0x09) {
-            lexer.advance(true);
-            lookahead = lexer.lookahead();
-        }
-        let accepted = if lookahead == 0x0d {
-            lexer.advance(true);
-            lexer.lookahead() == i32::from(b'\n')
+            accepted
         } else {
-            // C treats an embedded NUL as EOF here.
-            matches!(lookahead, 0 | 0x0a)
-        };
-        if accepted {
-            // The parser ignores result_symbol on failure. Defer the write
-            // so whitespace-prefixed failed scans do not make a virtual call
-            // solely to produce an unused symbol.
-            lexer.set_result_symbol(LINE_ENDING_OR_EOF);
+            scan_non_newline(lexer, valid_symbols, lookahead)
         }
-        accepted
     }
 
     fn serialize(&mut self, _buffer: &mut [u8]) -> usize {
@@ -227,6 +245,60 @@ mod tests {
                     }
                     expected.push(Event::Symbol(if count == 3 { end } else { content }));
                     assert_eq!(lexer.events, expected, "input {input:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn quote_specializations_preserve_boundaries_for_every_validity_mask() {
+        for (delimiter, content, end, other_quote) in [
+            (
+                '"',
+                MULTILINE_BASIC_STRING_CONTENT,
+                MULTILINE_BASIC_STRING_END,
+                "''''",
+            ),
+            (
+                '\'',
+                MULTILINE_LITERAL_STRING_CONTENT,
+                MULTILINE_LITERAL_STRING_END,
+                "\"\"\"\"",
+            ),
+        ] {
+            for count in 1..=8 {
+                for suffix in ["", "x", "\0x", "\n", "\r\n", " ", other_quote] {
+                    let input = format!("{}{suffix}", delimiter.to_string().repeat(count));
+                    for mask in 0..32 {
+                        let valid: [bool; 5] = std::array::from_fn(|i| mask & (1 << i) != 0);
+                        let enabled = valid[end as usize];
+                        let mut lexer = TestLexer::new(&input);
+                        assert_eq!(Scanner.scan(&mut lexer, &valid), enabled);
+
+                        let mut expected = vec![];
+                        if enabled {
+                            expected.push(Event::Advance {
+                                position: 0,
+                                skip: false,
+                            });
+                            expected.push(Event::MarkEnd(1));
+                            for position in 1..count.min(3) {
+                                expected.push(Event::Advance {
+                                    position,
+                                    skip: false,
+                                });
+                            }
+                            if count == 2 || count == 3 {
+                                expected.push(Event::MarkEnd(count));
+                            }
+                            // Neither content validity nor the other quote's
+                            // end flag can change this specialization's token.
+                            expected.push(Event::Symbol(if count == 3 { end } else { content }));
+                        }
+                        assert_eq!(lexer.events, expected, "{input:?}, mask {mask}");
+                        assert_eq!(lexer.position, if enabled { count.min(3) } else { 0 });
+                        assert_eq!(lexer.lookahead_calls.get(), lexer.position + 1);
+                    }
                 }
             }
         }
@@ -423,6 +495,26 @@ mod tests {
                 };
                 assert_eq!(accepted, expected_accepted, "first {first}, mask {mask}");
                 assert_eq!(lexer.events, expected_events, "first {first}, mask {mask}");
+            }
+        }
+    }
+
+    #[test]
+    fn dispatch_does_not_truncate_line_break_or_delimiter_code_points() {
+        for upper_bits in [0x100, 0x10000, 0x10ff00, i32::MIN] {
+            for low_byte in [0, 0x09, 0x0a, 0x0d, 0x20, 0x22, 0x27] {
+                let first = upper_bits | low_byte;
+                for mask in 0..32 {
+                    let valid: [bool; 5] = std::array::from_fn(|i| mask & (1 << i) != 0);
+                    let mut lexer = TestLexer::new("x\n");
+                    lexer.input[0] = first;
+                    assert!(
+                        !Scanner.scan(&mut lexer, &valid),
+                        "first {first}, mask {mask}"
+                    );
+                    assert!(lexer.events.is_empty(), "first {first}, mask {mask}");
+                    assert_eq!(lexer.lookahead_calls.get(), 1);
+                }
             }
         }
     }
