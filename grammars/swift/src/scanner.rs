@@ -362,6 +362,14 @@ fn eat_operators(
     immediate: bool,
     prior_char: i32,
 ) -> Option<Token> {
+    // A slash consumed by the comment probe has no fixed candidates. In
+    // particular // must fail here without entering the general matcher.
+    if prior_char == 0x2f
+        && (!valid[CustomOperator as usize]
+            || !is_legal_custom_operator(1, 0x2f, lexer.lookahead()))
+    {
+        return None;
+    }
     if prior_char == 0 && (0x61..=0x7a).contains(&lexer.lookahead()) {
         if lexer.lookahead() == 0x61 {
             return if valid[AsKeyword as usize]
