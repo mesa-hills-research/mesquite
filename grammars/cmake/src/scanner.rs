@@ -190,6 +190,19 @@ pub(crate) fn create() -> Box<dyn ExternalScanner> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn bare_backslash_is_bracket_content_during_recovery() {
+        let mut scanner = create();
+        for _ in 0..2 {
+            let mut lexer = TestLexer::new("\\");
+            assert!(scanner.scan(&mut lexer, &[true; 7]));
+            assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
+            assert_eq!(lexer.position, 1);
+            assert_eq!(lexer.end, Some(1));
+            scanner.deserialize(&[]);
+        }
+    }
+
     #[derive(Debug, PartialEq, Eq)]
     enum Event {
         Advance(usize, bool),
@@ -306,8 +319,9 @@ mod tests {
 
         // Recovery enables every external symbol. C's zero token allows a
         // content token even when there has not been an opening bracket.
-        // Embedded NULs remain content rather than being mistaken for EOF.
-        for input in ["text\\\0\nmore", "", "text", "text\\\0\nmore"] {
+        // Embedded NULs remain content rather than being mistaken for EOF,
+        // including when recovery starts at a backslash immediately before one.
+        for input in ["text\\\0\nmore", "", "text", "\\\0\nmore", "\0", "\0more"] {
             let mut lexer = TestLexer::new(input);
             assert!(scanner.scan(&mut lexer, &[true; 7]));
             assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
@@ -325,6 +339,26 @@ mod tests {
             scanner.deserialize(&[]);
             assert_eq!(scanner.serialize(&mut snapshot), STATE_SIZE);
             assert_eq!(snapshot, [0; STATE_SIZE]);
+        }
+    }
+
+    #[test]
+    fn fresh_and_reset_scanners_emit_zero_width_content_at_eof() {
+        let mut scanner = create();
+        for reset in [false, true] {
+            if reset {
+                // The previous scan changed token to CONTENT; resetting must
+                // allow the same zero-width recovery token to be emitted again.
+                scanner.deserialize(&[]);
+            }
+            let mut lexer = TestLexer::new("");
+            assert!(scanner.scan(&mut lexer, &[true; 7]));
+            assert_eq!(lexer.position, 0);
+            assert_eq!(lexer.end, None);
+            assert_eq!(
+                lexer.events,
+                [Event::Symbol(BRACKET_ARGUMENT_CONTENT as u16)]
+            );
         }
     }
 
@@ -529,5 +563,39 @@ mod tests {
                 assert_eq!(lexer.end, Some(4));
             }
         }
+    }
+
+    #[test]
+    fn fresh_scanner_emits_empty_content_at_eof_during_recovery() {
+        let mut scanner = create();
+        let mut snapshot = [0xff; STATE_SIZE];
+        assert_eq!(scanner.serialize(&mut snapshot), STATE_SIZE);
+        assert_eq!(snapshot, [0; STATE_SIZE]);
+
+        let mut lexer = TestLexer::new("");
+        assert!(scanner.scan(&mut lexer, &[true; 7]));
+        assert_eq!(lexer.position, 0);
+        assert_eq!(lexer.end, None);
+        assert_eq!(
+            lexer.events,
+            [Event::Symbol(BRACKET_ARGUMENT_CONTENT as u16)]
+        );
+    }
+
+    #[test]
+    fn empty_snapshot_resets_token_and_allows_content_at_eof() {
+        let mut scanner = Scanner {
+            level: 2,
+            token: BRACKET_COMMENT_CONTENT as u32,
+        };
+        scanner.deserialize(&[]);
+        let mut lexer = TestLexer::new("");
+        assert!(scanner.scan(&mut lexer, &[true; 7]));
+        assert_eq!(scanner.level, 0);
+        assert_eq!(scanner.token, BRACKET_ARGUMENT_CONTENT as u32);
+        assert_eq!(
+            lexer.events,
+            [Event::Symbol(BRACKET_ARGUMENT_CONTENT as u16)]
+        );
     }
 }
