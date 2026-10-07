@@ -16,7 +16,8 @@ const STATE_SIZE: usize = 8;
 
 /// The scanner's state (C's `payload`).
 ///
-/// C uses `ts_calloc`, so the initial token is zero (`BRACKET_ARGUMENT_OPEN`).
+/// C uses `ts_calloc`, so the initial token is zero (`BRACKET_ARGUMENT_OPEN`),
+/// including when error recovery enables content without a preceding opener.
 #[derive(Default)]
 pub(crate) struct Scanner {
     level: u32,
@@ -172,7 +173,7 @@ impl ExternalScanner for Scanner {
             self.level = u32::from_ne_bytes(buffer[..4].try_into().unwrap());
             self.token = u32::from_ne_bytes(buffer[4..STATE_SIZE].try_into().unwrap());
         } else {
-            // C resets both fields, including when there is no previous token.
+            // Empty or invalid snapshots reset both fields, just like calloc.
             *self = Self::default();
         }
     }
@@ -261,20 +262,26 @@ mod tests {
     }
 
     #[test]
-    fn fresh_scanner_can_emit_bracket_content_during_recovery() {
+    fn fresh_and_reset_scanners_allow_bracket_content_during_recovery() {
         let mut scanner = create();
-        let mut buffer = [0xff; STATE_SIZE];
-        assert_eq!(scanner.serialize(&mut buffer), STATE_SIZE);
-        assert_eq!(buffer, [0; STATE_SIZE]);
+        let mut snapshot = [0xff; STATE_SIZE];
+        assert_eq!(scanner.serialize(&mut snapshot), STATE_SIZE);
+        assert_eq!(snapshot, [0; STATE_SIZE]);
 
         // Error recovery enables every symbol. The zero-initialized token
         // allows content even without an opener, both initially and on reset.
-        for _ in 0..2 {
-            let mut lexer = TestLexer::new("\\");
+        for input in ["\\", "text", "", "\\", "text"] {
+            let mut lexer = TestLexer::new(input);
             assert!(scanner.scan(&mut lexer, &[true; 7]));
             assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
-            assert_eq!(lexer.end, Some(1));
+            assert_eq!(lexer.position, input.len());
+            assert_eq!(lexer.end, (!input.is_empty()).then_some(input.len()));
+
+            // Content changed the token; an empty snapshot must reset it so
+            // that the next scan can emit content again, even at EOF.
             scanner.deserialize(&[]);
+            assert_eq!(scanner.serialize(&mut snapshot), STATE_SIZE);
+            assert_eq!(snapshot, [0; STATE_SIZE]);
         }
     }
 
