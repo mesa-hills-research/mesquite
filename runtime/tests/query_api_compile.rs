@@ -133,7 +133,7 @@ fn save_captures<'query, 'tree: 'query>(
     source: &[u8],
 ) -> Vec<QueryCapture<'tree>> {
     let mut matches = cursor.matches(query, root, source);
-    matches.next().unwrap().captures.clone()
+    matches.next().unwrap().captures
 }
 
 fn move_match<'query, 'tree: 'query>(
@@ -149,7 +149,7 @@ fn cursor_reborrow_after_last_use(query: &Query, root: Node<'_>, source: &[u8]) 
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, root, source);
     while let Some(found) = matches.next() {
-        for capture in &found.captures {
+        for capture in found.captures {
             let _ = capture.node.byte_range();
         }
     }
@@ -188,4 +188,18 @@ fn options_reborrow_after_last_use(query: &Query, root: Node<'_>, source: &[u8])
     let _ = captures.next();
     let _: bool = cursor.did_exceed_match_limit();
     let _: usize = calls;
+}
+
+// Concrete next() supplies an owned match for the official capture-loop idiom;
+// explicit streaming-trait callers can still borrow without cloning captures.
+fn borrowed_streaming_match(query: &Query, root: Node<'_>, source: &[u8]) {
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(query, root, source);
+    while let Some(found) = StreamingIterator::next(&mut matches) {
+        let _: &QueryMatch<'_, '_> = found;
+        for capture in &found.captures {
+            let _ = capture.node.byte_range();
+        }
+    }
+    let _: bool = cursor.did_exceed_match_limit();
 }

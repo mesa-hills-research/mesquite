@@ -397,7 +397,11 @@ therefore uses these explicit compatibility deviations instead:
   cursor-borrowed slice. Borrow `&m.captures` when iterating a borrowed match;
   clone the vector or move a match to retain results beyond iterator advancement.
   There is no cursor-owned snapshot arena or lifetime erasure. The transient
-  engine result vector moves directly into the public match without another copy.
+  engine result vector moves directly into the stored public match without another
+  copy. Concrete `QueryMatches::next()` returns an owned clone, so the common
+  `for capture in found.captures` idiom remains source-compatible. The streaming
+  trait's `get`, `get_mut`, and explicitly qualified `StreamingIterator::next`
+  continue to borrow the current match, avoiding that convenience clone.
 
 These changes are necessary to avoid self-referential storage, leaked allocations,
 or unsafe lifetime extensions. The repository's compile-contract clients reflect

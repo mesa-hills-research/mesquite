@@ -55,6 +55,7 @@ pub struct QueryPredicate {
     pub args: Box<[QueryPredicateArg]>,
 }
 
+#[derive(Clone)]
 pub struct QueryMatch<'cursor, 'tree> {
     pub pattern_index: usize,
     pub captures: Vec<QueryCapture<'tree>>,
@@ -888,7 +889,19 @@ impl<'query, 'tree: 'query, T: TextProvider<I>, I: AsRef<[u8]>> StreamingIterato
         self.current_match.as_mut()
     }
 }
-impl<T: TextProvider<I>, I: AsRef<[u8]>> QueryMatches<'_, '_, T, I> {
+impl<'query, 'tree: 'query, T: TextProvider<I>, I: AsRef<[u8]>> QueryMatches<'query, 'tree, T, I> {
+    /// Advance and return an owned match, allowing captures to be iterated by
+    /// value (`for capture in found.captures`) without moving out of a shared
+    /// streaming reference. The current match is also retained for `get` and
+    /// `get_mut`, just as with the borrowed streaming-trait API.
+    ///
+    /// Use [`StreamingIterator::next`] explicitly to borrow the current result
+    /// instead, avoiding this convenience method's capture-vector clone.
+    #[allow(clippy::should_implement_trait)] // The borrowed StreamingIterator API is also implemented.
+    pub fn next(&mut self) -> Option<QueryMatch<'query, 'tree>> {
+        StreamingIterator::next(self).cloned()
+    }
+
     pub fn set_byte_range(&mut self, range: ops::Range<usize>) {
         ts_query_cursor_set_byte_range(self.execution.config, range.start as u32, range.end as u32);
     }

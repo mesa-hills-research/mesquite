@@ -256,3 +256,57 @@ fn compiler_diagnostics_keep_byte_columns_and_extract_quoted_names() {
     let diagnostic = error("", 0, QueryErrorCode::Syntax);
     assert_eq!(diagnostic.message, "Unexpected EOF");
 }
+
+#[test]
+fn owned_next_supports_capture_loops_and_preserves_streaming_current_match() {
+    use crate::subtree::{InlineLeaf, NAMED, VISIBLE};
+
+    let language = language();
+    let tree = Tree {
+        root: Box::new(Subtree::Inline(InlineLeaf {
+            flags: NAMED | VISIBLE,
+            size_bytes: 1,
+            ..InlineLeaf::default()
+        })),
+        language,
+        included_ranges: vec![],
+    };
+    let query = query(vec![]);
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(&query, tree.root_node(), b"x".as_slice());
+    // Seed a completed engine state so this binding regression does not depend
+    // on the separate query parser/compiler units.
+    let slot = capture_list_pool_acquire(&mut matches.execution.capture_list_pool);
+    capture_list_pool_get_mut(&mut matches.execution.capture_list_pool, slot).push(QueryCapture {
+        node: tree.root_node(),
+        index: 0,
+    });
+    matches.execution.config.finished_states.push(QueryState {
+        id: 0,
+        capture_list_id: u32::from(slot),
+        start_depth: 0,
+        step_index: 0,
+        pattern_index: 0,
+        consumed_capture_count: 0,
+        seeking_immediate_match: false,
+        has_in_progress_alternatives: false,
+        dead: false,
+        needs_parent: false,
+    });
+    matches.execution.halted = true;
+    let found = matches.next().unwrap();
+    let current = matches.get().unwrap();
+    assert_eq!(found.id(), current.id());
+    assert_eq!(found.pattern_index, current.pattern_index);
+    assert_eq!(found.captures.len(), 1);
+    assert_eq!(found.captures[0].node, current.captures[0].node);
+    assert_ne!(found.captures.as_ptr(), current.captures.as_ptr());
+    // This exact loop used to fail when next() only returned &QueryMatch.
+    for capture in found.captures {
+        assert_eq!(capture.index, 0);
+        assert_eq!(capture.node.byte_range(), 0..1);
+    }
+    assert!(matches.next().is_none());
+    assert!(matches.get().is_none());
+    assert!(!cursor.did_exceed_match_limit());
+}
