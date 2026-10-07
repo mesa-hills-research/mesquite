@@ -198,112 +198,9 @@ impl Block {
     }
 }
 
-// Matches the C stack's initial allocation, but needs no heap allocation.
-const INLINE_BLOCK_CAPACITY: usize = 8;
-
-/// Keep ordinary block nesting inline and in its native serialized layout.
-/// Deeper stacks spill without imposing a new nesting limit. The inline prefix
-/// stays current even when spilled, so popping back into it needs no copy.
-#[derive(Debug, Default)]
-struct BlockStack {
-    inline: [[u8; 4]; INLINE_BLOCK_CAPACITY],
-    spill: Vec<[u8; 4]>,
-    len: usize,
-}
-
-impl BlockStack {
-    fn len(&self) -> usize {
-        self.len
-    }
-
-    fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    fn clear(&mut self) {
-        self.len = 0;
-    }
-
-    fn bytes(&self) -> &[u8] {
-        if self.len <= self.inline.len() {
-            self.inline[..self.len].as_flattened()
-        } else {
-            self.spill[..self.len].as_flattened()
-        }
-    }
-
-    fn get(&self, index: usize) -> Block {
-        let blocks = if self.len <= self.inline.len() {
-            &self.inline[..self.len]
-        } else {
-            &self.spill[..self.len]
-        };
-        Block(u32::from_ne_bytes(blocks[index]))
-    }
-
-    fn push(&mut self, block: Block) {
-        if self.len < self.inline.len() {
-            self.inline[self.len] = block.0.to_ne_bytes();
-        } else {
-            if self.len == self.inline.len() {
-                self.spill.clear();
-                self.spill.extend_from_slice(&self.inline);
-            } else {
-                self.spill.truncate(self.len);
-            }
-            self.spill.push(block.0.to_ne_bytes());
-        }
-        self.len += 1;
-    }
-
-    fn pop(&mut self) {
-        self.len = self.len.saturating_sub(1);
-    }
-
-    fn restore(&mut self, bytes: &[u8]) {
-        let blocks = bytes.as_chunks::<4>().0;
-        self.len = blocks.len();
-        if self.len <= self.inline.len() {
-            self.inline[..self.len].copy_from_slice(blocks);
-        } else {
-            self.inline
-                .copy_from_slice(&blocks[..INLINE_BLOCK_CAPACITY]);
-            self.spill.clear();
-            self.spill.extend_from_slice(blocks);
-        }
-    }
-
-    #[cfg(test)]
-    fn capacity(&self) -> usize {
-        self.inline.len().max(self.spill.capacity())
-    }
-}
-
-#[cfg(test)]
-impl FromIterator<Block> for BlockStack {
-    fn from_iter<T: IntoIterator<Item = Block>>(iter: T) -> Self {
-        let mut stack = Self::default();
-        for block in iter {
-            stack.push(block);
-        }
-        stack
-    }
-}
-
-#[cfg(test)]
-impl<const N: usize> PartialEq<[Block; N]> for BlockStack {
-    fn eq(&self, other: &[Block; N]) -> bool {
-        self.len == N
-            && other
-                .iter()
-                .enumerate()
-                .all(|(i, block)| self.get(i) == *block)
-    }
-}
-
 #[derive(Default)]
 pub(crate) struct Scanner {
-    open_blocks: BlockStack,
+    open_blocks: Vec<Block>,
     state: u8,
     matched: u8,
     indentation: u8,
@@ -340,31 +237,8 @@ fn is_punctuation(c: i32) -> bool {
 
 impl ExternalScanner for Scanner {
     fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
-        // Check the grammar's fixed external-token count once, rather than
-        // carrying a slice length and checking it in every parsing helper.
-        let valid_symbols = valid_symbols
-            .first_chunk::<47>()
-            .expect("Markdown external tokens");
         self.simulate = false;
-        let mut lexer = ScanLexer::new(lexer);
-        // Ordinary text cannot start an external token without table lookahead,
-        // unused indentation, block matching, or an explicit control request.
-        // Avoid entering the full dispatcher in this common case. Keep NUL,
-        // whitespace and every dispatch character on the general path; compare
-        // full code points, just as scan_inner does.
-        if !matches!(
-            lexer.lookahead(),
-            0 | 0x09 | 0x0a | 0x0d | 0x20 | 0x23 | 0x2a | 0x2b | 0x2d
-                | 0x30..=0x39 | 0x3c..=0x3e | 0x5f | 0x60 | 0x7e
-        ) && self.state & STATE_MATCHING == 0
-            && self.indentation < 4
-            && !valid_symbols[PIPE_TABLE_START]
-            && !valid_symbols[TRIGGER_ERROR]
-            && !valid_symbols[CLOSE_BLOCK]
-        {
-            return false;
-        }
-        self.scan_inner(&mut lexer, valid_symbols)
+        self.scan_inner(&mut ScanLexer::new(lexer), valid_symbols)
     }
 
     fn serialize(&mut self, buffer: &mut [u8]) -> usize {
@@ -375,33 +249,31 @@ impl ExternalScanner for Scanner {
             self.column,
             self.fenced_code_block_delimiter_length,
         ]);
-        let blocks = self.open_blocks.bytes();
-        let size = 5 + blocks.len();
-        buffer[5..size].copy_from_slice(blocks);
+        let mut size = 5;
+        for block in &self.open_blocks {
+            buffer[size..size + 4].copy_from_slice(&block.0.to_ne_bytes());
+            size += 4;
+        }
         size
     }
 
     fn deserialize(&mut self, buffer: &[u8]) {
         self.open_blocks.clear();
+        self.state = 0;
+        self.matched = 0;
+        self.indentation = 0;
+        self.column = 0;
+        self.fenced_code_block_delimiter_length = 0;
         // simulate is neither serialized nor reset by C's deserialize.
-        if buffer.is_empty() {
-            self.state = 0;
-            self.matched = 0;
-            self.indentation = 0;
-            self.column = 0;
-            self.fenced_code_block_delimiter_length = 0;
-        } else {
-            // Validate the complete header once, and overwrite it directly:
-            // nonempty snapshots need neither per-field checks nor zeroing.
-            let (header, blocks) = buffer.split_at(5);
-            self.state = header[0];
-            self.matched = header[1];
-            self.indentation = header[2];
-            self.column = header[3];
-            self.fenced_code_block_delimiter_length = header[4];
-            // The stack is already in C's native-endian snapshot layout. Copy
-            // directly into inline storage or reuse the deep-stack allocation.
-            self.open_blocks.restore(blocks);
+        if !buffer.is_empty() {
+            self.state = buffer[0];
+            self.matched = buffer[1];
+            self.indentation = buffer[2];
+            self.column = buffer[3];
+            self.fenced_code_block_delimiter_length = buffer[4];
+            for &bytes in buffer[5..].as_chunks::<4>().0 {
+                self.open_blocks.push(Block(u32::from_ne_bytes(bytes)));
+            }
         }
     }
 }
@@ -541,7 +413,7 @@ impl Scanner {
         &mut self,
         delimiter: u8,
         lexer: &mut ScanLexer<'_>,
-        valid_symbols: &[bool; 47],
+        valid_symbols: &[bool],
     ) -> bool {
         let mut level = 0u8;
         while lexer.lookahead() == i32::from(delimiter) {
@@ -607,7 +479,7 @@ impl Scanner {
         extra
     }
 
-    fn parse_star(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool; 47]) -> bool {
+    fn parse_star(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool]) -> bool {
         self.advance(lexer);
         self.mark_end(lexer);
         let mut star_count = 1usize;
@@ -666,7 +538,7 @@ impl Scanner {
     fn parse_thematic_break_underscore(
         &mut self,
         lexer: &mut ScanLexer<'_>,
-        valid_symbols: &[bool; 47],
+        valid_symbols: &[bool],
     ) -> bool {
         self.advance(lexer);
         self.mark_end(lexer);
@@ -691,7 +563,7 @@ impl Scanner {
         false
     }
 
-    fn parse_block_quote(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool; 47]) -> bool {
+    fn parse_block_quote(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool]) -> bool {
         if valid_symbols[BLOCK_QUOTE_START] {
             self.advance(lexer);
             self.indentation = 0;
@@ -707,7 +579,7 @@ impl Scanner {
         false
     }
 
-    fn parse_atx_heading(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool; 47]) -> bool {
+    fn parse_atx_heading(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool]) -> bool {
         if valid_symbols[ATX_H1_MARKER] && self.indentation <= 3 {
             self.mark_end(lexer);
             let mut level = 0u16;
@@ -725,11 +597,7 @@ impl Scanner {
         false
     }
 
-    fn parse_setext_underline(
-        &mut self,
-        lexer: &mut ScanLexer<'_>,
-        valid_symbols: &[bool; 47],
-    ) -> bool {
+    fn parse_setext_underline(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool]) -> bool {
         if valid_symbols[SETEXT_H1_UNDERLINE] && usize::from(self.matched) == self.open_blocks.len()
         {
             self.mark_end(lexer);
@@ -750,12 +618,7 @@ impl Scanner {
 
     /// The metadata branches for `+++` and `---` have identical line scanning.
     /// Called at the newline after the opening marker (never at EOF).
-    fn parse_metadata_body(
-        &mut self,
-        lexer: &mut ScanLexer<'_>,
-        delimiter: u8,
-        symbol: usize,
-    ) -> bool {
+    fn parse_metadata_body(&mut self, lexer: &mut ScanLexer<'_>, delimiter: u8, symbol: usize) -> bool {
         loop {
             self.consume_newline(lexer);
             let mut count = 0usize;
@@ -784,7 +647,7 @@ impl Scanner {
         false
     }
 
-    fn parse_plus(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool; 47]) -> bool {
+    fn parse_plus(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool]) -> bool {
         if self.indentation <= 3
             && (valid_symbols[LIST_MARKER_PLUS]
                 || valid_symbols[LIST_MARKER_PLUS_DONT_INTERRUPT]
@@ -835,11 +698,7 @@ impl Scanner {
         false
     }
 
-    fn parse_ordered_list_marker(
-        &mut self,
-        lexer: &mut ScanLexer<'_>,
-        valid_symbols: &[bool; 47],
-    ) -> bool {
+    fn parse_ordered_list_marker(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool]) -> bool {
         if self.indentation <= 3
             && (valid_symbols[LIST_MARKER_PARENTHESIS]
                 || valid_symbols[LIST_MARKER_DOT]
@@ -908,7 +767,7 @@ impl Scanner {
         false
     }
 
-    fn parse_minus(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool; 47]) -> bool {
+    fn parse_minus(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool]) -> bool {
         if self.indentation <= 3
             && (valid_symbols[LIST_MARKER_MINUS]
                 || valid_symbols[LIST_MARKER_MINUS_DONT_INTERRUPT]
@@ -996,7 +855,7 @@ impl Scanner {
         false
     }
 
-    fn parse_html_block(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool; 47]) -> bool {
+    fn parse_html_block(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool]) -> bool {
         if !(valid_symbols[HTML_BLOCK_1_START]
             || valid_symbols[HTML_BLOCK_1_END]
             || valid_symbols[HTML_BLOCK_2_START]
@@ -1276,7 +1135,7 @@ impl Scanner {
         self.simulate = true;
         let mut matched_temp = 0u8;
         while matched_temp < self.open_blocks.len() as u8 {
-            if self.match_block(lexer, self.open_blocks.get(usize::from(matched_temp))) {
+            if self.match_block(lexer, self.open_blocks[usize::from(matched_temp)]) {
                 matched_temp = matched_temp.wrapping_add(1);
             } else {
                 return false;
@@ -1338,7 +1197,7 @@ impl Scanner {
         true
     }
 
-    fn scan_inner(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool; 47]) -> bool {
+    fn scan_inner(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool]) -> bool {
         if valid_symbols[TRIGGER_ERROR] {
             lexer.set_result_symbol(ERROR as u16);
             return true;
@@ -1412,7 +1271,7 @@ impl Scanner {
                     }
                     break;
                 }
-                if self.match_block(lexer, self.open_blocks.get(usize::from(self.matched))) {
+                if self.match_block(lexer, self.open_blocks[usize::from(self.matched)]) {
                     partial_success = true;
                     self.matched = self.matched.wrapping_add(1);
                 } else {
@@ -1457,7 +1316,7 @@ impl Scanner {
                 self.matched = 0;
                 let mut one_will_be_matched = false;
                 while self.matched < self.open_blocks.len() as u8 {
-                    if self.match_block(lexer, self.open_blocks.get(usize::from(self.matched))) {
+                    if self.match_block(lexer, self.open_blocks[usize::from(self.matched)]) {
                         self.matched = self.matched.wrapping_add(1);
                         one_will_be_matched = true;
                     } else {
@@ -1623,11 +1482,7 @@ mod tests {
                 valid(&[PIPE_TABLE_START]),
                 PIPE_TABLE_START,
             ),
-            (
-                "a\\ż | c\n- | -\n",
-                valid(&[PIPE_TABLE_START]),
-                PIPE_TABLE_START,
-            ),
+            ("a\\ż | c\n- | -\n", valid(&[PIPE_TABLE_START]), PIPE_TABLE_START),
             (
                 "\ncontinued text\n",
                 valid(&[LINE_ENDING, SOFT_LINE_ENDING]),
@@ -1642,133 +1497,6 @@ mod tests {
             // lookahead in the column tracker must not add another trait call.
             assert_eq!(lexer.lookahead_calls.get(), lexer.position + 1);
             assert_eq!(lexer.eof_calls.get(), usize::from(input.contains('\0')));
-        }
-    }
-
-    #[test]
-    fn ordinary_text_shortcut_matches_full_dispatch() {
-        let characters = (0..=127).chain([0xe9, 0x109, 0x10a, 0x17c, 0x1f600]);
-        let states = [
-            (0, 0),
-            (0, 3),
-            (0, 4),
-            (0, 255),
-            (STATE_MATCHING, 0),
-            (STATE_CLOSE_BLOCK, 0),
-            (STATE_WAS_SOFT_LINE_BREAK, 0),
-            (STATE_MATCHING | STATE_WAS_SOFT_LINE_BREAK, 0),
-        ];
-        for c in characters {
-            let input = format!("{} text\n- | -\n", char::from_u32(c).unwrap());
-            for tokens in std::iter::once(valid(&[]))
-                .chain((0..47).map(|token| valid(&[token])))
-                .chain([[true; 47]])
-            {
-                for (state, indentation) in states {
-                    let make_scanner = || Scanner {
-                        open_blocks: [Block::QUOTE].into_iter().collect(),
-                        state,
-                        indentation,
-                        column: 2,
-                        ..Scanner::default()
-                    };
-                    let mut fast = make_scanner();
-                    // scan must reset this even when taking the shortcut.
-                    fast.simulate = true;
-                    let mut full = make_scanner();
-                    let mut fast_lexer = TestLexer::new(&input);
-                    let mut full_lexer = TestLexer::new(&input);
-                    let fast_result = fast.scan(&mut fast_lexer, &tokens);
-                    let full_result =
-                        full.scan_inner(&mut ScanLexer::new(&mut full_lexer), &tokens);
-                    assert_eq!(fast_result, full_result, "{input:?}");
-                    assert_eq!(fast_lexer.events, full_lexer.events, "{input:?}");
-                    assert_eq!(fast_lexer.position, full_lexer.position);
-                    assert_eq!(fast_lexer.end, full_lexer.end);
-                    assert_eq!(fast_lexer.symbol, full_lexer.symbol);
-                    assert_eq!(
-                        fast_lexer.lookahead_calls.get(),
-                        full_lexer.lookahead_calls.get()
-                    );
-                    assert_eq!(fast_lexer.eof_calls.get(), full_lexer.eof_calls.get());
-                    assert_eq!(serialized(&mut fast), serialized(&mut full));
-                    assert_eq!(fast.simulate, full.simulate);
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn block_stack_survives_spilling_backtracking_and_restoration() {
-        fn check(stack: &BlockStack, expected: &[Block]) {
-            assert_eq!(stack.len(), expected.len());
-            assert_eq!(stack.is_empty(), expected.is_empty());
-            let mut bytes = Vec::new();
-            for (index, block) in expected.iter().enumerate() {
-                assert_eq!(stack.get(index), *block);
-                bytes.extend_from_slice(&block.0.to_ne_bytes());
-            }
-            assert_eq!(stack.bytes(), bytes);
-        }
-
-        let mut stack = BlockStack::default();
-        let mut expected = Vec::new();
-        for round in 0..3 {
-            // Cross the inline/spill boundary repeatedly with distinct values.
-            for index in 0..40 {
-                let block = Block(0x10000 * round + index);
-                stack.push(block);
-                expected.push(block);
-                check(&stack, &expected);
-            }
-            for _ in 0..40 {
-                stack.pop();
-                expected.pop();
-                check(&stack, &expected);
-            }
-            stack.pop(); // Same empty-stack behavior as Vec::pop.
-            check(&stack, &expected);
-        }
-        let capacity = stack.capacity();
-        for count in [0, 1, 8, 9, 21, 8, 9, 2] {
-            let blocks: Vec<_> = (0..count).map(|i| Block(u32::MAX - i)).collect();
-            let mut bytes = Vec::new();
-            for block in &blocks {
-                bytes.extend_from_slice(&block.0.to_ne_bytes());
-            }
-            stack.restore(&bytes);
-            check(&stack, &blocks);
-            for remaining in (0..blocks.len()).rev() {
-                stack.pop();
-                check(&stack, &blocks[..remaining]);
-            }
-            assert_eq!(stack.capacity(), capacity);
-        }
-        stack.clear();
-        check(&stack, &[]);
-        assert_eq!(stack.capacity(), capacity);
-    }
-
-    #[test]
-    fn deserialization_replaces_blocks_and_reuses_capacity() {
-        let mut scanner = Scanner::default();
-        let mut capacity = 0;
-        for count in [0, 21, 2, 0, 254, 1, 0] {
-            let mut snapshot = vec![STATE_MATCHING, 1, 255, 3, 255];
-            for index in 0..count {
-                // Preserve the full native u32, including unnamed Block values.
-                snapshot.extend_from_slice(&(u32::MAX - index).to_ne_bytes());
-            }
-            scanner.simulate = true;
-            scanner.deserialize(&snapshot);
-            assert_eq!(serialized(&mut scanner), snapshot);
-            assert!(scanner.simulate);
-            assert!(scanner.open_blocks.capacity() >= capacity);
-            capacity = scanner.open_blocks.capacity();
-            scanner.deserialize(&[]);
-            assert_eq!(serialized(&mut scanner), [0; 5]);
-            assert_eq!(scanner.open_blocks.capacity(), capacity);
-            assert!(scanner.simulate);
         }
     }
 
@@ -2029,7 +1757,7 @@ mod tests {
     #[test]
     fn matching_yields_outer_continuation_before_requested_inner_close() {
         let mut scanner = Scanner {
-            open_blocks: [Block::QUOTE, Block::FENCED_CODE].into_iter().collect(),
+            open_blocks: vec![Block::QUOTE, Block::FENCED_CODE],
             state: STATE_MATCHING | STATE_CLOSE_BLOCK,
             ..Scanner::default()
         };
@@ -2048,7 +1776,7 @@ mod tests {
     #[test]
     fn eof_and_error_requests_take_precedence_without_advancing() {
         let mut scanner = Scanner {
-            open_blocks: [Block::QUOTE].into_iter().collect(),
+            open_blocks: vec![Block::QUOTE],
             ..Scanner::default()
         };
         let mut lexer = TestLexer::new("");
