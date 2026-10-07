@@ -2,10 +2,11 @@
 
 ## Status
 
-The assigned bucket is already fixed on the merged baseline `88d4f2b`. Fresh
+The assigned bucket is already fixed on the merged baseline `bd0bdbb`. Fresh
 verification passes all seven reported inputs; no additional runtime/scanner
-change is needed. This revision adds incremental repair-and-undo coverage for
-malformed variable references and records checks rerun on this baseline.
+change is needed. Existing regressions include incremental repair-and-undo
+coverage for malformed variable references. This revision records checks rerun
+on this baseline; it does not add duplicate tests or change behavior.
 
 ## Root cause and existing correction
 
@@ -43,7 +44,7 @@ change source lengths and must produce valid `normal_command` nodes. Undo must
 restore the original top-level ERROR shape and bracket-content byte/point ranges,
 not retain the repaired command or a stale external-scanner snapshot.
 
-## Verification based on `88d4f2b`
+## Verification based on `bd0bdbb`
 
 - `run_oracle(inputs = "bucket:6c68c51b")`: **7/7 pass**, with query checks.
 - `run_oracle(languages = "cmake", inputs = "all")`:
@@ -56,5 +57,6 @@ not retain the repaired command or a stale external-scanner snapshot.
   **24 CMake tests** pass.
 - `cargo clippy -p ts_port -p ts_port_cmake --all-targets -- -D warnings`: passes.
 
-Nothing remains to fix in the assigned bucket. This test-only revision introduces no
-runtime changes, deviations from C, unsafe code, or generated-file changes.
+Nothing remains to fix in the assigned bucket. This verification-only revision
+introduces no runtime changes, deviations from C, unsafe code, new warnings, or
+generated-file changes. Unrelated languages' oracle sets were not rerun.
