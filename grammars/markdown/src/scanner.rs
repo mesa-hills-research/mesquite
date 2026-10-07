@@ -217,6 +217,9 @@ pub(crate) struct Scanner {
     inline_count: u8,
     simulate: bool,
     modes: &'static ModeSymbols,
+    // The hottest row is held directly to avoid a dependent modes-table load
+    // on every text scan. The complete scanner still fits in 64 bytes.
+    text_mode: &'static [bool; 47],
 }
 
 impl Default for Scanner {
@@ -227,6 +230,7 @@ impl Default for Scanner {
             inline_count: 0,
             simulate: false,
             modes: &DEFAULT_MODES,
+            text_mode: &TEXT_FLAGS,
         }
     }
 }
@@ -326,7 +330,7 @@ const PARAGRAPH_SYMBOLS: u64 = {
 /// Fixed modes retain the same control flow while exposing token validity as
 /// compile-time constants. The dynamic mode reads the caller's actual flags.
 #[derive(Clone, Copy)]
-struct Symbols<'a, const FLAGS: u64>(&'a [bool]);
+struct Symbols<'a, const FLAGS: u64>(&'a [bool; 47]);
 
 impl<const FLAGS: u64> Symbols<'_, FLAGS> {
     #[inline]
@@ -342,14 +346,20 @@ impl<const FLAGS: u64> Symbols<'_, FLAGS> {
 impl ExternalScanner for Scanner {
     fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
         self.simulate = false;
+        // C's token array has exactly 47 entries. Validate that prefix once so
+        // the dynamic helpers also avoid carrying a slice length and checking
+        // each constant token index. Short caller-provided slices are invalid.
+        let Some(valid_symbols) = valid_symbols.first_chunk::<47>() else {
+            return false;
+        };
         // Specialize the common line-oriented states, rather than skipping
         // invalid handlers: stars, underscores and fences still perform their
         // original advances and marks even when no token can be returned.
-        if std::ptr::eq(self.modes.text.as_slice(), valid_symbols) {
-            self.scan_text(lexer)
-        } else if std::ptr::eq(self.modes.code.as_slice(), valid_symbols) {
+        if std::ptr::eq(self.text_mode, valid_symbols) {
+            self.scan_content::<TEXT_SYMBOLS>(lexer)
+        } else if std::ptr::eq(self.modes.code, valid_symbols) {
             self.scan_mode::<CODE_SYMBOLS>(lexer, Symbols(valid_symbols))
-        } else if std::ptr::eq(self.modes.block_line.as_slice(), valid_symbols) {
+        } else if std::ptr::eq(self.modes.block_line, valid_symbols) {
             self.scan_mode::<BLOCK_LINE_SYMBOLS>(lexer, Symbols(valid_symbols))
         } else {
             self.scan_mode::<DYNAMIC_SYMBOLS>(lexer, Symbols(valid_symbols))
@@ -422,8 +432,10 @@ pub(crate) fn create() -> Box<dyn ExternalScanner> {
     // These references come from the grammar's immutable static table, so
     // pointer equality proves each token set without caching arbitrary data.
     // Other rows (including duplicates) safely use dynamic dispatch.
+    let modes = GRAMMAR_MODES.get_or_init(ModeSymbols::new);
     Box::new(Scanner {
-        modes: GRAMMAR_MODES.get_or_init(ModeSymbols::new),
+        modes,
+        text_mode: modes.text,
         ..Scanner::default()
     })
 }
@@ -469,24 +481,23 @@ impl<'a> ScanLexer<'a> {
     }
 }
 
-// A conservative low-seven-bit filter. Non-ASCII aliases may take the slow
-// path; only the full code point is dispatched there.
-const TEXT_ACTIVE: [bool; 128] = {
-    let mut active = [false; 128];
-    active[0] = true;
-    active[b' ' as usize] = true;
-    active[b'\t' as usize] = true;
-    active[b'\r' as usize] = true;
-    active[b'\n' as usize] = true;
-    active[b'`' as usize] = true;
-    active[b'~' as usize] = true;
-    active[b'*' as usize] = true;
-    active[b'_' as usize] = true;
-    active
+// A conservative low-six-bit filter: false positives (including ASCII aliases
+// such as 'j' for '*') go through full-code-point dispatch. A register bit test
+// avoids a character-table load in the common text rejection path.
+const TEXT_ACTIVE: u64 = {
+    let chars = [0, b'\t', b'\n', b'\r', b' ', b'*', b'_', b'`', b'~'];
+    let mut mask = 0;
+    let mut i = 0;
+    while i < chars.len() {
+        mask |= 1u64 << (chars[i] % 64);
+        i += 1;
+    }
+    mask
 };
 
-// A conservative run boundary: Unicode aliases are simply dispatched by the
-// outer loop, which still compares full code points.
+// Use seven bits for header runs: ASCII letters must not interrupt this hot
+// loop. Unicode aliases may end a run, but the outer loop compares full code
+// points, consumes each alias normally, and resumes the run.
 const TABLE_HEADER_BOUNDARY: [bool; 128] = {
     let mut boundary = [false; 128];
     boundary[0] = true;
@@ -504,7 +515,7 @@ impl Scanner {
     // underscore and fence attempts still advance even when their tokens are
     // invalid, so those characters must always reach the full scanner.
     #[inline(always)]
-    fn scan_text(&mut self, lexer: &mut dyn Lexer) -> bool {
+    fn scan_content<const FLAGS: u64>(&mut self, lexer: &mut dyn Lexer) -> bool {
         let mut lookahead = lexer.lookahead();
         if self.snapshot[STATE] & STATE_MATCHING == 0 && lookahead != 0 {
             if lookahead == i32::from(b' ') {
@@ -518,18 +529,18 @@ impl Scanner {
                     return false;
                 }
             }
-            if !TEXT_ACTIVE[lookahead as usize & 127] {
+            if TEXT_ACTIVE & 1u64.wrapping_shl(lookahead as u32) == 0 {
                 return false;
             }
         }
-        self.scan_text_slow(lexer, lookahead)
+        self.scan_content_slow::<FLAGS>(lexer, lookahead)
     }
 
     #[inline(never)]
-    fn scan_text_slow(&mut self, lexer: &mut dyn Lexer, lookahead: i32) -> bool {
-        self.scan_inner::<TEXT_SYMBOLS>(
+    fn scan_content_slow<const FLAGS: u64>(&mut self, lexer: &mut dyn Lexer, lookahead: i32) -> bool {
+        self.scan_inner::<FLAGS>(
             &mut ScanLexer { inner: lexer, lookahead },
-            Symbols(&TEXT_FLAGS),
+            Symbols(&flags_for(FLAGS)),
         )
     }
 
@@ -1447,18 +1458,18 @@ impl Scanner {
         false
     }
 
-    // Isolate the tight run from the table's cell counters and delimiter-row
-    // matching. No helper observes lookahead until this run ends, so publish
-    // the cached character once on exit rather than after every advance.
+    // Isolate the tight run from the table's counters and cached lexer. Return
+    // the boundary character rather than retaining a mutable cache reference
+    // across the loop. Only the caller publishes it to the cache on exit.
     #[inline(never)]
-    fn consume_plain_header(lexer: &mut ScanLexer<'_>, mut column: u8) -> u8 {
+    fn consume_plain_header(lexer: &mut dyn Lexer, column: u8) -> (u8, i32) {
+        let mut column = u32::from(column);
         loop {
             column = column.wrapping_add(1);
-            lexer.inner.advance(false);
-            let c = lexer.inner.lookahead();
+            lexer.advance(false);
+            let c = lexer.lookahead();
             if TABLE_HEADER_BOUNDARY[c as usize & 127] {
-                lexer.lookahead = c;
-                return column % 4;
+                return ((column % 4) as u8, c);
             }
         }
     }
@@ -1495,11 +1506,14 @@ impl Scanner {
                 _ => {
                     // Plain header text (including spaces once a cell has
                     // content) needs neither escape/pipe tests nor tab expansion.
-                    // Keep its column in a register until the run ends. Modulo
-                    // 256 addition followed by modulo four is equivalent to C's
+                    // Keep its column in a register until the run ends. Wrapping
+                    // u32 addition followed by modulo four is equivalent to C's
                     // per-character modulo four, even for very long lines.
                     ending_pipe = false;
-                    self.snapshot[COLUMN] = Self::consume_plain_header(lexer, self.snapshot[COLUMN]);
+                    let (column, lookahead) =
+                        Self::consume_plain_header(lexer.inner, self.snapshot[COLUMN]);
+                    self.snapshot[COLUMN] = column;
+                    lexer.lookahead = lookahead;
                 }
             }
         }
@@ -1927,7 +1941,8 @@ mod tests {
     fn fixed_text_row_is_immutable_and_foreign_flags_remain_dynamic() {
         let rows = &crate::language().external_scanner.as_ref().unwrap().states;
         let text = rows.as_chunks::<47>().0.iter().find(|flags| **flags == TEXT_FLAGS).unwrap();
-        let mut scanner = Scanner { modes: GRAMMAR_MODES.get_or_init(ModeSymbols::new), ..Scanner::default() };
+        let modes = GRAMMAR_MODES.get_or_init(ModeSymbols::new);
+        let mut scanner = Scanner { modes, text_mode: modes.text, ..Scanner::default() };
         for _ in 0..2 {
             let mut lexer = TestLexer::new("word");
             assert!(!scanner.scan(&mut lexer, text));
@@ -2072,6 +2087,25 @@ mod tests {
     }
 
     #[test]
+    fn symbol_array_prefix_is_checked_once_at_the_external_boundary() {
+        let mut scanner = Scanner::default();
+        for length in 0..47 {
+            scanner.simulate = true;
+            let mut lexer = TestLexer::new("text");
+            assert!(!scanner.scan(&mut lexer, &TEXT_FLAGS[..length]));
+            assert!(lexer.events.is_empty());
+            assert_eq!(lexer.lookahead_calls.get(), 0);
+            assert!(!scanner.simulate);
+        }
+        // Flags past the external-token array do not affect the scanner.
+        let mut extended = [true; 48];
+        extended[..47].copy_from_slice(&TEXT_FLAGS);
+        let mut lexer = TestLexer::new("");
+        assert!(scanner.scan(&mut lexer, &extended));
+        assert_eq!(lexer.events, [Event::Symbol(TOKEN_EOF)]);
+    }
+
+    #[test]
     fn text_entry_filter_preserves_indentation_eof_and_unicode_aliases() {
         fn check(input: &str, indentation: u8, column: u8) {
             let mut fixture = Scanner::with_blocks([Block::QUOTE]);
@@ -2099,7 +2133,7 @@ mod tests {
             assert_eq!(fast.simulate, dynamic.simulate, "{input:?}");
         }
 
-        // The filter uses only seven bits, but dispatch and tab expansion must
+        // The filter uses only six bits, but dispatch and tab expansion must
         // still use the complete character. Include every low-bit alias, not
         // just printable ASCII, and wrap indentation across the initial space.
         for base in [0, 128, 256, 0x10f000] {
