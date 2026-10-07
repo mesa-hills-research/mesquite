@@ -235,8 +235,12 @@ pending entry records its depth and child index; the cursor maintains a path to
 the current node. On cancellation, drop the borrows and keep only that path in
 `Parser.balance_path`. On resumption, reconstruct the pending left siblings along
 the path without repeating progress checks or processing completed ancestors.
-New branch headers are summarized before wrapping them in `Arc`; subsequent
-re-summarization still uses normal COW mutation. Unambiguous reductions also finish
+New branches compute a non-owning `ChildSummary` over the borrowed child slice
+before constructing the droppable `SubtreeHeapData` header and wrapping it in
+`Arc`. This keeps header initialization out of the summary loop. Subsequent
+re-summarization uses the same helper and normal COW mutation; it must seed the
+accumulator with the old padding, size, first-leaf data, fragility and parse state
+because C preserves or consults these values in empty/first-child cases. Unambiguous reductions also finish
 parse-state, fragility, and precedence initialization before sharing the header.
 For ambiguous reductions, compare alternative child summaries **before** adding
 the action's dynamic precedence; initialize the selected parent only afterwards.

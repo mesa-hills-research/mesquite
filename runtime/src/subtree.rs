@@ -437,22 +437,63 @@ pub(crate) fn ts_subtree_summarize_children(tree: &mut Subtree, language: &Langu
     );
 }
 
-// Expose fresh header values to the reduction constructor so initialization
-// and summary writes can be combined before the header is placed in an Arc.
-#[inline(always)]
-fn summarize_children(data: &mut SubtreeHeapData, language: &Language) {
-    if data.children.len() == 1 {
-        summarize_children_impl::<true>(data, language);
-    } else {
-        summarize_children_impl::<false>(data, language);
-    }
+// Accumulating a summary does not own the child vector. In particular, fresh
+// reductions can compute it before constructing a header with a Drop impl.
+struct ChildSummary {
+    branch: BranchData,
+    padding: Length,
+    size: Length,
+    lookahead_bytes: u32,
+    error_cost: u32,
+    parse_state: StateId,
+    has_external_tokens: bool,
+    has_external_scanner_state_change: bool,
+    depends_on_column: bool,
+    fragile_left: bool,
+    fragile_right: bool,
+    symbol: Symbol,
+    visible: bool,
+    named: bool,
 }
 
 #[inline(always)]
-fn summarize_children_impl<const SINGLE: bool>(data: &mut SubtreeHeapData, language: &Language) {
-    let SubtreePayload::Branch(branch) = &mut data.payload else {
+fn summarize_children(data: &mut SubtreeHeapData, language: &Language) {
+    let SubtreePayload::Branch(branch) = &data.payload else {
         panic!("child summaries require a branch payload");
     };
+    let mut summary = ChildSummary {
+        branch: branch.clone(),
+        padding: data.padding,
+        size: data.size,
+        lookahead_bytes: data.lookahead_bytes,
+        error_cost: data.error_cost,
+        parse_state: data.parse_state,
+        has_external_tokens: data.has_external_tokens,
+        has_external_scanner_state_change: data.has_external_scanner_state_change,
+        depends_on_column: data.depends_on_column,
+        fragile_left: data.fragile_left,
+        fragile_right: data.fragile_right,
+        symbol: data.symbol,
+        visible: data.visible,
+        named: data.named,
+    };
+    summarize_child_slice(&mut summary, &data.children, language);
+    data.payload = SubtreePayload::Branch(summary.branch);
+    data.padding = summary.padding;
+    data.size = summary.size;
+    data.lookahead_bytes = summary.lookahead_bytes;
+    data.error_cost = summary.error_cost;
+    data.parse_state = summary.parse_state;
+    data.has_external_tokens = summary.has_external_tokens;
+    data.has_external_scanner_state_change = summary.has_external_scanner_state_change;
+    data.depends_on_column = summary.depends_on_column;
+    data.fragile_left = summary.fragile_left;
+    data.fragile_right = summary.fragile_right;
+}
+
+#[inline(always)]
+fn summarize_child_slice(data: &mut ChildSummary, children: &[Subtree], language: &Language) {
+    let branch = &mut data.branch;
     let mut summary = BranchData {
         production_id: branch.production_id,
         first_leaf: branch.first_leaf,
@@ -475,9 +516,7 @@ fn summarize_children_impl<const SINGLE: bool>(data: &mut SubtreeHeapData, langu
     let mut lookahead_end_byte = 0;
     let is_error = data.symbol == BUILTIN_SYM_ERROR || data.symbol == BUILTIN_SYM_ERROR_REPEAT;
 
-    let count = if SINGLE { 1 } else { data.children.len() };
-    for i in 0..count {
-        let child = &data.children[i];
+    for (i, child) in children.iter().enumerate() {
         // Decode the representation once. In particular, inline leaves have
         // no branch/scanner summaries, so they need none of the heap-only work.
         let (
@@ -626,11 +665,7 @@ fn summarize_children_impl<const SINGLE: bool>(data: &mut SubtreeHeapData, langu
             .wrapping_add(ERROR_COST_PER_SKIPPED_LINE.wrapping_mul(size.extent.row));
     }
 
-    let ends = if SINGLE {
-        Some((&data.children[0], &data.children[0]))
-    } else {
-        data.children.first().zip(data.children.last())
-    };
+    let ends = children.first().zip(children.last());
     if let Some((first_child, last_child)) = ends {
         summary.first_leaf = FirstLeaf {
             symbol: ts_subtree_leaf_symbol(first_child),
@@ -642,7 +677,7 @@ fn summarize_children_impl<const SINGLE: bool>(data: &mut SubtreeHeapData, langu
         if ts_subtree_fragile_right(last_child) {
             fragile_right = true;
         }
-        if !SINGLE && data.children.len() >= 2
+        if children.len() >= 2
             && !data.visible
             && !data.named
             && ts_subtree_symbol(first_child) == data.symbol
@@ -685,36 +720,51 @@ pub(crate) fn ts_subtree_new_node_with(
 ) -> Subtree {
     let metadata = ts_language_symbol_metadata(language, symbol);
     let fragile = symbol == BUILTIN_SYM_ERROR || symbol == BUILTIN_SYM_ERROR_REPEAT;
-    // Spell out the header rather than using a struct-update default: this
-    // type implements Drop, so `..Default::default()` creates and destroys an
-    // otherwise unused header on every reduction.
-    let mut result = SubtreeHeapData {
+    // Finish the non-owning summary first, so the hot loop need not initialize
+    // and repeatedly update an owning, droppable heap header. Keep the children
+    // in their original Vec until the final header is ready.
+    let mut summary = ChildSummary {
         symbol,
         visible: metadata.visible,
         named: metadata.named,
-        fragile_left: fragile,
-        fragile_right: fragile,
-        children,
-        payload: SubtreePayload::Branch(BranchData {
-            production_id: production_id as u16,
-            ..BranchData::default()
-        }),
         padding: length_zero(),
         size: length_zero(),
         lookahead_bytes: 0,
         error_cost: 0,
         parse_state: 0,
-        extra: false,
-        has_changes: false,
         has_external_tokens: false,
         has_external_scanner_state_change: false,
         depends_on_column: false,
+        fragile_left: fragile,
+        fragile_right: fragile,
+        branch: BranchData {
+            production_id: production_id as u16,
+            ..BranchData::default()
+        },
+    };
+    summarize_child_slice(&mut summary, &children, language);
+    // Explicit fields also avoid constructing a dropping default temporary.
+    let mut result = SubtreeHeapData {
+        symbol,
+        visible: metadata.visible,
+        named: metadata.named,
+        padding: summary.padding,
+        size: summary.size,
+        lookahead_bytes: summary.lookahead_bytes,
+        error_cost: summary.error_cost,
+        parse_state: summary.parse_state,
+        has_external_tokens: summary.has_external_tokens,
+        has_external_scanner_state_change: summary.has_external_scanner_state_change,
+        depends_on_column: summary.depends_on_column,
+        fragile_left: summary.fragile_left,
+        fragile_right: summary.fragile_right,
+        children,
+        payload: SubtreePayload::Branch(summary.branch),
+        extra: false,
+        has_changes: false,
         is_missing: false,
         is_keyword: false,
     };
-    // Initialize before sharing: summarizing a fresh header needs no atomic
-    // uniqueness check or copy-on-write machinery.
-    summarize_children(&mut result, language);
     initialize(&mut result);
     Subtree::Heap(Arc::new(result))
 }
@@ -2081,6 +2131,65 @@ mod summary_tests {
             tables
         });
         Language::from(&*TABLES)
+    }
+
+    #[test]
+    fn fresh_summary_matches_resummarization_for_empty_unary_and_multiple_children() {
+        let language = language();
+        let inline = Subtree::Inline(InlineLeaf {
+            symbol: 1,
+            parse_state: 7,
+            flags: VISIBLE | NAMED | MISSING,
+            padding_bytes: 2,
+            padding_columns: 2,
+            size_bytes: 3,
+            padding_rows_and_lookahead: 7 << 4,
+        });
+        let mut external = ts_subtree_new_node(2, Vec::new(), 0, &language);
+        let data = external.heap_mut().unwrap();
+        data.extra = true;
+        data.has_external_tokens = true;
+        data.has_external_scanner_state_change = true;
+        data.depends_on_column = true;
+        data.payload = SubtreePayload::External(ts_external_scanner_state_init(&[1, 2]));
+        let hidden = ts_subtree_new_node(2, vec![inline.clone()], 0, &language);
+        let children = [inline, external, hidden];
+
+        for count in 0..=children.len() {
+            for symbol in [3, BUILTIN_SYM_ERROR, BUILTIN_SYM_ERROR_REPEAT] {
+                for production_id in [0, 1] {
+                    let metadata = ts_language_symbol_metadata(&language, symbol);
+                    let fragile = symbol == BUILTIN_SYM_ERROR || symbol == BUILTIN_SYM_ERROR_REPEAT;
+                    let mut expected = SubtreeHeapData {
+                        symbol,
+                        visible: metadata.visible,
+                        named: metadata.named,
+                        fragile_left: fragile,
+                        fragile_right: fragile,
+                        children: children[..count].to_vec(),
+                        payload: SubtreePayload::Branch(BranchData {
+                            production_id,
+                            ..BranchData::default()
+                        }),
+                        ..SubtreeHeapData::default()
+                    };
+                    summarize_children(&mut expected, &language);
+                    let fresh = ts_subtree_new_node(
+                        symbol,
+                        children[..count].to_vec(),
+                        production_id as u32,
+                        &language,
+                    );
+                    // Debug compares every header/payload field and the child
+                    // contents, not the Arc allocation's address.
+                    assert_eq!(
+                        format!("{:?}", fresh.heap().unwrap()),
+                        format!("{expected:?}"),
+                        "count={count}, symbol={symbol}, production_id={production_id}",
+                    );
+                }
+            }
+        }
     }
 
     #[test]

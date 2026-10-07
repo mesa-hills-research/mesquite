@@ -16,27 +16,9 @@ pub(crate) const MAX_ITERATOR_COUNT: usize = 64;
 pub(crate) struct StackNodeId(pub usize);
 #[derive(Clone, Debug)]
 pub(crate) struct StackLink {
-    node_and_pending: usize,
+    pub node: StackNodeId,
     pub subtree: Subtree,
-}
-
-impl StackLink {
-    fn new(node: StackNodeId, subtree: Subtree, is_pending: bool) -> Self {
-        // This tags an integer arena index, never a pointer. An arena Vec of
-        // non-zero-sized StackNodes cannot reach isize::MAX elements, so the
-        // pending bit does not restrict the set of representable live nodes.
-        let node_and_pending = node.0.checked_mul(2).expect("stack index fits")
-            | usize::from(is_pending);
-        Self { node_and_pending, subtree }
-    }
-
-    pub(crate) fn node(&self) -> StackNodeId {
-        StackNodeId(self.node_and_pending >> 1)
-    }
-
-    fn is_pending(&self) -> bool {
-        self.node_and_pending & 1 != 0
-    }
+    pub is_pending: bool,
 }
 /// Almost all stack nodes have one predecessor. Keep that link in the arena
 /// slot, and allocate the remaining fixed-capacity slots only when paths merge.
@@ -163,14 +145,14 @@ impl StackArena {
 impl StackIterator {
     #[inline]
     fn advance(&mut self, link: &StackLink, include_subtrees: bool) {
-        self.node = link.node();
+        self.node = link.node;
         if !link.subtree.is_null() {
             if include_subtrees {
                 self.subtrees.push(link.subtree.clone());
             }
             if !ts_subtree_extra(&link.subtree) {
                 self.subtree_count = self.subtree_count.wrapping_add(1);
-                if !link.is_pending() {
+                if !link.is_pending {
                     self.is_pending = false;
                 }
             }
@@ -236,19 +218,18 @@ pub(crate) fn stack_node_release(
                         let first = data.links[0].take();
                         arena.nodes[node.0] = None;
                         if let Some(first) = first {
-                            let predecessor = first.node();
                             if !first.subtree.is_null() {
                                 ts_subtree_release(subtree_pool, first.subtree);
                             }
                             arena.free.push(node);
-                            action = Release::Node(predecessor);
+                            action = Release::Node(first.node);
                             continue;
                         }
                         arena.free.push(node);
                     } else {
                         let mut data = arena.nodes[node.0].take().expect("live stack node");
                         let first = data.links[0].as_ref().expect("initialized stack link");
-                        pending.push(Release::Node(first.node()));
+                        pending.push(Release::Node(first.node));
                         pending.push(Release::Recycle(node));
                         for (i, link) in data
                             .links
@@ -258,7 +239,7 @@ pub(crate) fn stack_node_release(
                         {
                             let link = link.take().expect("initialized stack link");
                             if i > 0 {
-                                pending.push(Release::Node(link.node()));
+                                pending.push(Release::Node(link.node));
                             }
                             if !link.subtree.is_null() {
                                 pending.push(Release::Subtree(link.subtree));
@@ -328,7 +309,11 @@ pub(crate) fn stack_node_new(
         // A push transfers the old head's ownership to this edge. Do not retain
         // the predecessor or subtree a second time.
         node.link_count = 1;
-        node.links[0] = Some(StackLink::new(previous_node, subtree, is_pending));
+        node.links[0] = Some(StackLink {
+            node: previous_node,
+            subtree,
+            is_pending,
+        });
     }
     if let Some(id) = arena.free.pop() {
         assert!(arena.nodes[id.0].is_none());
@@ -367,7 +352,7 @@ pub(crate) fn stack_node_add_link(
     link: StackLink,
     subtree_pool: &mut SubtreePool,
 ) {
-    if link.node() == node {
+    if link.node == node {
         return;
     }
     for i in 0..arena.node(node).link_count as usize {
@@ -377,15 +362,15 @@ pub(crate) fn stack_node_add_link(
         if !stack__subtree_is_equivalent(&existing.subtree, &link.subtree) {
             continue;
         }
-        let existing_node = existing.node();
-        if existing_node == link.node() {
+        let existing_node = existing.node;
+        if existing_node == link.node {
             // Remove ambiguity early only for equivalent links directly joining
             // the same pair of nodes. Keep the pending flag of the old link.
             if ts_subtree_dynamic_precedence(&link.subtree)
                 > ts_subtree_dynamic_precedence(&existing.subtree)
             {
                 let precedence = arena
-                    .node(link.node())
+                    .node(link.node)
                     .dynamic_precedence
                     .wrapping_add(ts_subtree_dynamic_precedence(&link.subtree));
                 let data = arena.node_mut(node);
@@ -402,7 +387,7 @@ pub(crate) fn stack_node_add_link(
             return;
         }
         let previous = arena.node(existing_node);
-        let other = arena.node(link.node());
+        let other = arena.node(link.node);
         if previous.state == other.state
             && previous.position.bytes == other.position.bytes
             && previous.error_cost == other.error_cost
@@ -410,15 +395,15 @@ pub(crate) fn stack_node_add_link(
             // Read each edge after the preceding recursive merge, just as C
             // does; merging can mutate nodes shared by both paths.
             let mut j = 0;
-            while j < arena.node(link.node()).link_count as usize {
-                let predecessor = arena.node(link.node()).links[j]
+            while j < arena.node(link.node).link_count as usize {
+                let predecessor = arena.node(link.node).links[j]
                     .as_ref()
                     .expect("initialized stack link")
                     .clone();
                 stack_node_add_link(arena, existing_node, predecessor, subtree_pool);
                 j += 1;
             }
-            let mut precedence = arena.node(link.node()).dynamic_precedence;
+            let mut precedence = arena.node(link.node).dynamic_precedence;
             if !link.subtree.is_null() {
                 precedence = precedence.wrapping_add(ts_subtree_dynamic_precedence(&link.subtree));
             }
@@ -430,8 +415,8 @@ pub(crate) fn stack_node_add_link(
     if arena.node(node).link_count as usize == MAX_LINK_COUNT {
         return;
     }
-    stack_node_retain(arena, link.node());
-    let previous = arena.node(link.node());
+    stack_node_retain(arena, link.node);
+    let previous = arena.node(link.node);
     let mut node_count = previous.node_count;
     let mut precedence = previous.dynamic_precedence;
     if !link.subtree.is_null() {
@@ -797,7 +782,7 @@ fn pop_count_in_place_general(stack: &mut Stack, count: u32) -> Option<Vec<Subtr
                 remaining -= 1;
             }
         }
-        node = link.node();
+        node = link.node;
     }
     let goal = node;
     let mut subtrees = Vec::with_capacity(subtree_count);
@@ -810,10 +795,10 @@ fn pop_count_in_place_general(stack: &mut Stack, count: u32) -> Option<Vec<Subtr
         // instead of retaining and immediately releasing both after reduction.
         stack.arena.nodes[node.0] = None;
         stack.arena.free.push(node);
-        node = link.node();
         if !link.subtree.is_null() {
             subtrees.push(link.subtree);
         }
+        node = link.node;
     }
     stack.heads[0].node = goal;
     subtrees.reverse();
@@ -987,7 +972,7 @@ pub(crate) fn ts_stack_has_advanced_since_error(stack: &Stack, version: StackVer
                 } else if node.node_count > head.node_count_at_last_error
                     && ts_subtree_error_cost(&link.subtree) == 0
                 {
-                    node = stack.arena.nodes[link.node().0].as_ref().unwrap();
+                    node = stack.arena.nodes[link.node.0].as_ref().unwrap();
                     continue;
                 }
             }
@@ -1064,7 +1049,11 @@ pub(crate) fn ts_stack_merge(
             .unwrap();
         // StackLink owns its subtree handle, but copying its node ID does not
         // retain the node. stack_node_add_link retains graph edges as needed.
-        let link = StackLink::new(link.node(), link.subtree.clone(), link.is_pending());
+        let link = StackLink {
+            node: link.node,
+            subtree: link.subtree.clone(),
+            is_pending: link.is_pending,
+        };
         stack_node_add_link(&mut stack.arena, node1, link, pool);
         i += 1;
     }
@@ -1237,9 +1226,9 @@ pub(crate) fn ts_stack_print_dot_graph(
                 write!(
                     output,
                     "node_0x{:x} -> node_0x{:x} [",
-                    node_id.0, link.node().0
+                    node_id.0, link.node.0
                 )?;
-                if link.is_pending() {
+                if link.is_pending {
                     write!(output, "style=dashed ")?;
                 }
                 if !link.subtree.is_null() && ts_subtree_extra(&link.subtree) {
@@ -1271,10 +1260,10 @@ pub(crate) fn ts_stack_print_dot_graph(
                 }
                 writeln!(output, "];")?;
                 if j == 0 {
-                    stack.iterators[i - 1].node = link.node();
+                    stack.iterators[i - 1].node = link.node;
                 } else {
                     stack.iterators.push(StackIterator {
-                        node: link.node(),
+                        node: link.node,
                         subtrees: Vec::new(),
                         subtree_count: 0,
                         is_pending: false,
@@ -1315,7 +1304,11 @@ mod stack2_tests {
     }
 
     fn link(node: &mut StackNode, predecessor: usize, subtree: Subtree) {
-        node.links[node.link_count as usize] = Some(StackLink::new(StackNodeId(predecessor), subtree, false));
+        node.links[node.link_count as usize] = Some(StackLink {
+            node: StackNodeId(predecessor),
+            subtree,
+            is_pending: false,
+        });
         node.link_count += 1;
     }
 
@@ -1529,7 +1522,11 @@ mod stack_1_tests {
     }
 
     fn null_link(node: StackNodeId) -> StackLink {
-        StackLink::new(node, Subtree::Null, false)
+        StackLink {
+            node,
+            subtree: Subtree::Null,
+            is_pending: false,
+        }
     }
 
     #[test]
@@ -1546,8 +1543,8 @@ mod stack_1_tests {
         assert!(links.rest.is_some());
         assert_eq!(links.iter().count(), MAX_LINK_COUNT);
         for (i, link) in links.iter().enumerate() {
-            assert_eq!(link.as_ref().unwrap().node(), StackNodeId(i));
-            assert_eq!(links[i].as_ref().unwrap().node(), StackNodeId(i));
+            assert_eq!(link.as_ref().unwrap().node, StackNodeId(i));
+            assert_eq!(links[i].as_ref().unwrap().node, StackNodeId(i));
         }
         for link in links.iter_mut() {
             link.take();
@@ -1649,7 +1646,11 @@ mod stack_1_tests {
         stack_node_add_link(
             &mut arena,
             top,
-            StackLink::new(right, last_tree, false),
+            StackLink {
+                node: right,
+                subtree: last_tree,
+                is_pending: false,
+            },
             &mut pool,
         );
         stack_node_release(&mut arena, right, &mut pool);
@@ -1802,9 +1803,9 @@ mod stack_1_tests {
             );
         }
         let mut duplicate = null_link(predecessors[0]);
-        duplicate.node_and_pending |= 1;
+        duplicate.is_pending = true;
         stack_node_add_link(&mut arena, top, duplicate, &mut pool);
-        assert!(!arena.node(top).links[0].as_ref().unwrap().is_pending());
+        assert!(!arena.node(top).links[0].as_ref().unwrap().is_pending);
         assert_eq!(arena.node(predecessors[0]).ref_count, 2);
         stack_node_release(&mut arena, top, &mut pool);
         for previous in predecessors {
@@ -1879,7 +1880,11 @@ mod stack_1_tests {
         stack_node_add_link(
             &mut stack.arena,
             top,
-            StackLink::new(b, leaf(4, VISIBLE), false),
+            StackLink {
+                node: b,
+                subtree: leaf(4, VISIBLE),
+                is_pending: false,
+            },
             &mut pool,
         );
         stack_node_release(&mut stack.arena, b, &mut pool);
@@ -1939,7 +1944,11 @@ mod stack_1_tests {
         stack_node_add_link(
             &mut stack.arena,
             fork,
-            StackLink::new(b, leaf(4, VISIBLE), false),
+            StackLink {
+                node: b,
+                subtree: leaf(4, VISIBLE),
+                is_pending: false,
+            },
             &mut pool,
         );
         stack_node_release(&mut stack.arena, b, &mut pool);
@@ -2203,7 +2212,11 @@ mod stack_1_tests {
         stack_node_add_link(
             &mut stack.arena,
             shared,
-            StackLink::new(base, leaf(3, VISIBLE), true),
+            StackLink {
+                node: base,
+                subtree: leaf(3, VISIBLE),
+                is_pending: true,
+            },
             &mut pool,
         );
         assert_eq!(stack.arena.node(shared).link_count, 2);
@@ -2248,7 +2261,7 @@ mod stack_1_tests {
             &mut |arena, it| {
                 by_depth[it.subtree_count as usize] += 1;
                 if it.subtree_count == 2 {
-                    expected_leaves.push(arena.node(it.node).links[0].as_ref().unwrap().node());
+                    expected_leaves.push(arena.node(it.node).links[0].as_ref().unwrap().node);
                 }
                 if it.subtree_count == 3 {
                     visited_leaves.push(it.node);
