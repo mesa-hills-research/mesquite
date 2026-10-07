@@ -56,33 +56,28 @@ fn is_space(c: i32) -> bool {
     matches!(c, 0x09..=0x0d | 0x20)
 }
 
-impl ExternalScanner for Scanner {
-    fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
+impl Scanner {
+    #[inline(never)]
+    fn scan_string(
+        &mut self,
+        lexer: &mut dyn Lexer,
+        valid_symbols: &[bool; RAW_STRING_CONTENT + 1],
+        mut lookahead: i32,
+    ) -> bool {
         let mut brace_advanced = 0u8;
         let mut quote_count = 0u8;
         let mut did_advance = false;
 
-        // Error recovery, gives better trees this way.
-        if valid_symbols[OPT_SEMI] && valid_symbols[INTERPOLATION_REGULAR_START] {
-            return false;
-        }
-
-        if valid_symbols[OPT_SEMI] {
-            lexer.set_result_symbol(OPT_SEMI as u16);
-            if lexer.lookahead() == i32::from(b';') {
-                lexer.advance(false);
-            }
-            return true;
-        }
-
         if valid_symbols[RAW_STRING_START] {
-            while is_space(lexer.lookahead()) {
+            while is_space(lookahead) {
                 lexer.advance(true);
+                lookahead = lexer.lookahead();
             }
 
-            if lexer.lookahead() == i32::from(b'"') {
-                while lexer.lookahead() == i32::from(b'"') {
+            if lookahead == i32::from(b'"') {
+                while lookahead == i32::from(b'"') {
                     lexer.advance(false);
+                    lookahead = lexer.lookahead();
                     quote_count = quote_count.wrapping_add(1);
                 }
 
@@ -94,9 +89,10 @@ impl ExternalScanner for Scanner {
             }
         }
 
-        if valid_symbols[RAW_STRING_END] && lexer.lookahead() == i32::from(b'"') {
-            while lexer.lookahead() == i32::from(b'"') {
+        if valid_symbols[RAW_STRING_END] && lookahead == i32::from(b'"') {
+            while lookahead == i32::from(b'"') {
                 lexer.advance(false);
+                lookahead = lexer.lookahead();
                 quote_count = quote_count.wrapping_add(1);
             }
 
@@ -110,13 +106,14 @@ impl ExternalScanner for Scanner {
         }
 
         if valid_symbols[RAW_STRING_CONTENT] {
-            while lexer.lookahead() != 0 {
-                if lexer.lookahead() == i32::from(b'"') {
+            while lookahead != 0 {
+                if lookahead == i32::from(b'"') {
                     lexer.mark_end();
                     quote_count = 0;
 
-                    while lexer.lookahead() == i32::from(b'"') {
+                    while lookahead == i32::from(b'"') {
                         lexer.advance(false);
+                        lookahead = lexer.lookahead();
                         quote_count = quote_count.wrapping_add(1);
                     }
 
@@ -126,6 +123,7 @@ impl ExternalScanner for Scanner {
                     }
                 }
                 lexer.advance(false);
+                lookahead = lexer.lookahead();
                 // C also assigns did_advance here, but this branch always
                 // returns true without reading it again.
             }
@@ -138,25 +136,27 @@ impl ExternalScanner for Scanner {
             || valid_symbols[INTERPOLATION_VERBATIM_START]
             || valid_symbols[INTERPOLATION_RAW_START]
         {
-            while is_space(lexer.lookahead()) {
+            while is_space(lookahead) {
                 lexer.advance(true);
+                lookahead = lexer.lookahead();
             }
 
             let mut dollar_advanced = 0u8;
             let mut is_verbatim = false;
 
-            if lexer.lookahead() == i32::from(b'@') {
+            if lookahead == i32::from(b'@') {
                 is_verbatim = true;
                 lexer.advance(false);
+                lookahead = lexer.lookahead();
             }
 
-            while lexer.lookahead() == i32::from(b'$') && quote_count == 0 {
+            while lookahead == i32::from(b'$') && quote_count == 0 {
                 lexer.advance(false);
+                lookahead = lexer.lookahead();
                 dollar_advanced = dollar_advanced.wrapping_add(1);
             }
 
-            if dollar_advanced > 0
-                && (lexer.lookahead() == i32::from(b'"') || lexer.lookahead() == i32::from(b'@'))
+            if dollar_advanced > 0 && (lookahead == i32::from(b'"') || lookahead == i32::from(b'@'))
             {
                 lexer.set_result_symbol(INTERPOLATION_REGULAR_START as u16);
                 let mut interpolation = Interpolation {
@@ -164,8 +164,8 @@ impl ExternalScanner for Scanner {
                     ..Interpolation::default()
                 };
 
-                if is_verbatim || lexer.lookahead() == i32::from(b'@') {
-                    if lexer.lookahead() == i32::from(b'@') {
+                if is_verbatim || lookahead == i32::from(b'@') {
+                    if lookahead == i32::from(b'@') {
                         lexer.advance(false);
                         is_verbatim = true;
                     }
@@ -175,10 +175,12 @@ impl ExternalScanner for Scanner {
 
                 lexer.mark_end();
                 lexer.advance(false);
+                lookahead = lexer.lookahead();
 
-                if lexer.lookahead() == i32::from(b'"') && !is_verbatim {
+                if lookahead == i32::from(b'"') && !is_verbatim {
                     lexer.advance(false);
-                    if lexer.lookahead() == i32::from(b'"') {
+                    lookahead = lexer.lookahead();
+                    if lookahead == i32::from(b'"') {
                         lexer.set_result_symbol(INTERPOLATION_RAW_START as u16);
                         interpolation.string_type |= RAW;
                         self.interpolation_stack.push(interpolation);
@@ -198,13 +200,14 @@ impl ExternalScanner for Scanner {
             && let Some(current) = self.interpolation_stack.last_mut()
         {
             if current.is_verbatim() || current.is_regular() {
-                if lexer.lookahead() == i32::from(b'"') {
+                if lookahead == i32::from(b'"') {
                     lexer.advance(false);
                     current.quote_count = current.quote_count.wrapping_add(1);
                 }
             } else {
-                while lexer.lookahead() == i32::from(b'"') {
+                while lookahead == i32::from(b'"') {
                     lexer.advance(false);
+                    lookahead = lexer.lookahead();
                     current.quote_count = current.quote_count.wrapping_add(1);
                 }
             }
@@ -216,8 +219,9 @@ impl ExternalScanner for Scanner {
         if valid_symbols[INTERPOLATION_END_QUOTE]
             && let Some(current) = self.interpolation_stack.last()
         {
-            while lexer.lookahead() == i32::from(b'"') {
+            while lookahead == i32::from(b'"') {
                 lexer.advance(false);
+                lookahead = lexer.lookahead();
                 quote_count = quote_count.wrapping_add(1);
             }
 
@@ -233,14 +237,15 @@ impl ExternalScanner for Scanner {
         if valid_symbols[INTERPOLATION_OPEN_BRACE]
             && let Some(current) = self.interpolation_stack.last_mut()
         {
-            while lexer.lookahead() == i32::from(b'{') && brace_advanced < current.dollar_count {
+            while lookahead == i32::from(b'{') && brace_advanced < current.dollar_count {
                 lexer.advance(false);
+                lookahead = lexer.lookahead();
                 brace_advanced = brace_advanced.wrapping_add(1);
             }
 
             if brace_advanced > 0
                 && brace_advanced == current.dollar_count
-                && (brace_advanced == 0 || lexer.lookahead() != i32::from(b'{'))
+                && (brace_advanced == 0 || lookahead != i32::from(b'{'))
             {
                 current.open_brace_count = brace_advanced;
                 lexer.set_result_symbol(INTERPOLATION_OPEN_BRACE as u16);
@@ -254,12 +259,14 @@ impl ExternalScanner for Scanner {
             // This counter shadows (and does not reset) the earlier one in C.
             let mut brace_advanced = 0u8;
 
-            while is_space(lexer.lookahead()) {
+            while is_space(lookahead) {
                 lexer.advance(false);
+                lookahead = lexer.lookahead();
             }
 
-            while lexer.lookahead() == i32::from(b'}') {
+            while lookahead == i32::from(b'}') {
                 lexer.advance(false);
+                lookahead = lexer.lookahead();
                 brace_advanced = brace_advanced.wrapping_add(1);
 
                 if brace_advanced == current.open_brace_count {
@@ -277,19 +284,22 @@ impl ExternalScanner for Scanner {
         {
             lexer.set_result_symbol(INTERPOLATION_STRING_CONTENT as u16);
 
-            while lexer.lookahead() != 0 {
+            while lookahead != 0 {
                 // Check raw before verbatim, and verbatim before regular:
                 // string_type can contain more than one bit.
                 if current.is_raw() {
-                    if lexer.lookahead() == i32::from(b'"') {
+                    if lookahead == i32::from(b'"') {
                         lexer.mark_end();
                         lexer.advance(false);
-                        if lexer.lookahead() == i32::from(b'"') {
+                        lookahead = lexer.lookahead();
+                        if lookahead == i32::from(b'"') {
                             lexer.advance(false);
+                            lookahead = lexer.lookahead();
                             let mut quote_advanced = 2u8;
-                            while lexer.lookahead() == i32::from(b'"') {
+                            while lookahead == i32::from(b'"') {
                                 quote_advanced = quote_advanced.wrapping_add(1);
                                 lexer.advance(false);
+                                lookahead = lexer.lookahead();
                             }
                             if quote_advanced == current.quote_count {
                                 return did_advance;
@@ -297,80 +307,86 @@ impl ExternalScanner for Scanner {
                         }
                     }
 
-                    if lexer.lookahead() == i32::from(b'{') {
+                    if lookahead == i32::from(b'{') {
                         lexer.mark_end();
 
-                        while lexer.lookahead() == i32::from(b'{')
+                        while lookahead == i32::from(b'{')
                             && brace_advanced < current.open_brace_count
                         {
                             lexer.advance(false);
+                            lookahead = lexer.lookahead();
                             brace_advanced = brace_advanced.wrapping_add(1);
                         }
 
                         if brace_advanced == current.open_brace_count
-                            && (brace_advanced == 0 || lexer.lookahead() != i32::from(b'{'))
+                            && (brace_advanced == 0 || lookahead != i32::from(b'{'))
                         {
                             return did_advance;
                         }
                     }
                 } else if current.is_verbatim() {
-                    if lexer.lookahead() == i32::from(b'"') {
+                    if lookahead == i32::from(b'"') {
                         lexer.mark_end();
                         lexer.advance(false);
-                        if lexer.lookahead() == i32::from(b'"') {
+                        lookahead = lexer.lookahead();
+                        if lookahead == i32::from(b'"') {
                             lexer.advance(false);
+                            lookahead = lexer.lookahead();
                             continue;
                         }
                         return did_advance;
                     }
 
-                    if lexer.lookahead() == i32::from(b'{') {
+                    if lookahead == i32::from(b'{') {
                         lexer.mark_end();
 
-                        while lexer.lookahead() == i32::from(b'{')
+                        while lookahead == i32::from(b'{')
                             && brace_advanced < current.open_brace_count
                         {
                             lexer.advance(false);
+                            lookahead = lexer.lookahead();
                             brace_advanced = brace_advanced.wrapping_add(1);
                         }
 
                         if brace_advanced == current.open_brace_count
-                            && (brace_advanced == 0 || lexer.lookahead() != i32::from(b'{'))
+                            && (brace_advanced == 0 || lookahead != i32::from(b'{'))
                         {
                             return did_advance;
                         }
                     }
                 } else if current.is_regular() {
-                    if lexer.lookahead() == i32::from(b'\\')
-                        || lexer.lookahead() == i32::from(b'\n')
-                        || lexer.lookahead() == i32::from(b'"')
+                    if lookahead == i32::from(b'\\')
+                        || lookahead == i32::from(b'\n')
+                        || lookahead == i32::from(b'"')
                     {
                         lexer.mark_end();
                         return did_advance;
                     }
 
-                    if lexer.lookahead() == i32::from(b'{') {
+                    if lookahead == i32::from(b'{') {
                         lexer.mark_end();
 
-                        while lexer.lookahead() == i32::from(b'{')
+                        while lookahead == i32::from(b'{')
                             && brace_advanced < current.open_brace_count
                         {
                             lexer.advance(false);
+                            lookahead = lexer.lookahead();
                             brace_advanced = brace_advanced.wrapping_add(1);
                         }
 
                         if brace_advanced == current.open_brace_count
-                            && (brace_advanced == 0 || lexer.lookahead() != i32::from(b'{'))
+                            && (brace_advanced == 0 || lookahead != i32::from(b'{'))
                         {
                             return did_advance;
                         }
                     }
                 }
 
-                if lexer.lookahead() != i32::from(b'{') {
+                if lookahead != i32::from(b'{') {
                     brace_advanced = 0;
                 }
                 lexer.advance(false);
+                lookahead = lexer.lookahead();
                 did_advance = true;
             }
 
@@ -379,6 +395,50 @@ impl ExternalScanner for Scanner {
         }
 
         false
+    }
+}
+
+impl ExternalScanner for Scanner {
+    fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
+        let valid_symbols = valid_symbols
+            .first_chunk::<{ RAW_STRING_CONTENT + 1 }>()
+            .expect("C# external token flags");
+        if valid_symbols[OPT_SEMI] {
+            // The C scanner suppresses all external tokens during recovery.
+            if valid_symbols[INTERPOLATION_REGULAR_START] {
+                return false;
+            }
+            lexer.set_result_symbol(OPT_SEMI as u16);
+            if lexer.lookahead() == i32::from(b';') {
+                lexer.advance(false);
+            }
+            return true;
+        }
+
+        let mut lookahead = lexer.lookahead();
+        // With no active interpolation, only raw strings and interpolation
+        // prefixes can consume input. Reject ordinary code without entering
+        // the string scanner, but retain the C scanner's whitespace advances.
+        if self.interpolation_stack.is_empty()
+            && !valid_symbols[RAW_STRING_END]
+            && !valid_symbols[RAW_STRING_CONTENT]
+        {
+            if !(valid_symbols[RAW_STRING_START]
+                || valid_symbols[INTERPOLATION_REGULAR_START]
+                || valid_symbols[INTERPOLATION_VERBATIM_START]
+                || valid_symbols[INTERPOLATION_RAW_START])
+            {
+                return false;
+            }
+            while is_space(lookahead) {
+                lexer.advance(true);
+                lookahead = lexer.lookahead();
+            }
+            if !matches!(lookahead, 34 | 36 | 64) {
+                return false;
+            }
+        }
+        self.scan_string(lexer, valid_symbols, lookahead)
     }
 
     fn serialize(&mut self, buffer: &mut [u8]) -> usize {
