@@ -182,6 +182,7 @@ impl ExternalScanner for Scanner {
 
 /// Creates a scanner (C's `tree_sitter_cmake_external_scanner_create`).
 pub(crate) fn create() -> Box<dyn ExternalScanner> {
+    // C allocates the payload with calloc.
     Box::<Scanner>::default()
 }
 
