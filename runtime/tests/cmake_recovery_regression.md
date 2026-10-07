@@ -181,10 +181,10 @@ lexer warning noted above. This change only strengthens regression coverage;
 there are no runtime changes, C deviations, new unsafe code, or generated-file
 changes.
 
-### ERROR-range revalidation at `126e73b`
+### ERROR-range revalidation at `9106d1d`
 
 Rechecked the previously resolved bucket at this starting revision; all checks
-below were rerun, rather than relying on the earlier verification at `9d5d6eb`.
+below were rerun, rather than relying on the earlier verification at `1cb9a86`.
 Bucket `e0b0bff8` already passes on this starting checkout. Comparing the current
 C scanner with Rust confirms the merged zero-valued creation/reset fix remains
 correct: `ts_calloc` initializes both fields, and empty or wrong-length snapshots
@@ -194,6 +194,10 @@ No new implementation change or duplicate regression is needed.
 Existing `cmake_error_ranges` tests cover both smallest inputs, fresh/reused
 scanners, whole/seven-byte/single-byte chunks, incremental EOF deletion and
 restoration, exact tree ranges/flags, boundary navigation, and zero progress calls.
+The scanner regression additionally checks that the final newline is consumed
+with `advance(false)` and included by `mark_end`, before and after empty-snapshot
+reset. These tests already cover the reported missing content and shortened ERROR
+ranges, so this revalidation does not add redundant test cases.
 
 Checks rerun at this revision:
 
@@ -214,7 +218,7 @@ new unsafe code, warnings, or generated-file modifications are introduced.
 
 ## Empty recovery-content bucket `f5e2762e`
 
-Reverified at `17d58a8` (previously at `0aafd89`):
+Reverified at `6e63bc8` (previously at `17d58a8`):
 all 16 reported inputs already pass on the starting checkout. The merged scanner
 initialization/reset correction above allows `bracket_argument_content` at EOF
 without an opener, including after `a` and after skipping the newline in `if(\n`.
@@ -244,7 +248,7 @@ this starting revision, so no duplicate test or behavior change was warranted.
 Existing node-navigation assertions also confirm that the EOF token remains
 reachable with a tree cursor even when the preceding sibling ends at EOF.
 
-Checks rerun for this bucket at `17d58a8` (not inherited from the earlier
+Checks rerun for this bucket at `6e63bc8` (not inherited from the earlier
 verification):
 
 - `run_oracle(inputs = "bucket:f5e2762e")`: 16/16 pass.
