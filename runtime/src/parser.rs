@@ -2695,7 +2695,7 @@ mod parser3_tests {
                     .unwrap();
                 assert_eq!(ts_subtree_symbol(&link.subtree), symbol);
                 assert!(ts_subtree_extra(&link.subtree));
-                node = link.node;
+                node = link.node();
             }
             let tree = &parser.stack.arena.nodes[node.0].as_ref().unwrap().links[0]
                 .as_ref()
