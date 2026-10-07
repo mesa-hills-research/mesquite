@@ -655,4 +655,242 @@ mod tests {
         );
         assert_eq!((cursor.start_byte, cursor.end_byte), (0, u32::MAX));
     }
+
+    fn language() -> Language {
+        static TABLES: std::sync::LazyLock<ts_port_tables::LanguageTables> =
+            std::sync::LazyLock::new(|| {
+                ts_port_tables::LanguageTables::decode(
+                    include_bytes!("../../grammars/c/src/tables.bin"),
+                    |_, _| unreachable!("these tests do not lex"),
+                    Some(|_, _| unreachable!("these tests do not lex keywords")),
+                    None,
+                )
+            });
+        Language::from(&*TABLES)
+    }
+
+    fn step(depth: u16) -> QueryStep {
+        QueryStep {
+            symbol: 1,
+            supertype_symbol: 0,
+            field: 0,
+            capture_ids: [NONE; MAX_STEP_CAPTURE_COUNT],
+            depth,
+            alternative_index: NONE,
+            negated_field_list_id: 0,
+            is_named: false,
+            is_immediate: false,
+            is_last_child: false,
+            is_pass_through: false,
+            is_dead_end: false,
+            alternative_is_immediate: false,
+            contains_captures: false,
+            root_pattern_guaranteed: false,
+            parent_pattern_guaranteed: false,
+            is_missing: false,
+        }
+    }
+
+    fn query(steps: Vec<QueryStep>) -> CompiledQuery {
+        CompiledQuery {
+            captures: SymbolTable::default(),
+            predicate_values: SymbolTable::default(),
+            capture_quantifiers: Vec::new(),
+            steps,
+            pattern_map: Vec::new(),
+            predicate_steps: Vec::new(),
+            patterns: Vec::new(),
+            step_offsets: Vec::new(),
+            negated_fields: vec![0],
+            string_buffer: Vec::new(),
+            repeat_symbols_with_rootless_patterns: Vec::new(),
+            language: language(),
+            wildcard_root_pattern_count: 0,
+        }
+    }
+
+    #[test]
+    fn fallibility_distinguishes_wildcard_roots_and_done_steps() {
+        let mut query = query(vec![step(0), step(1), step(PATTERN_DONE_MARKER)]);
+        assert!(ts_query__step_is_fallible(&query, 0));
+        query.steps[1].parent_pattern_guaranteed = true;
+        assert!(!ts_query__step_is_fallible(&query, 0));
+        query.steps[0].symbol = WILDCARD_SYMBOL;
+        assert!(ts_query__step_is_fallible(&query, 0));
+        assert!(!ts_query__step_is_fallible(&query, 1));
+        query.steps[1].depth = 0;
+        assert!(!ts_query__step_is_fallible(&query, 0));
+    }
+
+    #[test]
+    fn guaranteed_step_uses_last_offset_at_or_before_requested_byte() {
+        let mut query = query(vec![step(0), step(1), step(1)]);
+        query.steps[1].root_pattern_guaranteed = true;
+        query.step_offsets = vec![
+            StepOffset {
+                byte_offset: 3,
+                step_index: 0,
+            },
+            StepOffset {
+                byte_offset: 5,
+                step_index: 1,
+            },
+            StepOffset {
+                byte_offset: 8,
+                step_index: 1,
+            },
+            StepOffset {
+                byte_offset: 8,
+                step_index: 2,
+            },
+        ];
+        assert!(!ts_query_is_pattern_guaranteed_at_step(&query, 2));
+        assert!(!ts_query_is_pattern_guaranteed_at_step(&query, 4));
+        assert!(ts_query_is_pattern_guaranteed_at_step(&query, 5));
+        assert!(ts_query_is_pattern_guaranteed_at_step(&query, 7));
+        assert!(!ts_query_is_pattern_guaranteed_at_step(&query, 8));
+        assert!(!ts_query_is_pattern_guaranteed_at_step(&query, u32::MAX));
+    }
+
+    #[test]
+    fn disabling_pattern_removes_all_map_entries_only() {
+        let mut query = query(vec![step(0), step(PATTERN_DONE_MARKER)]);
+        query.wildcard_root_pattern_count = 2;
+        query.pattern_map = vec![
+            PatternEntry {
+                pattern_index: 0,
+                step_index: 0,
+                is_rooted: true,
+            },
+            PatternEntry {
+                pattern_index: 1,
+                step_index: 0,
+                is_rooted: true,
+            },
+            PatternEntry {
+                pattern_index: 0,
+                step_index: 0,
+                is_rooted: false,
+            },
+        ];
+        assert!(!ts_query_is_pattern_rooted(&query, 0));
+        assert!(ts_query_is_pattern_rooted(&query, 1));
+        assert!(ts_query_is_pattern_rooted(&query, u32::MAX));
+        assert!(!ts_query_is_pattern_non_local(&query, u32::MAX));
+        ts_query_disable_pattern(&mut query, 0);
+        assert_eq!(query.pattern_map.len(), 1);
+        assert_eq!(query.pattern_map[0].pattern_index, 1);
+        assert!(ts_query_is_pattern_rooted(&query, 0));
+        assert_eq!(query.steps.len(), 2);
+        assert_eq!(query.wildcard_root_pattern_count, 2);
+    }
+
+    #[test]
+    fn states_are_ordered_and_deduplicated_with_c_width_depths() {
+        let query = query(vec![step(0), step(1)]);
+        let tree = crate::tree::Tree {
+            root: Box::new(crate::subtree::Subtree::Null),
+            language: language(),
+            included_ranges: Vec::new(),
+        };
+        let node = crate::tree::ts_tree_root_node(&tree);
+        let mut config = ts_query_cursor_new();
+        // Construct only the storage needed by add_state; compilation and pool
+        // allocation are independently translated units.
+        let mut execution = QueryExecution {
+            config: &mut config,
+            query: &query,
+            cursor: ts_tree_cursor_new(node),
+            capture_list_pool: CaptureListPool {
+                list: Vec::new(),
+                empty_list: Vec::new(),
+                max_capture_list_count: u32::MAX,
+                free_capture_list_count: 0,
+            },
+            depth: 3,
+            next_state_id: 0,
+            end_clock: None,
+            query_options: QueryCursorOptions::default(),
+            query_state: QueryCursorState::default(),
+            operation_count: 0,
+            on_visible_node: true,
+            ascending: false,
+            halted: false,
+        };
+        let pattern = |pattern_index, step_index| PatternEntry {
+            pattern_index,
+            step_index,
+            is_rooted: true,
+        };
+        ts_query_cursor__add_state(&mut execution, &pattern(2, 0));
+        ts_query_cursor__add_state(&mut execution, &pattern(0, 0));
+        ts_query_cursor__add_state(&mut execution, &pattern(1, 0));
+        ts_query_cursor__add_state(&mut execution, &pattern(1, 0));
+        ts_query_cursor__add_state(&mut execution, &pattern(4, 1));
+        let states = &execution.config.states;
+        assert_eq!(
+            states
+                .iter()
+                .map(|s| (s.start_depth, s.pattern_index))
+                .collect::<Vec<_>>(),
+            [(2, 4), (3, 0), (3, 1), (3, 2)],
+        );
+        assert!(states[0].needs_parent);
+        assert!(!states[1].needs_parent);
+        assert!(states.iter().all(|s| s.id == u32::MAX
+            && s.capture_list_id == u32::from(NONE)
+            && s.seeking_immediate_match
+            && !s.dead));
+
+        // C subtracts as u32, compares before truncating, then stores as u16.
+        execution.depth = 0;
+        ts_query_cursor__add_state(&mut execution, &pattern(5, 1));
+        let last = execution.config.states.last().unwrap();
+        assert_eq!(last.start_depth, u16::MAX);
+        assert_eq!(last.pattern_index, 5);
+    }
+
+    #[test]
+    fn node_order_uses_slot_identity_then_start_then_decreasing_end() {
+        use crate::{
+            length::Length,
+            subtree::{InlineLeaf, Subtree},
+            tree::Tree,
+        };
+        let tree = Tree {
+            root: Box::new(Subtree::Inline(InlineLeaf {
+                size_bytes: 10,
+                ..InlineLeaf::default()
+            })),
+            language: language(),
+            included_ranges: Vec::new(),
+        };
+        let shorter = Subtree::Inline(InlineLeaf {
+            size_bytes: 5,
+            ..InlineLeaf::default()
+        });
+        let same_length = (*tree.root).clone();
+        let root = crate::tree::ts_tree_root_node(&tree);
+        let child = Node {
+            subtree: &shorter,
+            ..root
+        };
+        let equal_range = Node {
+            subtree: &same_length,
+            ..root
+        };
+        assert_eq!(ts_query_cursor__compare_nodes(root, child), -1);
+        assert_eq!(ts_query_cursor__compare_nodes(child, root), 1);
+        assert_eq!(ts_query_cursor__compare_nodes(root, equal_range), 0);
+        let offset = Node {
+            position: Length {
+                bytes: 1,
+                extent: Point { row: 0, column: 1 },
+            },
+            ..root
+        };
+        // Identical slots compare equal even with differing context positions.
+        assert_eq!(ts_query_cursor__compare_nodes(root, offset), 0);
+        assert_eq!(ts_query_cursor__compare_nodes(equal_range, offset), -1);
+    }
 }
