@@ -38,14 +38,22 @@ const PSEUDO_SPECIAL: [bool; 128] = {
 
 impl ExternalScanner for Scanner {
     fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
-        if valid_symbols[ERROR_RECOVERY] {
+        // These immutable flags are fixed for the scan. Copy them once so
+        // callback-heavy paths do not have to retain the caller's slice.
+        let flags = *valid_symbols
+            .first_chunk::<3>()
+            .expect("CSS has three external tokens");
+        if flags[ERROR_RECOVERY] {
             return false;
         }
 
         // Unlike C's field access, lookahead is a dynamic call. Cache it until
         // advancing, including across mark_end and result_symbol updates.
         let mut lookahead = lexer.lookahead();
-        if is_space(lookahead) && valid_symbols[DESCENDANT_OP] {
+        // Reuse the initial classification if descendant recognition is not
+        // enabled; both token branches otherwise test the same character.
+        let mut space = is_space(lookahead);
+        if space && flags[DESCENDANT_OP] {
             lexer.set_result_symbol(DESCENDANT_OP as u16);
 
             loop {
@@ -79,14 +87,17 @@ impl ExternalScanner for Scanner {
                         lookahead = lexer.lookahead();
                     }
                 }
-                _ => {}
+                // Whitespace has been consumed and ':' was handled above.
+                // The pseudo-class branch cannot accept this character.
+                _ => return false,
             }
         }
 
-        if valid_symbols[PSEUDO_CLASS_SELECTOR_COLON] {
-            while is_space(lookahead) {
+        if flags[PSEUDO_CLASS_SELECTOR_COLON] {
+            while space {
                 lexer.advance(true);
                 lookahead = lexer.lookahead();
+                space = is_space(lookahead);
             }
             if lookahead == 0x3a {
                 lexer.advance(false);
@@ -463,7 +474,11 @@ mod tests {
     // and EOF calls suppressed only where the Lexer contract implies !eof().
     // Keep this independent of the rotated loop and its ASCII dispatch table.
     fn reference_pseudo_class(lexer: &mut dyn Lexer) -> bool {
-        let mut lookahead = lexer.lookahead();
+        let lookahead = lexer.lookahead();
+        reference_pseudo_class_from(lexer, lookahead)
+    }
+
+    fn reference_pseudo_class_from(lexer: &mut dyn Lexer, mut lookahead: i32) -> bool {
         while is_space(lookahead) {
             lexer.advance(true);
             lookahead = lexer.lookahead();
@@ -531,6 +546,84 @@ mod tests {
                 assert_eq!(actual.position, expected.position);
                 assert_eq!(actual.end, expected.end);
                 assert_eq!(actual.symbol, expected.symbol);
+            }
+        }
+    }
+
+    // Preserve the original C branch ordering and descendant-to-pseudo-class
+    // fallthrough here, independently of the optimized flag/space handling.
+    fn reference_scan(lexer: &mut dyn Lexer, valid: &[bool; 3]) -> bool {
+        if valid[ERROR_RECOVERY] {
+            return false;
+        }
+        let mut lookahead = lexer.lookahead();
+        if is_space(lookahead) && valid[DESCENDANT_OP] {
+            lexer.set_result_symbol(DESCENDANT_OP as u16);
+            lexer.advance(true);
+            lookahead = lexer.lookahead();
+            while is_space(lookahead) {
+                lexer.advance(true);
+                lookahead = lexer.lookahead();
+            }
+            lexer.mark_end();
+            if matches!(
+                lookahead,
+                0x23 | 0x2e | 0x5b | 0x2d | 0x2a | 0x30..=0x39 | 0x41..=0x5a | 0x61..=0x7a
+            ) {
+                return true;
+            }
+            if lookahead == 0x3a {
+                lexer.advance(false);
+                lookahead = lexer.lookahead();
+                if is_space(lookahead) {
+                    return false;
+                }
+                loop {
+                    if lookahead == 0x3b || lookahead == 0x7d || at_eof(lexer, lookahead) {
+                        return false;
+                    }
+                    if lookahead == 0x7b {
+                        return true;
+                    }
+                    lexer.advance(false);
+                    lookahead = lexer.lookahead();
+                }
+            }
+        }
+        valid[PSEUDO_CLASS_SELECTOR_COLON] && reference_pseudo_class_from(lexer, lookahead)
+    }
+
+    #[test]
+    fn flag_and_whitespace_dispatch_preserve_c_control_flow() {
+        // Exhaust short inputs for all flag combinations, including disabled
+        // and recovery scans. The alphabet exercises both C whitespace and
+        // non-C Unicode whitespace, selector prefixes, punctuation and NUL.
+        let alphabet = [
+            0, 0x09, 0x0b, 0x0d, 0x20, 0x2a, 0x2f, 0x3a, 0x3b, 0x41, 0x5f, 0x7b, 0x7d, 0xa0,
+            0x2028, -1,
+        ];
+        for length in 0..=4 {
+            for mut index in 0..alphabet.len().pow(length) {
+                let mut input = Vec::new();
+                for _ in 0..length {
+                    input.push(alphabet[index % alphabet.len()]);
+                    index /= alphabet.len();
+                }
+                for flags in 0..8 {
+                    let valid = [flags & 1 != 0, flags & 2 != 0, flags & 4 != 0];
+                    let mut actual = TestLexer::new(input.clone());
+                    let mut expected = TestLexer::new(input.clone());
+                    assert_eq!(
+                        Scanner.scan(&mut actual, &valid),
+                        reference_scan(&mut expected, &valid),
+                        "{input:?} {valid:?}",
+                    );
+                    assert_eq!(actual.events, expected.events, "{input:?} {valid:?}");
+                    assert_eq!(actual.lookahead_calls, expected.lookahead_calls);
+                    assert_eq!(actual.position, expected.position);
+                    assert_eq!(actual.end, expected.end);
+                    assert_eq!(actual.symbol, expected.symbol);
+                }
             }
         }
     }
