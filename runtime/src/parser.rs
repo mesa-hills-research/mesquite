@@ -1020,6 +1020,8 @@ pub(crate) fn ts_parser__shift(
     }
 }
 
+// Expose the small committed path to advance without inlining the large
+// general reduction worklist below it.
 #[inline]
 pub(crate) fn ts_parser__reduce(
     parser: &mut Parser,

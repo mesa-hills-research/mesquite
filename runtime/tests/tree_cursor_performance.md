@@ -55,51 +55,44 @@ this report, not a parsing optimization.
 
 After the documentation-only result was rejected, a parser-loop profile over the
 same 360-file input list (no tree walking) showed approximately 7% self time in
-reductions and 5% in stack popping. The ordinary deterministic reduction cloned
-child handles, created a temporary head, then released the old path and
-immediately renumbered the new head back to the original version.
+reductions and 5% in stack popping. Experiments transferred exclusively owned
+stack paths instead of cloning them and separated committed reductions from the
+general slice worklist. Main acquired overlapping implementations while these
+experiments were being tested. Those changes were merged rather than duplicated,
+and their earlier gains are **not** claimed as this branch's final contribution.
 
-An ownership-transfer experiment removed this work for a single non-speculative
-reduction on the sole active version. It first verified that every removed node
-had exactly one graph owner and one predecessor, then moved the children and
-transferred the final predecessor reference back to the original head. Against
-main `af419b8`, this measured about 8.5% less parse time. Main subsequently gained
-an overlapping optimization, so that result is **not** the final incremental
-gain from this branch.
+### Retained optimization after merging current main
 
-### Retained change after merging current main
+The final runtime delta is ordinary `#[inline]` hints on four functions:
 
-The final change reuses main's ownership-transfer algorithm but lets the common
-reduction take its children directly, instead of staging a `StackSlice` and
-running the general ambiguity-selection loop. The small reduction entry point
-can inline independently of the out-of-line general path. A failed preflight is
-not attempted a second time without intervening mutation. Empty trailing-extra
-buffers avoid drain setup as on main's general reduction path.
+- `ts_parser__reduce`: expose its small committed-reduction path to advance,
+  while leaving the large general reduction worklist out of line;
+- `ts_stack_pop_count_in_place`: expose ownership transfer to its immediate
+  consumer;
+- `ts_stack_push` and `stack_node_new`: specialize push sites for an always-present
+  predecessor and remove extra call layers carrying owned subtree/node state.
 
-The transferred prefix preserves extras/null counting and child order. Shared
-or branching paths, speculative reductions, multiple versions, and diagnostics
-retain the general reduction path. Head scanner state, summary and error
-baseline are unchanged, and no progress checkpoint is skipped. No recovery
-costs, parse limits, tree semantics or callback ordering change. All code is
-safe Rust.
+This keeps the algorithms, operation order, ownership rules, recovery costs,
+limits and progress checkpoints unchanged. No unsafe code, forced inlining,
+new allocations, or grammar-table changes are introduced.
 
-After merging main's overlapping pop-transfer and subtree improvements (main
-`9edb29b`), three pinned `run_oracle(inputs="benchmark")` runs gave:
+After merging main's direct reduction, stack condensation and subtree changes
+(main `5aedb91`), three pinned `run_oracle(inputs="benchmark")` runs gave:
 
 | | Overall port/C |
 | --- | --- |
-| Main | 1.013 |
-| Candidate run 1 | 0.983 |
-| Candidate run 2 | 0.989 |
-| Candidate run 3 | 0.985 |
+| Main | 0.974 |
+| Candidate run 1 | 0.950 |
+| Candidate run 2 | 0.950 |
+| Candidate run 3 | 0.947 |
 
-The median is **about 2.8% less parse time**, beyond the reported 1.9% noise.
-Every language improved in the median, and the measured overall port/C ratio
-is now below 1.00.
+The median is **about 2.5% less parse time**, beyond the reported 1.9% noise.
+No language is slower; the measured overall port/C ratio is below 1.00.
 
 Validation: all **4,712 oracle inputs passed**, with incremental seed 7 and
-queries on; **188 runtime unit tests** and the runtime integration tests passed;
+queries on; **190 runtime unit tests** and the runtime integration tests passed;
 `cargo clippy --workspace --all-targets -- -D warnings` was clean. New regression
-tests cover child-handle transfer, predecessor reference counts, extras/nulls,
-zero-count reductions, shared/short/branching fallback, and preservation of head
-scanner state, summary, and error baseline compared with pop-then-renumber.
+tests retained from the ownership experiments cover child-handle transfer,
+predecessor reference counts, extras/nulls, zero-count reductions,
+shared/short/branching fallback, and preservation of head scanner state, summary,
+and error baseline compared with pop-then-renumber.

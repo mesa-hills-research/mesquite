@@ -270,6 +270,8 @@ pub(crate) fn stack__subtree_node_count(subtree: &Subtree) -> u32 {
     count
 }
 
+// Push sites always have a predecessor. Inlining specializes away the base
+// node setup and avoids passing the owned subtree through another call layer.
 #[inline]
 pub(crate) fn stack_node_new(
     arena: &mut StackArena,
