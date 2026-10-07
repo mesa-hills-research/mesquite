@@ -1032,6 +1032,58 @@ pub(crate) fn ts_parser__reduce(
 ) -> StackVersion {
     let language = parser.language.unwrap();
     let initial_version_count = ts_stack_version_count(&parser.stack);
+    // With one action and one version, advance will immediately replace this
+    // version with the reduction. Transfer an exclusive path instead of first
+    // cloning its children into a temporary head and then releasing it again.
+    // Keep the original path for diagnostics, speculation, and shared graphs.
+    if !is_fragile
+        && initial_version_count == 1
+        && ts_stack_is_active(&parser.stack, version)
+        && parser.logger.is_none()
+        && parser.dot_graph.is_none()
+        && let Some(mut children) = ts_stack_pop_count_in_place(&mut parser.stack, version, count)
+    {
+        ts_subtree_array_remove_trailing_extras(&mut children, &mut parser.trailing_extras);
+        let state = ts_stack_state(&parser.stack, version);
+        let next_state = parser.parse_table_cache.next_state(&language, state, symbol);
+        let parent = ts_subtree_new_node_with(
+            symbol,
+            children,
+            production_id as u32,
+            &language,
+            |data| {
+                if end_of_non_terminal_extra && next_state == state {
+                    data.extra = true;
+                }
+                data.parse_state = state;
+                let SubtreePayload::Branch(branch) = &mut data.payload else {
+                    unreachable!("a reduced node has branch data");
+                };
+                branch.dynamic_precedence += dynamic_precedence;
+            },
+        );
+        ts_stack_push(
+            &mut parser.stack,
+            &mut parser.tree_pool,
+            version,
+            parent,
+            false,
+            next_state,
+        );
+        for extra in parser.trailing_extras.drain(..) {
+            ts_stack_push(
+                &mut parser.stack,
+                &mut parser.tree_pool,
+                version,
+                extra,
+                false,
+                next_state,
+            );
+        }
+        // Advance's renumber-to-original is now a no-op, but it must still
+        // perform the same table lookup and next progress checkpoint.
+        return version;
+    }
     let mut slices = ts_stack_pop_count(&mut parser.stack, &mut parser.tree_pool, version, count);
     let pop_size = slices.len();
     let mut pop = slices.iter_mut().peekable();
@@ -2685,6 +2737,50 @@ mod parser3_tests {
                 if fragile { TS_TREE_STATE_NONE } else { 1 }
             );
             assert!(parser.stack.slices.is_empty());
+            ts_parser_reset(&mut parser);
+        }
+    }
+
+    #[test]
+    fn owned_reductions_preserve_head_metadata_like_pop_then_renumber() {
+        let language = reduction_language();
+        let symbol = language.tables.token_count as Symbol;
+        for force_general in [false, true] {
+            let mut parser = ts_parser_new();
+            parser.language = Some(language);
+            if force_general {
+                parser.logger = Some(Box::new(|_, _| {}));
+            }
+            let external = Subtree::Heap(Arc::new(SubtreeHeapData {
+                has_external_tokens: true,
+                children: Vec::new(),
+                payload: SubtreePayload::External(ExternalScannerState::default()),
+                ..SubtreeHeapData::default()
+            }));
+            let head = &mut parser.stack.heads[0];
+            head.last_external_token = external.clone();
+            head.node_count_at_last_error = 17;
+            head.summary = Some(vec![StackSummaryEntry {
+                position: length_zero(), depth: 3, state: 9,
+            }]);
+            for count in [0, 1] {
+                let version = ts_parser__reduce(
+                    &mut parser, 0, symbol, count, -3, 0, false, false,
+                );
+                assert_eq!(version, u32::from(force_general));
+                ts_stack_renumber_version(&mut parser.stack, &mut parser.tree_pool, version, 0);
+                assert_eq!(parser.stack.heads.len(), 1);
+                let head = &parser.stack.heads[0];
+                assert_eq!(head.status, StackStatus::Active);
+                assert_eq!(head.node_count_at_last_error, 17);
+                assert!(head.last_external_token.ptr_eq(&external));
+                assert!(head.lookahead_when_paused.is_null());
+                let summary = head.summary.as_ref().unwrap();
+                assert_eq!(summary.len(), 1);
+                assert_eq!(summary[0].depth, 3);
+                assert_eq!(summary[0].state, 9);
+                assert_eq!(summary[0].position, length_zero());
+            }
             ts_parser_reset(&mut parser);
         }
     }

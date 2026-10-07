@@ -137,6 +137,18 @@ view, replacing void* payloads. Pop-error captures `&mut bool`; summary captures
 `SummarizeStackSession`; callbacks inspect predecessor nodes through the arena.
 Order of links, versions, slices and summaries is semantically important.
 
+For a sole non-speculative reduction on the sole active version, the parser can
+fuse pop and the immediate renumber/removal of the original head. The in-place
+pop preflights the entire removed prefix for one link and one graph owner per
+node; on failure it changes nothing and falls back to the original traversal.
+On success it transfers the child handles and final predecessor reference,
+without clone/release pairs or a temporary head. Extras do not count, null links
+do count but are not children, and child order is reversed as in the normal pop.
+The original head keeps its scanner token, summary and error baseline. The
+reduction returns that original version so advance still takes its usual
+post-reduction table lookup/progress path; renumbering it to itself is a no-op.
+Diagnostics retain the unfused path to preserve intermediate stack output.
+
 ## Parser, input, lexer, scanner and progress
 
 The public `Parser` is the persistent runtime state. It owns stack, pool, lexer

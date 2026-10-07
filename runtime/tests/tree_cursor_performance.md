@@ -48,5 +48,46 @@ reported noise: no parsing improvement. A second candidate run also reported
 to the original experiment.
 
 The experimental runtime changes were reverted because they did not meet the
-required parse-time acceptance gate. This report is the only retained change;
-it introduces no C-semantic deviations or performance claims about parsing.
+required parse-time acceptance gate. That initial investigation retained only
+this report, not a parsing optimization.
+
+## Follow-up: optimize parsing, not the tree walk
+
+After the documentation-only result was rejected, a parse-only driver over the
+same 360-file input list showed approximately 7% self time in reductions and 5%
+in stack popping. The ordinary deterministic reduction cloned child handles,
+created a temporary head, then released the old path and immediately renumbered
+the new head back to the original version.
+
+The retained optimization fuses that sequence for a single non-speculative
+reduction on the sole active version. It first verifies that every removed node
+has exactly one graph owner and one predecessor. It then moves, rather than
+clones, the children, preserving extra/null counting and child order, and
+transfers the final predecessor reference back to the original head. Shared or
+branching paths, speculative reductions, multiple versions, and diagnostic
+output retain the original algorithm. No progress checkpoint is skipped.
+
+This is an ownership optimization, not a change to recovery costs, parse limits,
+tree semantics, or callback ordering. Arena slots can be recycled earlier, and
+no transient stack version is needed on the fused path. All code is safe Rust.
+
+After merging main's lexer and reduction-header improvements (main `af419b8`),
+three pinned `run_oracle(inputs="benchmark")` runs gave:
+
+| | Overall port/C |
+| --- | --- |
+| Main | 1.121 |
+| Candidate run 1 | 1.031 |
+| Candidate run 2 | 1.025 |
+| Candidate run 3 | 1.026 |
+
+The median is **about 8.5% less parse time**, beyond the reported 1.9% noise.
+Every language improved. This does not yet meet the ultimate overall <= 1.00
+port/C goal.
+
+Validation: all **4,712 oracle inputs passed**, with incremental seed 7 and
+queries on; **182 runtime unit tests** and the runtime integration tests passed;
+`cargo clippy -p ts_port --all-targets -- -D warnings` was clean. New regression
+tests cover child-handle transfer, predecessor reference counts, extras/nulls,
+zero-width reductions, shared/short/branching fallback, and preservation of head
+scanner state, summary, and error baseline compared with pop-then-renumber.
