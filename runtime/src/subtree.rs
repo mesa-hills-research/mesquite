@@ -437,8 +437,8 @@ pub(crate) fn ts_subtree_summarize_children(tree: &mut Subtree, language: &Langu
     );
 }
 
-// Both callers benefit: fresh nodes can fold away initial values, while
-// rotations summarize existing headers without another function boundary.
+// Expose fresh header values to the reduction constructor so initialization
+// and summary writes can be combined before the header is placed in an Arc.
 #[inline(always)]
 fn summarize_children(data: &mut SubtreeHeapData, language: &Language) {
     let SubtreePayload::Branch(branch) = &mut data.payload else {
@@ -745,31 +745,38 @@ pub(crate) fn ts_subtree_retain(tree: &Subtree) -> Subtree {
 }
 
 pub(crate) fn ts_subtree_release(pool: &mut SubtreePool, tree: Subtree) {
-    if matches!(tree, Subtree::Inline(_) | Subtree::Null) {
+    let Subtree::Heap(mut data) = tree else {
+        return;
+    };
+    pool.tree_stack.clear();
+    // Shared handles only need Arc's decrement. The initial unique handle can
+    // be consumed directly, without a round trip through the worklist.
+    if Arc::strong_count(&data) > 1 {
         return;
     }
-    pool.tree_stack.clear();
-    subtree_queue_release(&mut pool.tree_stack, tree);
-    while let Some(Subtree::Heap(mut data)) = pool.tree_stack.pop() {
-        // The queue only checks the strong count. Prove uniqueness once, here,
-        // instead of synchronizing the weak counter both on push and on pop.
-        // A weak observer (or a concurrent upgrade) can prevent pooling; normal
-        // Arc destruction still drains the tree iteratively in that case.
-        let Some(header) = Arc::get_mut(&mut data) else {
-            continue;
-        };
-        if header.children.is_empty() {
-            if header.has_external_tokens {
-                // Drop scanner snapshots before the leaf allocation enters the pool.
-                header.payload = SubtreePayload::Leaf;
+    loop {
+        // Queuing only checks the strong count; prove uniqueness once here.
+        // Weak observers may prevent pooling, in which case normal Arc Drop
+        // still drains the tree iteratively.
+        if let Some(header) = Arc::get_mut(&mut data) {
+            if header.children.is_empty() {
+                if pool.free_trees.capacity() > 0 && pool.free_trees.len() < TS_MAX_TREE_POOL_SIZE {
+                    // This already-borrowed header is unique. Avoid a second
+                    // uniqueness check just to reset it and move it into the pool.
+                    *header = SubtreeHeapData::default();
+                    pool.free_trees.push(data);
+                }
+            } else {
+                for child in std::mem::take(&mut header.children) {
+                    subtree_queue_release(&mut pool.tree_stack, child);
+                }
+                // C frees branch allocations, and only pools leaf allocations.
             }
-            ts_subtree_pool_free(pool, data);
-        } else {
-            for child in std::mem::take(&mut header.children) {
-                subtree_queue_release(&mut pool.tree_stack, child);
-            }
-            // C frees branch allocations, and only pools leaf allocations.
         }
+        let Some(Subtree::Heap(next)) = pool.tree_stack.pop() else {
+            break;
+        };
+        data = next;
     }
 }
 
