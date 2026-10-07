@@ -23,6 +23,19 @@ fn at_eof(lexer: &dyn Lexer, lookahead: i32) -> bool {
     lookahead == 0 && lexer.eof()
 }
 
+// Most characters in a property value or pseudo selector do not affect the
+// colon lookahead. A byte table lets that path bypass the delimiter dispatch.
+const PSEUDO_SPECIAL: [bool; 128] = {
+    let mut result = [false; 128];
+    result[0] = true;
+    result[b';' as usize] = true;
+    result[b'}' as usize] = true;
+    result[b'{' as usize] = true;
+    result[b'/' as usize] = true;
+    result[b'*' as usize] = true;
+    result
+};
+
 impl ExternalScanner for Scanner {
     fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
         if valid_symbols[ERROR_RECOVERY] {
@@ -89,31 +102,52 @@ impl ExternalScanner for Scanner {
                 // its unconditional semicolon/closing-brace loop terminators,
                 // even while inside a comment.
                 let mut in_comment = false;
-                while !matches!(lookahead, 0x3b | 0x7d) && !at_eof(lexer, lookahead) {
-                    lexer.advance(false);
-                    lookahead = lexer.lookahead();
-                    match lookahead {
-                        0x7b if !in_comment => return true,
-                        0x2f if !in_comment => {
-                            lexer.advance(false);
-                            lookahead = lexer.lookahead();
-                            if lookahead == 0x2a {
-                                in_comment = true;
-                            }
+                // The first character after ':' and the second character of
+                // each comment delimiter are only tested for loop termination.
+                'check_end: loop {
+                    if matches!(lookahead, 0x3b | 0x7d) {
+                        return false;
+                    }
+                    if at_eof(lexer, lookahead) {
+                        // Like C, prefer an erroneous pseudo class at EOF.
+                        return lexer.eof();
+                    }
+                    loop {
+                        lexer.advance(false);
+                        lookahead = lexer.lookahead();
+                        if !PSEUDO_SPECIAL
+                            .get(lookahead as usize)
+                            .copied()
+                            .unwrap_or(false)
+                        {
+                            continue;
                         }
-                        0x2a if in_comment => {
-                            lexer.advance(false);
-                            lookahead = lexer.lookahead();
-                            if lookahead == 0x2f {
-                                in_comment = false;
+                        // Test each newly visited character once, instead of
+                        // separately dispatching at the loop's top and bottom.
+                        match lookahead {
+                            0x3b | 0x7d => return false,
+                            0 => {
+                                if lexer.eof() {
+                                    return lexer.eof();
+                                }
                             }
+                            0x7b if !in_comment => return true,
+                            0x2f if !in_comment => {
+                                lexer.advance(false);
+                                lookahead = lexer.lookahead();
+                                in_comment = lookahead == 0x2a;
+                                continue 'check_end;
+                            }
+                            0x2a if in_comment => {
+                                lexer.advance(false);
+                                lookahead = lexer.lookahead();
+                                in_comment = lookahead != 0x2f;
+                                continue 'check_end;
+                            }
+                            _ => {}
                         }
-                        _ => {}
                     }
                 }
-
-                // At EOF, prefer an erroneous pseudo class over a property.
-                return at_eof(lexer, lookahead);
             }
         }
 
@@ -152,6 +186,19 @@ mod tests {
         symbol: u16,
         events: RefCell<Vec<Event>>,
         lookahead_calls: Cell<usize>,
+    }
+
+    impl TestLexer {
+        fn new(input: Vec<i32>) -> Self {
+            Self {
+                input,
+                position: 0,
+                end: None,
+                symbol: u16::MAX,
+                events: RefCell::new(Vec::new()),
+                lookahead_calls: Cell::new(0),
+            }
+        }
     }
 
     impl Lexer for TestLexer {
@@ -198,14 +245,7 @@ mod tests {
     }
 
     fn scan(input: &str, valid_symbols: [bool; 3]) -> (bool, TestLexer) {
-        let mut lexer = TestLexer {
-            input: input.chars().map(|c| c as i32).collect(),
-            position: 0,
-            end: None,
-            symbol: u16::MAX,
-            events: RefCell::new(Vec::new()),
-            lookahead_calls: Cell::new(0),
-        };
+        let mut lexer = TestLexer::new(input.chars().map(|c| c as i32).collect());
         let accepted = create().scan(&mut lexer, &valid_symbols);
         (accepted, lexer)
     }
@@ -416,6 +456,82 @@ mod tests {
             (" :\0x", false),
         ] {
             assert_eq!(scan(input, [true, true, false]).0, accepted, "{input:?}");
+        }
+    }
+
+    // The C pseudo-class branch's original control flow, with cached lookahead
+    // and EOF calls suppressed only where the Lexer contract implies !eof().
+    // Keep this independent of the rotated loop and its ASCII dispatch table.
+    fn reference_pseudo_class(lexer: &mut dyn Lexer) -> bool {
+        let mut lookahead = lexer.lookahead();
+        while is_space(lookahead) {
+            lexer.advance(true);
+            lookahead = lexer.lookahead();
+        }
+        if lookahead != i32::from(b':') {
+            return false;
+        }
+        lexer.advance(false);
+        lookahead = lexer.lookahead();
+        if lookahead == i32::from(b':') {
+            return false;
+        }
+        lexer.mark_end();
+        lexer.set_result_symbol(PSEUDO_CLASS_SELECTOR_COLON as u16);
+        let mut in_comment = false;
+        while lookahead != i32::from(b';')
+            && lookahead != i32::from(b'}')
+            && !at_eof(lexer, lookahead)
+        {
+            lexer.advance(false);
+            lookahead = lexer.lookahead();
+            if lookahead == i32::from(b'{') && !in_comment {
+                return true;
+            }
+            if lookahead == i32::from(b'/') && !in_comment {
+                lexer.advance(false);
+                lookahead = lexer.lookahead();
+                if lookahead == i32::from(b'*') {
+                    in_comment = true;
+                }
+            } else if lookahead == i32::from(b'*') && in_comment {
+                lexer.advance(false);
+                lookahead = lexer.lookahead();
+                if lookahead == i32::from(b'/') {
+                    in_comment = false;
+                }
+            }
+        }
+        at_eof(lexer, lookahead)
+    }
+
+    #[test]
+    fn pseudo_class_dispatch_preserves_c_control_flow() {
+        // Exhaust the interactions between delimiters, embedded NULs, ordinary
+        // ASCII, and codepoints outside the table (including invalid values).
+        let alphabet = [0, 0x20, 0x2a, 0x2f, 0x3a, 0x3b, 0x78, 0x7b, 0x7d, 0x100, -1];
+        for length in 0..=5 {
+            for mut index in 0..alphabet.len().pow(length) {
+                let mut input = vec![i32::from(b':')];
+                for _ in 0..length {
+                    input.push(alphabet[index % alphabet.len()]);
+                    index /= alphabet.len();
+                }
+                let mut actual = TestLexer::new(input.clone());
+                let mut expected = TestLexer::new(input);
+                let accepted = Scanner.scan(&mut actual, &[false, true, false]);
+                assert_eq!(
+                    accepted,
+                    reference_pseudo_class(&mut expected),
+                    "{:?}",
+                    actual.input
+                );
+                assert_eq!(actual.events, expected.events, "{:?}", actual.input);
+                assert_eq!(actual.lookahead_calls, expected.lookahead_calls);
+                assert_eq!(actual.position, expected.position);
+                assert_eq!(actual.end, expected.end);
+                assert_eq!(actual.symbol, expected.symbol);
+            }
         }
     }
 
