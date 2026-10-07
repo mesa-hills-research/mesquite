@@ -190,6 +190,19 @@ pub(crate) fn create() -> Box<dyn ExternalScanner> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn bare_backslash_is_bracket_content_during_recovery() {
+        let mut scanner = create();
+        for _ in 0..2 {
+            let mut lexer = TestLexer::new("\\");
+            assert!(scanner.scan(&mut lexer, &[true; 7]));
+            assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
+            assert_eq!(lexer.position, 1);
+            assert_eq!(lexer.end, Some(1));
+            scanner.deserialize(&[]);
+        }
+    }
+
     #[derive(Debug, PartialEq, Eq)]
     enum Event {
         Advance(usize, bool),
@@ -556,7 +569,11 @@ mod tests {
         restored.deserialize(&buffer[..8]);
         assert_eq!(restored.level, scanner.level);
         assert_eq!(restored.token, scanner.token);
-        for token in [BRACKET_COMMENT_OPEN as u32, scanner.token] {
+        for token in [
+            BRACKET_COMMENT_OPEN as u32,
+            BRACKET_COMMENT_CONTENT as u32,
+            scanner.token,
+        ] {
             for length in [0, 1, 7, 9, 16] {
                 restored.level = 42;
                 restored.token = token;
