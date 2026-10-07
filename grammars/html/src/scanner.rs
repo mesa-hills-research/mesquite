@@ -31,10 +31,14 @@ macro_rules! tag_types {
             }
 
             fn name(self) -> &'static [u8] {
-                match self {
-                    $($(Self::$variant => $name,)?)*
-                    _ => &[],
-                }
+                // Closing tags need one indexed spelling lookup, not a large
+                // switch over every builtin. Sentinels retain empty spellings.
+                const NAMES: &[&[u8]] = &{
+                    let mut names: [&[u8]; TagType::End as usize + 1] = [&[]; TagType::End as usize + 1];
+                    $($(names[TagType::$variant as usize] = $name;)?)*
+                    names
+                };
+                NAMES[self as usize]
             }
 
             fn for_name(name: &[u8]) -> Self {
@@ -446,12 +450,40 @@ fn to_upper(c: i32) -> i32 {
     }
 }
 
-fn scan_tag_name(lexer: &mut dyn Lexer, tag_name: &mut Vec<u8>, mut c: i32) {
+// Almost all tag names fit on the stack. Use a local length and a fixed
+// buffer in that case, rather than updating a Vec and checking its capacity
+// for each character. The reusable Vec is needed only for long custom names.
+fn scan_tag_name<'a>(
+    lexer: &mut dyn Lexer,
+    long_name: &'a mut Vec<u8>,
+    short_name: &'a mut [u8; 16],
+    mut c: i32,
+) -> &'a [u8] {
+    for i in 0..short_name.len() {
+        let byte = TAG_NAME_CHARS.get(c as usize).copied().unwrap_or(0);
+        if byte == 0 {
+            return &short_name[..i];
+        }
+        short_name[i] = byte;
+        lexer.advance(false);
+        c = lexer.lookahead();
+    }
+    scan_long_tag_name(lexer, long_name, short_name, c)
+}
+
+#[inline(never)]
+fn scan_long_tag_name<'a>(
+    lexer: &mut dyn Lexer,
+    tag_name: &'a mut Vec<u8>,
+    prefix: &[u8],
+    mut c: i32,
+) -> &'a [u8] {
     tag_name.clear();
+    tag_name.extend_from_slice(prefix);
     loop {
         let byte = TAG_NAME_CHARS.get(c as usize).copied().unwrap_or(0);
         if byte == 0 {
-            break;
+            return tag_name;
         }
         tag_name.push(byte);
         lexer.advance(false);
@@ -490,7 +522,7 @@ fn scan_comment(lexer: &mut dyn Lexer) -> bool {
 #[derive(Default)]
 pub(crate) struct Scanner {
     tags: TagStack,
-    tag_name: Vec<u8>,
+    long_tag_name: Vec<u8>,
 }
 
 impl Scanner {
@@ -548,18 +580,19 @@ impl Scanner {
             return true;
         }
 
-        scan_tag_name(lexer, &mut self.tag_name, c);
-        if self.tag_name.is_empty() && !lexer.eof() {
+        let mut short_name = [0; 16];
+        let name = scan_tag_name(lexer, &mut self.long_tag_name, &mut short_name, c);
+        if name.is_empty() && !lexer.eof() {
             return false;
         }
         if is_closing_tag {
             // Most closing tags match their parent. Compare its spelling
             // directly instead of searching the full builtin name map.
-            if self.tags.last_matches_name(&self.tag_name) {
+            if self.tags.last_matches_name(name) {
                 return false;
             }
 
-            let next_tag = Tag::for_name(&self.tag_name);
+            let next_tag = Tag::for_name(name);
             // Recovery deliberately compares only types here, not custom names.
             // Only one stack entry is removed, even if the match is much deeper.
             if self.tags.contains_kind(next_tag.kind) {
@@ -568,7 +601,7 @@ impl Scanner {
                 return true;
             }
         } else if self.tags.last().is_some_and(|parent| {
-            !parent.can_contain(&Tag::for_name(&self.tag_name))
+            !parent.can_contain(&Tag::for_name(name))
                 || (matches!(parent.kind, TagType::Html | TagType::Head | TagType::Body)
                     && lexer.eof())
         }) {
@@ -580,12 +613,13 @@ impl Scanner {
     }
 
     fn scan_start_tag_name(&mut self, lexer: &mut dyn Lexer, c: i32) -> bool {
-        scan_tag_name(lexer, &mut self.tag_name, c);
-        if self.tag_name.is_empty() {
+        let mut short_name = [0; 16];
+        let name = scan_tag_name(lexer, &mut self.long_tag_name, &mut short_name, c);
+        if name.is_empty() {
             return false;
         }
 
-        let tag = Tag::for_name(&self.tag_name);
+        let tag = Tag::for_name(name);
         let kind = tag.kind;
         self.tags.push(tag);
         lexer.set_result_symbol(match kind {
@@ -597,12 +631,13 @@ impl Scanner {
     }
 
     fn scan_end_tag_name(&mut self, lexer: &mut dyn Lexer, c: i32) -> bool {
-        scan_tag_name(lexer, &mut self.tag_name, c);
-        if self.tag_name.is_empty() {
+        let mut short_name = [0; 16];
+        let name = scan_tag_name(lexer, &mut self.long_tag_name, &mut short_name, c);
+        if name.is_empty() {
             return false;
         }
 
-        if self.tags.last_matches_name(&self.tag_name) {
+        if self.tags.last_matches_name(name) {
             self.tags.pop();
             lexer.set_result_symbol(END_TAG_NAME as u16);
         } else {
@@ -628,6 +663,9 @@ impl Scanner {
 
 impl ExternalScanner for Scanner {
     fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
+        let valid_symbols = valid_symbols
+            .first_chunk::<9>()
+            .expect("HTML external symbols");
         if valid_symbols[RAW_TEXT] && !valid_symbols[START_TAG_NAME] && !valid_symbols[END_TAG_NAME]
         {
             return self.scan_raw_text(lexer);
@@ -1362,6 +1400,54 @@ mod tests {
     }
 
     #[test]
+    fn short_and_long_names_preserve_c_scanning_at_buffer_boundaries() {
+        let mut long_name = Vec::new();
+        // Include short names after long ones to catch stale-buffer reuse.
+        for length in [0, 1, 10, 15, 16, 17, 255, 256, 1024, 17, 16, 15, 1, 0] {
+            let prefix: String = "aZ9-:".chars().cycle().take(length).collect();
+            for suffix in ["", ">", " ", "_more", "\0more", "é", "\u{2003}"] {
+                let input = format!("{prefix}{suffix}");
+                let mut reference = TestLexer::new(&input);
+                let mut expected = Vec::new();
+                loop {
+                    let c = reference.lookahead();
+                    if !matches!(c, 0x30..=0x39 | 0x41..=0x5a | 0x61..=0x7a | 0x2d | 0x3a) {
+                        break;
+                    }
+                    expected.push(to_upper(c) as u8);
+                    reference.advance(false);
+                }
+
+                let mut lexer = TestLexer::new(&input);
+                let mut short_name = [0xa5; 16];
+                let c = lexer.lookahead();
+                let capacity = long_name.capacity();
+                let name = scan_tag_name(&mut lexer, &mut long_name, &mut short_name, c);
+                assert_eq!(name, expected, "{input:?}");
+                assert_eq!(lexer.position, reference.position, "{input:?}");
+                assert_eq!(lexer.calls, reference.calls, "{input:?}");
+                if length < short_name.len() {
+                    assert_eq!(long_name.capacity(), capacity);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn builtin_names_do_not_allocate_a_name_buffer() {
+        for &(name, _) in TAG_TYPES_BY_TAG_NAME {
+            let input = std::str::from_utf8(name).unwrap();
+            let mut scanner = Scanner::default();
+            assert!(scan(&mut scanner, input, &[START_TAG_NAME]).0);
+            assert_eq!(scanner.long_tag_name.capacity(), 0);
+            let (_, end) = scan(&mut scanner, input, &[END_TAG_NAME]);
+            assert_eq!(end.symbol, END_TAG_NAME as u16);
+            assert_eq!(scanner.long_tag_name.capacity(), 0);
+            assert!(scanner.tags.is_empty());
+        }
+    }
+
+    #[test]
     fn scanning_reuses_names_without_truncating_live_custom_tags() {
         let long_name = "x".repeat(300);
         let mut scanner = with_tags(&["DIV"]);
@@ -1370,7 +1456,7 @@ mod tests {
             scanner.tags.last().unwrap().custom_tag_name,
             vec![b'X'; 300]
         );
-        let capacity = scanner.tag_name.capacity();
+        let capacity = scanner.long_tag_name.capacity();
         let (_, wrong_end) = scan(&mut scanner, &long_name[..255], &[END_TAG_NAME]);
         assert_eq!(wrong_end.symbol, ERRONEOUS_END_TAG_NAME as u16);
         assert_eq!(scanner.tags.len(), 2);
@@ -1378,7 +1464,7 @@ mod tests {
         assert_eq!(right_end.symbol, END_TAG_NAME as u16);
         assert_eq!(scanner.tags, with_tags(&["DIV"]).tags);
         assert!(scanner.tags.custom.is_empty());
-        assert_eq!(scanner.tag_name.capacity(), capacity);
+        assert_eq!(scanner.long_tag_name.capacity(), capacity);
     }
 
     #[test]
