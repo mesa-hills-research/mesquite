@@ -20,11 +20,56 @@ pub(crate) struct StackLink {
     pub subtree: Subtree,
     pub is_pending: bool,
 }
+/// Almost all stack nodes have one predecessor. Keep that link in the arena
+/// slot, and allocate the remaining fixed-capacity slots only when paths merge.
+/// Link order and MAX_LINK_COUNT are unchanged from the C stack.
+#[derive(Debug, Default)]
+pub(crate) struct StackLinks {
+    first: Option<StackLink>,
+    rest: Option<Box<[Option<StackLink>; MAX_LINK_COUNT - 1]>>,
+}
+
+impl StackLinks {
+    fn iter(&self) -> impl Iterator<Item = &Option<StackLink>> {
+        std::iter::once(&self.first).chain(self.rest.iter().flat_map(|links| links.iter()))
+    }
+
+    fn iter_mut(&mut self) -> impl Iterator<Item = &mut Option<StackLink>> {
+        std::iter::once(&mut self.first)
+            .chain(self.rest.iter_mut().flat_map(|links| links.iter_mut()))
+    }
+}
+
+impl std::ops::Index<usize> for StackLinks {
+    type Output = Option<StackLink>;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        if index == 0 {
+            &self.first
+        } else {
+            &self.rest.as_ref().expect("allocated stack links")[index - 1]
+        }
+    }
+}
+
+impl std::ops::IndexMut<usize> for StackLinks {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        if index == 0 {
+            &mut self.first
+        } else {
+            let rest = self
+                .rest
+                .get_or_insert_with(|| Box::new(std::array::from_fn(|_| None)));
+            &mut rest[index - 1]
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct StackNode {
     pub state: StateId,
     pub position: Length,
-    pub links: [Option<StackLink>; MAX_LINK_COUNT],
+    pub links: StackLinks,
     pub link_count: u16,
     pub ref_count: u32,
     pub error_cost: u32,
@@ -164,8 +209,10 @@ pub(crate) fn stack_node_release(
                         let first = data.links[0].as_ref().expect("initialized stack link");
                         pending.push(Release::Node(first.node));
                         pending.push(Release::Recycle(node));
-                        for (i, link) in data.links[..data.link_count as usize]
+                        for (i, link) in data
+                            .links
                             .iter_mut()
+                            .take(data.link_count as usize)
                             .enumerate()
                         {
                             let link = link.take().expect("initialized stack link");
@@ -211,7 +258,7 @@ pub(crate) fn stack_node_new(
     let mut node = StackNode {
         state,
         position: length_zero(),
-        links: std::array::from_fn(|_| None),
+        links: StackLinks::default(),
         link_count: 0,
         ref_count: 1,
         error_cost: 0,
@@ -687,7 +734,7 @@ pub(crate) fn ts_stack_pop_error(
     let node = stack.arena.nodes[stack.heads[version as usize].node.0]
         .as_ref()
         .unwrap();
-    let has_error_link = node.links[..node.link_count as usize].iter().any(|link| {
+    let has_error_link = node.links.iter().take(node.link_count as usize).any(|link| {
         let subtree = &link.as_ref().unwrap().subtree;
         !subtree.is_null() && ts_subtree_is_error(subtree)
     });
@@ -1122,7 +1169,7 @@ mod stack2_tests {
         StackNode {
             state,
             position: Length::default(),
-            links: std::array::from_fn(|_| None),
+            links: StackLinks::default(),
             link_count: 0,
             ref_count: 1,
             error_cost,
@@ -1355,6 +1402,32 @@ mod stack_1_tests {
             subtree: Subtree::Null,
             is_pending: false,
         }
+    }
+
+    #[test]
+    fn links_allocate_only_for_multiple_predecessors() {
+        let mut links = StackLinks::default();
+        assert!(links.first.is_none());
+        assert!(links.rest.is_none());
+        links[0] = Some(null_link(StackNodeId(0)));
+        assert!(links.rest.is_none());
+
+        for i in 1..MAX_LINK_COUNT {
+            links[i] = Some(null_link(StackNodeId(i)));
+        }
+        assert!(links.rest.is_some());
+        assert_eq!(links.iter().count(), MAX_LINK_COUNT);
+        for (i, link) in links.iter().enumerate() {
+            assert_eq!(link.as_ref().unwrap().node, StackNodeId(i));
+            assert_eq!(links[i].as_ref().unwrap().node, StackNodeId(i));
+        }
+        for link in links.iter_mut() {
+            link.take();
+        }
+        assert!(links.iter().all(Option::is_none));
+
+        // The common arena slot must not silently grow back to eight links.
+        assert!(std::mem::size_of::<StackNode>() < 128);
     }
 
     #[test]

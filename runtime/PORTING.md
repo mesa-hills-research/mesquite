@@ -117,8 +117,12 @@ Copying long immutable scanner snapshots shares bytes safely.
 The stack is a parser-local arena. `StackNodeId(usize)` indexes
 `StackArena.nodes: Vec<Option<StackNode>>`; links and heads store IDs, never Rust
 references into the reallocating Vec. Nodes have explicit C-style u32 refcounts,
-fixed eight-link slots (`[Option<StackLink>; 8]`) and link_count. This preserves
-shared link mutation without Rc/RefCell, locks, unsafe pointers, or deep copying.
+a `StackLinks` storage and link_count, with the same eight-link limit as C.
+`StackLinks` keeps the first `Option<StackLink>` inline and lazily allocates a
+boxed array for the other seven slots only when multiple predecessors are added.
+This keeps single-predecessor nodes compact without a per-push allocation and
+preserves shared link mutation without Rc/RefCell, locks, unsafe pointers, or
+deep copying.
 
 Reference counts are counts of **graph ownership**, not copies of the index.
 Retain/release explicitly when C does. Index copying by itself does not retain.
