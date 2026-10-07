@@ -1029,10 +1029,21 @@ pub(crate) fn ts_parser__reduce(
     production_id: u16,
     is_fragile: bool,
     end_of_non_terminal_extra: bool,
+    replace_version: bool,
 ) -> StackVersion {
     let language = parser.language.unwrap();
     let initial_version_count = ts_stack_version_count(&parser.stack);
-    let mut slices = ts_stack_pop_count(&mut parser.stack, &mut parser.tree_pool, version, count);
+    // A sole action on the sole version will immediately replace the original
+    // head. Move uniquely owned children instead of cloning them into a new
+    // head and then deleting the old one. Shared/branched paths still use C's
+    // complete breadth-first traversal and version-selection algorithm.
+    let in_place = replace_version
+        .then(|| ts_stack_pop_count_in_place(&mut parser.stack, count))
+        .flatten();
+    let did_replace = in_place.is_some();
+    let mut slices = in_place.unwrap_or_else(|| {
+        ts_stack_pop_count(&mut parser.stack, &mut parser.tree_pool, version, count)
+    });
     let pop_size = slices.len();
     let mut pop = slices.iter_mut().peekable();
     let mut removed_version_count = 0;
@@ -1152,7 +1163,9 @@ pub(crate) fn ts_parser__reduce(
     // allocates a new buffer for the next pop.
     slices.clear();
     parser.stack.slices = slices;
-    if ts_stack_version_count(&parser.stack) > initial_version_count {
+    if did_replace {
+        version
+    } else if ts_stack_version_count(&parser.stack) > initial_version_count {
         initial_version_count
     } else {
         STACK_VERSION_NONE
@@ -1286,6 +1299,7 @@ pub(crate) fn ts_parser__do_all_potential_reductions(
                 action.dynamic_precedence,
                 action.production_id,
                 true,
+                false,
                 false,
             );
         }
@@ -1821,6 +1835,7 @@ pub(crate) fn ts_parser__advance(
                         production_id,
                         table_entry.actions.len() > 1,
                         lookahead.is_null(),
+                        table_entry.actions.len() == 1,
                     );
                     did_reduce = true;
                     if reduction_version != STACK_VERSION_NONE {
@@ -2594,30 +2609,42 @@ mod parser3_tests {
 
     #[test]
     fn reductions_reuse_slice_storage_without_retaining_children() {
-        let mut parser = ts_parser_new();
-        let language = reduction_language();
-        parser.language = Some(language);
-        let symbol = language.tables.token_count as Symbol;
-        let allocation = parser.stack.slices.as_ptr();
-        let capacity = parser.stack.slices.capacity();
-        for i in 0..128 {
-            let version =
-                ts_parser__reduce(&mut parser, 0, symbol, u32::from(i > 0), 0, 0, false, false);
+        for replace_version in [false, true] {
+            let mut parser = ts_parser_new();
+            let language = reduction_language();
+            parser.language = Some(language);
+            let symbol = language.tables.token_count as Symbol;
+            let allocation = parser.stack.slices.as_ptr();
+            let capacity = parser.stack.slices.capacity();
+            for i in 0..128 {
+                let version = ts_parser__reduce(
+                    &mut parser,
+                    0,
+                    symbol,
+                    u32::from(i > 0),
+                    0,
+                    0,
+                    false,
+                    false,
+                    replace_version,
+                );
+                assert_eq!(version, if replace_version { 0 } else { 1 });
+                assert!(parser.stack.slices.is_empty());
+                assert_eq!(parser.stack.slices.as_ptr(), allocation);
+                assert_eq!(parser.stack.slices.capacity(), capacity);
+                ts_stack_renumber_version(&mut parser.stack, &mut parser.tree_pool, version, 0);
+                let head = parser.stack.heads[0].node;
+                let node = parser.stack.arena.nodes[head.0].as_ref().unwrap();
+                let tree = &node.links[0].as_ref().unwrap().subtree;
+                let Subtree::Heap(data) = tree else {
+                    panic!("reduced branch")
+                };
+                assert_eq!(std::sync::Arc::strong_count(data), 1);
+                assert_eq!(data.children.len(), usize::from(i > 0));
+            }
+            ts_parser_reset(&mut parser);
             assert!(parser.stack.slices.is_empty());
-            assert_eq!(parser.stack.slices.as_ptr(), allocation);
-            assert_eq!(parser.stack.slices.capacity(), capacity);
-            ts_stack_renumber_version(&mut parser.stack, &mut parser.tree_pool, version, 0);
-            let head = parser.stack.heads[0].node;
-            let node = parser.stack.arena.nodes[head.0].as_ref().unwrap();
-            let tree = &node.links[0].as_ref().unwrap().subtree;
-            let Subtree::Heap(data) = tree else {
-                panic!("reduced branch")
-            };
-            assert_eq!(std::sync::Arc::strong_count(data), 1);
-            assert_eq!(data.children.len(), usize::from(i > 0));
         }
-        ts_parser_reset(&mut parser);
-        assert!(parser.stack.slices.is_empty());
     }
 
     #[test]
@@ -2659,7 +2686,7 @@ mod parser3_tests {
                     1,
                 );
             }
-            let version = ts_parser__reduce(&mut parser, 0, symbol, 1, -3, 0, fragile, false);
+            let version = ts_parser__reduce(&mut parser, 0, symbol, 1, -3, 0, fragile, false, true);
             ts_stack_renumber_version(&mut parser.stack, &mut parser.tree_pool, version, 0);
             let mut node = parser.stack.heads[0].node;
             for symbol in [3, 2] {
@@ -2739,6 +2766,7 @@ mod parser3_tests {
                     0,
                     false,
                     false,
+                    true,
                 );
                 ts_stack_renumber_version(&mut parser.stack, &mut parser.tree_pool, version, 0);
                 let node = parser.stack.heads[0].node;
