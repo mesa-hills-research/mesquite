@@ -91,6 +91,137 @@ fn repairing_and_restoring_quoted_variable_names_resets_recovery_state() {
     }
 }
 
+#[test]
+fn malformed_quotes_after_valid_arguments_keep_flat_recovery_children() {
+    // The two larger bucket inputs exercise recovery after valid arguments and
+    // comments, rather than immediately after a command's opening parenthesis.
+    // These trees and callback counts match the C oracle for the full fixtures.
+    let deferred_call = concat!(
+        "# Argument syntax error evaluated at deferred call site.\n",
+        "cmake_language(DEFER CALL message \"Deferred \\X Error\")\n",
+    );
+    let compile_features = concat!(
+        "enable_language(@lang@)\n\n",
+        "# Make sure the compile command is not hidden.\n",
+        "string(REPLACE \"${CMAKE_START_TEMP_FILE}\" \"\" ",
+        "CMAKE_@lang@_COMPILE_OBJECT \"${CMAKE_@lang@_COMPILE_OBJECT}\")\n",
+        "string(REPLACE \"${CMAKE_END_TEMP_FILE}\" \"\" ",
+        "CMAKE_@lang@_COMPILE_OBJECT \"${CMAKE_@lang@_COMPILE_OBJECT}\")\n\n",
+        "add_library(foo \"@RunCMake_SOURCE_DIR@/empty.@ext@\")\n",
+    );
+    let deferred_children = [
+        ("identifier", 35, 57..71),
+        ("(", 14, 71..72),
+        ("argument", 54, 72..77),
+        ("argument", 54, 78..82),
+        ("argument", 54, 83..90),
+        ("\"", 16, 91..92),
+        ("bracket_argument_content", 37, 101..112),
+    ];
+    let compile_children = [
+        ("identifier", 35, 72..78),
+        ("(", 14, 78..79),
+        ("argument", 54, 79..86),
+        ("argument", 54, 87..113),
+        ("argument", 54, 114..116),
+        ("argument", 54, 117..144),
+        ("\"", 16, 145..146),
+        ("$", 8, 146..147),
+        ("{", 9, 147..148),
+        ("bracket_argument_content", 37, 154..338),
+    ];
+    let language = Language::from(ts_port_cmake::language());
+    for (source, error_index, expected_children, expected_progress_calls) in [
+        (deferred_call, 1, deferred_children.as_slice(), 1),
+        (compile_features, 2, compile_children.as_slice(), 2),
+    ] {
+        let mut parser = Parser::new();
+        parser.set_language(&language).unwrap();
+        for preceding_source in [None, Some("message([[value]])"), Some("#[=[comment]=]")] {
+            if let Some(preceding_source) = preceding_source {
+                let tree = parser.parse(preceding_source, None).unwrap();
+                assert!(!tree.root_node().has_error());
+            }
+            for chunk_size in [source.len(), 1] {
+                let mut progress_calls = 0;
+                let mut progress = |_: &ParseState| {
+                    progress_calls += 1;
+                    false
+                };
+                let tree = parser
+                    .parse_with_options(
+                        &mut |offset, _| {
+                            let remaining = source.as_bytes().get(offset..).unwrap_or_default();
+                            &remaining[..remaining.len().min(chunk_size)]
+                        },
+                        None,
+                        Some(ParseOptions::new().progress_callback(&mut progress)),
+                    )
+                    .unwrap();
+                assert_eq!(progress_calls, expected_progress_calls);
+                let root = tree.root_node();
+                assert_eq!(root.kind(), "source_file");
+                assert_eq!(root.byte_range(), 0..source.len());
+                assert_eq!(root.end_position(), point_at(source, source.len()));
+                assert_eq!(root.child_count(), error_index + 1);
+                assert_eq!(root.named_child_count(), error_index + 1);
+                for index in 0..error_index {
+                    assert!(!root.child(index).unwrap().has_error());
+                }
+
+                let error = root.child(error_index).unwrap();
+                assert!(error.is_error());
+                assert!(error.is_extra());
+                assert!(error.is_named());
+                assert!(!error.is_missing());
+                assert_eq!(
+                    error.byte_range(),
+                    expected_children[0].2.start..source.len()
+                );
+                assert_eq!(error.start_position(), point_at(source, error.start_byte()));
+                assert_eq!(error.end_position(), root.end_position());
+                assert_eq!(error.child_count(), expected_children.len());
+                let mut named_count = 0;
+                for (index, (kind, id, bytes)) in expected_children.iter().enumerate() {
+                    let child = error.child(index).unwrap();
+                    let named = matches!(
+                        *kind,
+                        "identifier" | "argument" | "bracket_argument_content"
+                    );
+                    assert_eq!(child.kind(), *kind);
+                    assert_eq!(child.kind_id(), *id);
+                    assert_eq!(child.byte_range(), *bytes);
+                    assert_eq!(child.start_position(), point_at(source, bytes.start));
+                    assert_eq!(child.end_position(), point_at(source, bytes.end));
+                    assert_eq!(child.is_named(), named);
+                    assert_eq!(child.child_count(), usize::from(*kind == "argument"));
+                    assert!(!child.is_extra());
+                    assert!(!child.is_error());
+                    assert!(!child.has_error());
+                    assert!(!child.is_missing());
+                    if named {
+                        assert_eq!(error.named_child(named_count), Some(child));
+                        named_count += 1;
+                    }
+                }
+                assert_eq!(error.named_child_count(), named_count);
+            }
+        }
+    }
+}
+
+fn point_at(source: &str, byte: usize) -> Point {
+    source.as_bytes()[..byte]
+        .iter()
+        .fold(Point::new(0, 0), |point, &ch| {
+            if ch == b'\n' {
+                Point::new(point.row + 1, 0)
+            } else {
+                Point::new(point.row, point.column + 1)
+            }
+        })
+}
+
 fn assert_quoted_variable_recovery(tree: &Tree, source: &str) {
     let root = tree.root_node();
     assert_eq!(root.kind(), "source_file");

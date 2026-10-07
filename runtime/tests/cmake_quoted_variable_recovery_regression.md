@@ -127,3 +127,23 @@ Validation rerun at `f137cfe`: bucket **4/4**, full CMake gate **270/270**
 all **24** scanner tests pass. Workspace all-targets checking passes with only
 the pre-existing host-owned YAML lexer warning; all-targets clippy for `ts_port`
 and `ts_port_cmake` passes with `-D warnings`.
+
+## Larger-input regression coverage at `e2fe480`
+
+The bucket already passes at this starting revision. Added public-API regression
+coverage for the two remaining full inputs, `defer_call_syntax_error.cmake` and
+`CMP0128Common.cmake`. Both retain successful arguments before the malformed
+quote as direct ERROR children; the quote must not acquire a nested ERROR.
+Checks cover symbol IDs, byte/point ranges, named/extra/error/missing flags,
+child counts, named-child navigation, and the respective **1** and **2** progress
+callbacks. Each fixture is parsed normally and one byte at a time, initially and
+after bracket-argument/comment parses. All four bucket fixtures now have parser
+regression coverage independent of the external fixture checkout.
+
+Validation: **4/4** bucket, **270/270** gate (incremental and query checks), and
+**9878/9878** fresh CMake oracle inputs pass. All **3** quoted-variable parser
+tests and **24** CMake scanner tests pass. Workspace all-targets checking passes
+with the pre-existing host-owned YAML lexer warning; all-targets clippy for
+`ts_port` and `ts_port_cmake` passes with `-D warnings`. The existing zero-state
+scanner correction still matches C; no runtime changes or C deviations were
+needed.
