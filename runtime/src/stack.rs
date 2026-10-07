@@ -744,7 +744,7 @@ pub(crate) fn ts_stack_pop_count(
 pub(crate) fn ts_stack_pop_count_in_place(
     stack: &mut Stack,
     count: u32,
-) -> Option<Vec<StackSlice>> {
+) -> Option<Vec<Subtree>> {
     if stack.heads.len() != 1 || stack.heads[0].status != StackStatus::Active {
         return None;
     }
@@ -788,11 +788,7 @@ pub(crate) fn ts_stack_pop_count_in_place(
     subtrees.reverse();
     stack.slices.clear();
     stack.iterators.clear();
-    stack.slices.push(StackSlice {
-        subtrees,
-        version: 0,
-    });
-    Some(std::mem::take(&mut stack.slices))
+    Some(subtrees)
 }
 
 pub(crate) fn pop_pending_callback(iterator: &StackIterator) -> StackAction {
@@ -2058,11 +2054,11 @@ mod stack_1_tests {
                 assert_eq!(optimized.heads[0].node, original_top);
                 assert!(optimized.arena.free.is_empty());
             } else {
-                let fast = fast.unwrap().pop().unwrap();
+                let fast = fast.unwrap();
                 let slow = slow.pop().unwrap();
                 ts_stack_renumber_version(&mut ordinary, &mut pool, slow.version, 0);
-                assert_eq!(symbols(&fast.subtrees), symbols(&slow.subtrees));
-                for (fast, slow) in fast.subtrees.iter().zip(&slow.subtrees) {
+                assert_eq!(symbols(&fast), symbols(&slow.subtrees));
+                for (fast, slow) in fast.iter().zip(&slow.subtrees) {
                     assert!(fast.ptr_eq(slow));
                 }
                 assert_eq!(ts_stack_state(&optimized, 0), ts_stack_state(&ordinary, 0));
@@ -2120,7 +2116,7 @@ mod stack_1_tests {
         assert!(stack.arena.free.is_empty());
         // A branch at the goal, not in the removed prefix, is fine.
         let pop = ts_stack_pop_count_in_place(&mut stack, 1).unwrap();
-        assert_eq!(symbols(&pop[0].subtrees), [2]);
+        assert_eq!(symbols(&pop), [2]);
         assert_eq!(stack.heads[0].node, shared);
         assert_eq!(stack.arena.node(shared).ref_count, 1);
         assert_eq!(stack.arena.node(shared).link_count, 2);
