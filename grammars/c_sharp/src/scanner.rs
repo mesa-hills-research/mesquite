@@ -56,19 +56,31 @@ fn is_space(c: i32) -> bool {
     matches!(c, 0x09..=0x0d | 0x20)
 }
 
-impl Scanner {
-    // Keep the full ordered token scan out of ordinary-code rejection. All
-    // lookahead tests reuse the current position's code point until advance.
-    #[inline(never)]
-    fn scan_string(
-        &mut self,
-        lexer: &mut dyn Lexer,
-        valid_symbols: &[bool; RAW_STRING_CONTENT + 1],
-        mut lookahead: i32,
-    ) -> bool {
+impl ExternalScanner for Scanner {
+    fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
+        let valid_symbols = valid_symbols
+            .first_chunk::<{ RAW_STRING_CONTENT + 1 }>()
+            .expect("C# external token flags");
         let mut brace_advanced = 0u8;
         let mut quote_count = 0u8;
         let mut did_advance = false;
+
+        // Error recovery, gives better trees this way.
+        if valid_symbols[OPT_SEMI] && valid_symbols[INTERPOLATION_REGULAR_START] {
+            return false;
+        }
+
+        // Lookahead is stable between advances. Keep repeated token tests
+        // from dispatching through the Lexer vtable at the same position.
+        let mut lookahead = lexer.lookahead();
+
+        if valid_symbols[OPT_SEMI] {
+            lexer.set_result_symbol(OPT_SEMI as u16);
+            if lookahead == i32::from(b';') {
+                lexer.advance(false);
+            }
+            return true;
+        }
 
         if valid_symbols[RAW_STRING_START] {
             while is_space(lookahead) {
@@ -397,50 +409,6 @@ impl Scanner {
         }
 
         false
-    }
-}
-
-impl ExternalScanner for Scanner {
-    fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
-        let valid_symbols = valid_symbols
-            .first_chunk::<{ RAW_STRING_CONTENT + 1 }>()
-            .expect("C# external token flags");
-        if valid_symbols[OPT_SEMI] {
-            // The C scanner suppresses all external tokens during recovery.
-            if valid_symbols[INTERPOLATION_REGULAR_START] {
-                return false;
-            }
-            lexer.set_result_symbol(OPT_SEMI as u16);
-            if lexer.lookahead() == i32::from(b';') {
-                lexer.advance(false);
-            }
-            return true;
-        }
-
-        let mut lookahead = lexer.lookahead();
-        // With no active interpolation, only raw strings and interpolation
-        // prefixes can consume input. Reject ordinary code without entering
-        // the string scanner, but retain the C scanner's whitespace advances.
-        if self.interpolation_stack.is_empty()
-            && !valid_symbols[RAW_STRING_END]
-            && !valid_symbols[RAW_STRING_CONTENT]
-        {
-            if !(valid_symbols[RAW_STRING_START]
-                || valid_symbols[INTERPOLATION_REGULAR_START]
-                || valid_symbols[INTERPOLATION_VERBATIM_START]
-                || valid_symbols[INTERPOLATION_RAW_START])
-            {
-                return false;
-            }
-            while is_space(lookahead) {
-                lexer.advance(true);
-                lookahead = lexer.lookahead();
-            }
-            if !matches!(lookahead, 34 | 36 | 64) {
-                return false;
-            }
-        }
-        self.scan_string(lexer, valid_symbols, lookahead)
     }
 
     fn serialize(&mut self, buffer: &mut [u8]) -> usize {
