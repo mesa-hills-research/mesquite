@@ -182,6 +182,7 @@ impl ExternalScanner for Scanner {
 
 /// Creates a scanner (C's `tree_sitter_cmake_external_scanner_create`).
 pub(crate) fn create() -> Box<dyn ExternalScanner> {
+    // C allocates the payload with calloc.
     Box::<Scanner>::default()
 }
 
@@ -312,12 +313,35 @@ mod tests {
             assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
             assert_eq!(lexer.position, input.len());
             assert_eq!(lexer.end, (!input.is_empty()).then_some(input.len()));
+            assert_eq!(scanner.serialize(&mut snapshot), STATE_SIZE);
+            assert_eq!(&snapshot[..4], &0u32.to_ne_bytes());
+            assert_eq!(&snapshot[4..], &(BRACKET_ARGUMENT_CONTENT as u32).to_ne_bytes());
 
             // Content changed the token; an empty snapshot must reset it so
             // that the next scan can emit content again, even at EOF.
             scanner.deserialize(&[]);
             assert_eq!(scanner.serialize(&mut snapshot), STATE_SIZE);
             assert_eq!(snapshot, [0; STATE_SIZE]);
+        }
+    }
+
+    #[test]
+    fn fresh_and_reset_scanners_emit_zero_width_content_at_eof() {
+        let mut scanner = create();
+        for reset in [false, true] {
+            if reset {
+                // The previous scan changed token to CONTENT; resetting must
+                // allow the same zero-width recovery token to be emitted again.
+                scanner.deserialize(&[]);
+            }
+            let mut lexer = TestLexer::new("");
+            assert!(scanner.scan(&mut lexer, &[true; 7]));
+            assert_eq!(lexer.position, 0);
+            assert_eq!(lexer.end, None);
+            assert_eq!(
+                lexer.events,
+                [Event::Symbol(BRACKET_ARGUMENT_CONTENT as u16)]
+            );
         }
     }
 
