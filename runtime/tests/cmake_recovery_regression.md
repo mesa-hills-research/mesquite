@@ -59,7 +59,7 @@ This follow-up changes only this verification note; it introduces no deviation
 from C and no new unsafe code.
 
 
-### Revalidation of `4d6cc948` at `deff2cd`
+### Revalidation of `4d6cc948` at `ed294b1`
 
 The assigned Registry-query input still passes before any new changes. Direct
 comparison with the current C scanner confirms that the merged zero-valued
@@ -102,11 +102,14 @@ unsafe code, or generated-file changes are introduced.
 
 ## ERROR range bucket `e0b0bff8`
 
-Reverified at `6a480c1`: all five reported inputs already pass with the merged
-scanner initialization/reset correction above. Direct comparison with the
-current C scanner confirms that no additional implementation change is needed.
-All checks listed below were rerun, including the parser regressions with
-chunked input, reused scanners, and incremental EOF edits. In particular, recovery from
+Reverified at `d5608ec`: all five reported inputs already pass on the starting
+checkout with the merged scanner initialization/reset correction above. Direct
+comparison with the current C scanner confirms that no additional implementation
+change is needed: creation uses `ts_calloc`, and invalid-length deserialization
+resets both `level` and `token` to zero. All checks listed below were rerun,
+including the existing parser regressions with chunked input, reused scanners,
+and incremental EOF edits. This follow-up only refreshes the verification record;
+it does not change runtime behavior or duplicate existing tests. Recovery from
 byte 5 of `E_sleep-no-args-stderr.cmake` emits bracket content through byte 72,
 including the final newline. The enclosing ERROR therefore reaches EOF, rather
 than ending at byte 71 with only the initial identifier as a visible child.
@@ -216,7 +219,7 @@ changes are introduced.
 
 ## Unterminated-call bucket `7f8795fb`
 
-Reverified at `911402c`: all three reported inputs already pass on the starting
+Reverified at `40208fa`: all three reported inputs already pass on the starting
 checkout with the merged scanner initialization/reset correction above. The
 current C scanner uses
 `ts_calloc` and clears both fields on empty or invalid-length snapshots, matching
@@ -234,7 +237,7 @@ input chunks. The earlier verification note incorrectly described all three coun
 as zero; the existing tests already assert the correct counts. No additional
 behavior change or duplicate test is needed.
 
-Validation rerun for this bucket at `911402c`:
+Validation rerun for this bucket at `40208fa`:
 
 - `run_oracle(inputs = "bucket:7f8795fb")`: 3/3 pass.
 - `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs
@@ -249,5 +252,6 @@ Validation rerun for this bucket at `911402c`:
   pre-existing unused-assignment warning in host-owned `grammars/yaml/src/lex.rs:20`.
   That generated file is outside this bucket and was left unchanged.
 
-This follow-up only records verification; no C deviations, unsafe code, or
+The bucket and its regression coverage were already resolved at this revision,
+so this follow-up only records verification; no C deviations, unsafe code, or
 host-owned generated-file changes were introduced.
