@@ -2,6 +2,7 @@
 //! consumed-prefix length and -1 lookahead, rather than replacement characters.
 pub(crate) const DECODE_ERROR: i32 = -1;
 
+#[inline]
 pub(crate) fn ts_decode_utf8(input: &[u8]) -> (u32, i32) {
     let Some(&lead) = input.first() else {
         // C's U8_NEXT requires nonempty input. Avoid an out-of-bounds read if a
@@ -12,6 +13,13 @@ pub(crate) fn ts_decode_utf8(input: &[u8]) -> (u32, i32) {
         return (1, i32::from(lead));
     }
 
+    decode_utf8_non_ascii(input, lead)
+}
+
+// Separate the multi-byte decoder so callers can inline ASCII decoding without
+// duplicating Unicode validation at each call site.
+#[inline(never)]
+fn decode_utf8_non_ascii(input: &[u8], lead: u8) -> (u32, i32) {
     let (width, mut code_point, second_min, second_max) = match lead {
         0xc2..=0xdf => (2, i32::from(lead & 0x1f), 0x80, 0xbf),
         0xe0 => (3, 0, 0xa0, 0xbf),
