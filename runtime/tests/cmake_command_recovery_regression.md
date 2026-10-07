@@ -55,9 +55,10 @@ scanners. All 7 bucket, 270 gate, and 9878 fresh inputs still pass; both integra
 tests, all 24 CMake crate tests, workspace checking, and targeted clippy pass
 (the same host-owned YAML warning remains unchanged).
 
-## Revalidation at `69f98e0`
+## Latest revalidation at `953cb2d`
 
-The assigned bucket already passes on this merged baseline. Comparing the Rust
+The assigned bucket still passes on this merged baseline (also verified previously
+at `69f98e0`). Comparing the Rust
 scanner with the current C source confirms the zero-valued initialization and
 whole-state reset described above are present and correct. Existing integration
 coverage already checks the five smallest reported inputs with fresh and reused

@@ -1,6 +1,6 @@
 # CMake backslash/NUL recovery (bucket `9a8ee9c6`)
 
-Reverified at starting revision `4652584` (after the latest main merge).
+Reverified at starting revision `5a85386` (after the latest main merge).
 The reported 113-byte input,
 `Tests/RunCMake/Syntax/NullAfterBackslash.cmake`, already passes with the merged
 CMake scanner correction; no additional runtime or scanner change is needed.
@@ -31,6 +31,9 @@ progress callback once.
   advance/mark callback across the embedded NUL, before and after reset.
 
 ## Verification
+
+All checks below were rerun at this revision. The bucket passed before any
+changes, and the existing scanner and parser regressions passed unchanged.
 
 - Bucket oracle: **1/1 passes** (queries enabled).
 - All CMake oracle inputs: **270/270 gate** (incremental and query checks),
