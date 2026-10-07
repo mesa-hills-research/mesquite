@@ -125,3 +125,34 @@ Checks rerun for this bucket:
 
 This follow-up only records verification; it adds no C deviations, unsafe code,
 or generated-file changes.
+
+## Unterminated-call bucket `7f8795fb`
+
+Reverified at `ad767ee`: all three reported inputs already pass with the merged
+scanner initialization/reset correction above. The current C scanner uses
+`ts_calloc` and clears both fields on empty or invalid-length snapshots, matching
+the Rust implementation. This allows recovery content without an opener:
+zero-width content at EOF in `UnterminatedCall1.cmake` and
+`UnterminatedCall2.cmake`, and content through the embedded NUL and remaining
+input in `NullTerminatedArgument.cmake`. An inert initial token instead produced
+`source_file` roots with missing delimiters rather than the reference `ERROR`.
+
+Existing `cmake_unterminated_call_recovery` integration tests cover all three
+inputs, asserting root/content kinds, flags, byte/point ranges, and zero progress
+callbacks. They exercise fresh and reused scanners with both whole-source and
+one-byte input chunks. No additional behavior change or duplicate test is needed.
+
+Validation rerun for this bucket:
+
+- `run_oracle(inputs = "bucket:7f8795fb")`: 3/3 pass.
+- `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs
+  (including incremental and query checks) and 9878/9878 fresh inputs pass.
+- `cargo check --workspace --all-targets`: passes, with only the existing warning
+  in host-owned `grammars/yaml/src/lex.rs:20` noted above.
+- `cargo test -p ts_port_cmake`: 24 tests pass.
+- `cargo test -p ts_port`: all unit and integration tests pass, including the
+  three `cmake_unterminated_call_recovery` tests (also run separately).
+- `cargo clippy -p ts_port -p ts_port_cmake --all-targets -- -D warnings`: passes.
+
+This follow-up only records verification; no C deviations, unsafe code, or
+host-owned generated-file changes were introduced.
