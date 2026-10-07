@@ -255,6 +255,10 @@ struct TagStack {
     depth: usize,
     // Names that require truncation or strncpy's NUL padding on serialization.
     noncanonical_names: usize,
+    // Name/implicit-end scans repeatedly inspect the same parent. Cache its
+    // type so those reads do not decode the packed tail and custom index again.
+    // Push knows the type; pop and restore refresh it after changing the stack.
+    top_kind: Option<TagType>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -279,23 +283,34 @@ impl TagStack {
         self.custom.clear();
         self.depth = 0;
         self.noncanonical_names = 0;
+        self.top_kind = None;
+    }
+
+    fn refresh_top_kind(&mut self) {
+        self.top_kind = if self.is_empty() {
+            None
+        } else if self
+            .custom
+            .last()
+            .is_some_and(|tag| tag.depth + 1 == self.depth)
+        {
+            Some(TagType::Custom)
+        } else {
+            Some(TagType::from_byte(*self.bytes.last().unwrap()))
+        };
     }
 
     fn last(&self) -> Option<Tag<'_>> {
-        if self.is_empty() {
-            return None;
-        }
-        if let Some(custom) = self.custom.last().filter(|tag| tag.depth + 1 == self.depth) {
-            Some(Tag {
-                kind: TagType::Custom,
-                custom_tag_name: &self.bytes[custom.start + 2..],
-            })
+        let kind = self.top_kind?;
+        let custom_tag_name = if kind == TagType::Custom {
+            &self.bytes[self.custom.last().unwrap().start + 2..]
         } else {
-            Some(Tag {
-                kind: TagType::from_byte(*self.bytes.last().unwrap()),
-                custom_tag_name: &[],
-            })
-        }
+            &[]
+        };
+        Some(Tag {
+            kind,
+            custom_tag_name,
+        })
     }
 
     fn last_matches_name(&self, name: &[u8]) -> bool {
@@ -330,6 +345,7 @@ impl TagStack {
             self.bytes.push(tag.kind as u8);
         }
         self.depth += 1;
+        self.top_kind = Some(tag.kind);
     }
 
     fn pop(&mut self) {
@@ -348,6 +364,7 @@ impl TagStack {
         } else {
             self.bytes.pop();
         }
+        self.refresh_top_kind();
     }
 
     fn iter(&self) -> impl Iterator<Item = Tag<'_>> {
@@ -491,6 +508,45 @@ fn scan_long_tag_name<'a>(
     }
 }
 
+// A builtin closing name normally matches its parent. Compare directly while
+// advancing; only a mismatching implicit close needs a collected spelling.
+fn scan_builtin_prefix(lexer: &mut dyn Lexer, expected: &[u8], mut c: i32) -> (usize, i32) {
+    for (i, &byte) in expected.iter().enumerate() {
+        let normalized = if byte.is_ascii_uppercase() {
+            c & !0x20
+        } else {
+            c
+        };
+        if normalized != i32::from(byte) {
+            return (i, c);
+        }
+        lexer.advance(false);
+        c = lexer.lookahead();
+    }
+    (expected.len(), c)
+}
+
+#[inline(never)]
+fn scan_name_after_prefix<'a>(
+    lexer: &mut dyn Lexer,
+    long_name: &'a mut Vec<u8>,
+    short_name: &'a mut [u8; 16],
+    prefix: &[u8],
+    mut c: i32,
+) -> &'a [u8] {
+    short_name[..prefix.len()].copy_from_slice(prefix);
+    for i in prefix.len()..short_name.len() {
+        let byte = TAG_NAME_CHARS.get(c as usize).copied().unwrap_or(0);
+        if byte == 0 {
+            return &short_name[..i];
+        }
+        short_name[i] = byte;
+        lexer.advance(false);
+        c = lexer.lookahead();
+    }
+    scan_long_tag_name(lexer, long_name, short_name, c)
+}
+
 fn scan_comment(lexer: &mut dyn Lexer) -> bool {
     if lexer.lookahead() != i32::from(b'-') {
         return false;
@@ -581,7 +637,31 @@ impl Scanner {
         }
 
         let mut short_name = [0; 16];
-        let name = scan_tag_name(lexer, &mut self.long_tag_name, &mut short_name, c);
+        let expected = if is_closing_tag {
+            self.tags
+                .last()
+                .filter(|tag| tag.kind != TagType::Custom)
+                .map_or(&[][..], |tag| tag.kind.name())
+        } else {
+            &[][..]
+        };
+        let name = if expected.is_empty() {
+            scan_tag_name(lexer, &mut self.long_tag_name, &mut short_name, c)
+        } else {
+            let (prefix, next) = scan_builtin_prefix(lexer, expected, c);
+            if prefix == expected.len()
+                && TAG_NAME_CHARS.get(next as usize).copied().unwrap_or(0) == 0
+            {
+                return false;
+            }
+            scan_name_after_prefix(
+                lexer,
+                &mut self.long_tag_name,
+                &mut short_name,
+                &expected[..prefix],
+                next,
+            )
+        };
         if name.is_empty() && !lexer.eof() {
             return false;
         }
@@ -631,6 +711,32 @@ impl Scanner {
     }
 
     fn scan_end_tag_name(&mut self, lexer: &mut dyn Lexer, c: i32) -> bool {
+        let expected = self
+            .tags
+            .last()
+            .filter(|tag| tag.kind != TagType::Custom)
+            .map_or(&[][..], |tag| tag.kind.name());
+        if !expected.is_empty() {
+            let (prefix, mut next) = scan_builtin_prefix(lexer, expected, c);
+            let mut byte = TAG_NAME_CHARS.get(next as usize).copied().unwrap_or(0);
+            if prefix == 0 && byte == 0 {
+                return false;
+            }
+            let matched = prefix == expected.len() && byte == 0;
+            while byte != 0 {
+                lexer.advance(false);
+                next = lexer.lookahead();
+                byte = TAG_NAME_CHARS.get(next as usize).copied().unwrap_or(0);
+            }
+            if matched {
+                self.tags.pop();
+                lexer.set_result_symbol(END_TAG_NAME as u16);
+            } else {
+                lexer.set_result_symbol(ERRONEOUS_END_TAG_NAME as u16);
+            }
+            return true;
+        }
+
         let mut short_name = [0; 16];
         let name = scan_tag_name(lexer, &mut self.long_tag_name, &mut short_name, c);
         if name.is_empty() {
@@ -819,6 +925,7 @@ impl Scanner {
             TagType::End as u8,
         );
         self.tags.depth = tag_count;
+        self.tags.refresh_top_kind();
     }
 }
 
@@ -1515,6 +1622,128 @@ mod tests {
         assert_eq!(lexer.symbol, END_TAG_NAME as u16);
         assert_eq!(scanner.tags, with_tags(&["DIV"]).tags);
         assert!(!scan(&mut scanner, ">", &[END_TAG_NAME]).0);
+    }
+
+    #[test]
+    fn streamed_builtin_closes_match_collected_names() {
+        for &(parent_name, parent_kind) in TAG_TYPES_BY_TAG_NAME {
+            if parent_kind == TagType::Custom {
+                continue;
+            }
+            let spelling = std::str::from_utf8(parent_name).unwrap();
+            for prefix in [
+                spelling.to_owned(),
+                spelling.to_ascii_lowercase(),
+                spelling[..spelling.len() - 1].to_owned(),
+                String::new(),
+            ] {
+                for suffix in [">", "X>", "-tail>", "é>", "\0>", "\u{11}>"] {
+                    let input = format!("{prefix}{suffix}");
+                    let mut expected = with_tags(&[spelling]);
+                    let mut reference = TestLexer::new(&input);
+                    let mut short = [0; 16];
+                    let c = reference.lookahead();
+                    let name =
+                        scan_tag_name(&mut reference, &mut expected.long_tag_name, &mut short, c);
+                    let accepted = !name.is_empty();
+                    if accepted {
+                        if expected.tags.last_matches_name(name) {
+                            expected.tags.pop();
+                            reference.set_result_symbol(END_TAG_NAME as u16);
+                        } else {
+                            reference.set_result_symbol(ERRONEOUS_END_TAG_NAME as u16);
+                        }
+                    }
+                    let mut actual = with_tags(&[spelling]);
+                    let mut lexer = TestLexer::new(&input);
+                    let c = lexer.lookahead();
+                    assert_eq!(
+                        actual.scan_end_tag_name(&mut lexer, c),
+                        accepted,
+                        "{input:?}"
+                    );
+                    assert_eq!(actual.tags, expected.tags, "{input:?}");
+                    assert_eq!(lexer.position, reference.position, "{input:?}");
+                    assert_eq!(lexer.calls, reference.calls, "{input:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn streamed_implicit_closes_preserve_recovery_and_callbacks() {
+        // C's closing-tag branch, collecting the entire name before deciding
+        // whether it matches the parent or triggers type-based recovery.
+        fn reference(scanner: &mut Scanner, lexer: &mut TestLexer) -> bool {
+            lexer.advance(false); // '/'
+            let c = lexer.lookahead();
+            let mut short = [0; 16];
+            let name = scan_tag_name(lexer, &mut scanner.long_tag_name, &mut short, c);
+            if name.is_empty() && !lexer.eof() {
+                return false;
+            }
+            let next = Tag::for_name(name);
+            if scanner.tags.last() == Some(next) {
+                return false;
+            }
+            if scanner.tags.contains_kind(next.kind) {
+                scanner.tags.pop();
+                lexer.set_result_symbol(IMPLICIT_END_TAG as u16);
+                return true;
+            }
+            false
+        }
+
+        let mut parents: Vec<_> = TAG_TYPES_BY_TAG_NAME
+            .iter()
+            .map(|&(name, _)| Tag::for_name(name))
+            .collect();
+        parents.extend([
+            Tag::default(),
+            Tag {
+                kind: TagType::EndOfVoidTags,
+                custom_tag_name: &[],
+            },
+            Tag {
+                kind: TagType::Custom,
+                custom_tag_name: b"DIV",
+            },
+            Tag::for_name(b"X-CUSTOM"),
+        ]);
+        let long_tail = "-long".repeat(60);
+        for parent in parents {
+            let spelling = if parent.kind == TagType::Custom {
+                parent.custom_tag_name
+            } else {
+                parent.kind.name()
+            };
+            let spelling = std::str::from_utf8(spelling).unwrap();
+            for length in 0..=spelling.len() {
+                let prefix = spelling[..length].to_ascii_lowercase();
+                for suffix in ["", ">", "X>", "é>", "\0>", "\u{11}>", &long_tail] {
+                    let input = format!("/{prefix}{suffix}");
+                    let make_scanner = || Scanner {
+                        tags: [Tag::for_name(b"X-ROOT"), Tag::for_name(b"DIV"), parent]
+                            .into_iter()
+                            .collect(),
+                        ..Scanner::default()
+                    };
+                    let mut expected = make_scanner();
+                    let mut reference_lexer = TestLexer::new(&input);
+                    let accepted = reference(&mut expected, &mut reference_lexer);
+                    let mut actual = make_scanner();
+                    let mut lexer = TestLexer::new(&input);
+                    assert_eq!(
+                        actual.scan_implicit_end_tag(&mut lexer, i32::from(b'/')),
+                        accepted,
+                        "parent={parent:?}, input={input:?}",
+                    );
+                    assert_eq!(actual.tags, expected.tags, "{input:?}");
+                    assert_eq!(lexer.position, reference_lexer.position, "{input:?}");
+                    assert_eq!(lexer.calls, reference_lexer.calls, "{input:?}");
+                }
+            }
+        }
     }
 
     #[test]
