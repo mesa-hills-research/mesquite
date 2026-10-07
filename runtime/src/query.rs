@@ -237,20 +237,26 @@ pub(crate) struct CursorConfig {
     pub end_point: Point,
     pub timeout_duration: DurationMicros,
     pub did_exceed_match_limit: bool,
-    /// One capacity per allocated capture-list slot, saved when execution drops.
-    pub capture_list_layout: Vec<usize>,
+    /// Full pool slot count, updated by prepare_to_capture on each acquisition.
+    /// It persists even if execution stops early or the match limit is lowered.
+    pub allocated_capture_list_count: u32,
+    /// States contain ids, not borrowed nodes. Mutate these Vecs in place through
+    /// QueryExecution.config and clear them on exec; do not move them out.
     pub states: Vec<QueryState>,
     pub finished_states: Vec<QueryState>,
 }
 
 /// Borrowed half of TSQueryCursor. No query/tree/callback reference is stored in
-/// the persistent public cursor. Settings and limit status live in `config`.
+/// the persistent public cursor. Settings, states and limit status live in `config`.
+///
+/// Do not implement Drop here (or on another wrapper borrowing the cursor).
+/// Drop checking would keep the exclusive cursor borrow live until scope exit,
+/// rejecting binding-compatible access to the cursor after the iterator's last use.
+/// Persist bookkeeping as execution runs; implicit field drop needs no write-back.
 pub(crate) struct QueryExecution<'query, 'tree: 'query> {
     pub config: &'query mut CursorConfig,
     pub query: &'query CompiledQuery,
     pub cursor: TreeCursor<'tree>,
-    pub states: Vec<QueryState>,
-    pub finished_states: Vec<QueryState>,
     pub capture_list_pool: CaptureListPool<'tree>,
     pub depth: u32,
     pub next_state_id: u32,

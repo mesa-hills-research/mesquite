@@ -247,7 +247,7 @@ skeleton: do not replace dependencies with permissive matching approximations.
 | query-1 | `src/query.rs` | Shared types; stream, capture pool, quantifiers, symbol table, steps, analysis helpers, pattern-map search (52 C functions) |
 | query-2 | `src/query_analysis.rs` | Pattern-map insert, parse-table analysis and guaranteed-step inference (3) |
 | query-3 | `src/query_parse.rs` | Negated fields and recursive S-expression/predicate/string parsing (4) |
-| query-4 | `src/query_access.rs` | Compile/finalize/access/disable; cursor initialization, settings, state/capture preparation (33), plus execution scratch handoff |
+| query-4 | `src/query_access.rs` | Compile/finalize/access/disable; cursor initialization, settings, state/capture preparation and persistent pool accounting (33) |
 | query-5 | `src/query_exec.rs` | Capture, state splitting, descent and the matching state machine (4) |
 | query-6 | `src/query_iter.rs` | Next match/capture, removal and maximum-start-depth setting (4) |
 | query-api | `src/query_api.rs` | Public binding, metadata/predicate validation, streaming/filtering, options and storage adapters |
@@ -309,18 +309,32 @@ C's TSQueryCursor is split to avoid storing borrowed trees/queries/callbacks in 
 lifetime-free public cursor:
 
 * `CursorConfig` persists ranges, timeout duration, maximum start depth, match
-  limit, exceeded-limit flag and idle scratch buffers. `QueryExecution<'query,
-  'tree>` borrows that config and the compiled query, owns a TreeCursor borrowing
-  the tree, owns active/finished states and a typed `CaptureListPool<'tree>`, and
-  owns `QueryCursorOptions<'query>`. The public iterators own this execution.
+  limit, exceeded-limit flag, allocated pool slot count and active/finished state
+  Vecs. QueryState contains only ids and scalars, so these Vecs need no tree
+  lifetime: mutate `execution.config.states` / `finished_states` in place, and
+  clear (not move out) on exec to retain capacity. `QueryExecution<'query, 'tree>`
+  borrows that config and the compiled query, owns a TreeCursor borrowing the
+  tree, a typed `CaptureListPool<'tree>` and `QueryCursorOptions<'query>`. The
+  public iterators own this execution.
 * query-4's exec functions construct the borrowed execution instead of mutating a
-  pointer-bearing persistent object. Move/clear idle state Vecs with mem::take.
-  Rebuild pool slots from `config.capture_list_layout`, one saved capacity per
-  previously allocated slot, all reset as C does. QueryExecution::drop records
-  **all** pool slot capacities and moves cleared state Vecs back to config. This
-  deliberately trades allocation reuse across executions for safe node lifetimes;
-  slot count, id order and match-limit behavior must survive execution boundaries.
-  In particular, lowering a limit does not revoke existing free pool slots.
+  pointer-bearing persistent object. Rebuild the typed pool with exactly
+  `config.allocated_capture_list_count` empty slots, all reset as C does. The
+  execution's only pool-acquire call site, `prepare_to_capture`, must write the
+  pool's full `list.len() as u32` into that count immediately after acquisition,
+  even on a NONE/truncated returned id. Never infer the slot count from the id.
+  This deliberately trades capture-buffer allocation reuse across executions for
+  safe node lifetimes; slot count, id order and match-limit behavior still survive
+  early abandonment and execution boundaries. Lowering a limit does not revoke
+  existing free pool slots.
+* **Do not add Drop to QueryExecution or another wrapper borrowing the cursor.**
+  Its destructor would extend the cursor's exclusive borrow until lexical scope
+  exit. The official binding (and the oracle) permits reading
+  `cursor.did_exceed_match_limit()` or starting a new execution after the previous
+  iterator's last use, without explicitly dropping it or adding a nested scope.
+  State Vecs and flags already live in config, and pool accounting updates while
+  the engine runs; there is no deferred write-back. Implicit field destruction
+  only frees owned buffers and never accesses the cursor/query/tree/callback
+  references. Do not use unsafe pointers or `may_dangle` to evade this constraint.
 * Pool slots contain a Vec and `in_use` instead of setting Vec.len to UINT32_MAX.
   Release retains data/capacity and marks unused; acquire clears it. Keep C's
   first-free-slot search, free_capture_list_count updates and u16 casts of pool

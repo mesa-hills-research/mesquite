@@ -143,3 +143,50 @@ fn move_match<'query, 'tree: 'query>(
 ) -> QueryMatch<'query, 'tree> {
     std::mem::replace(matches.get_mut().unwrap(), replacement)
 }
+
+// The oracle reads the limit flag without an explicit iterator drop or nested
+// scope. Like the binding, iterators must release borrows at their last use.
+fn cursor_reborrow_after_last_use(query: &Query, root: Node<'_>, source: &[u8]) {
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(query, root, source);
+    while let Some(found) = matches.next() {
+        for capture in found.captures {
+            let _ = capture.node.byte_range();
+        }
+    }
+    let exceeded = cursor.did_exceed_match_limit();
+    cursor.set_match_limit(32);
+    let mut captures = cursor.captures(query, root, source);
+    while let Some((found, index)) = captures.next() {
+        let _ = found.captures[*index].node.byte_range();
+    }
+    let _: bool = exceeded || cursor.did_exceed_match_limit();
+}
+
+// Last use, not exhaustion, ends the borrow. Early abandonment and borrowed
+// callbacks must also work without adding a scope or explicit drop.
+fn options_reborrow_after_last_use(query: &Query, root: Node<'_>, source: &[u8]) {
+    let mut cursor = QueryCursor::new();
+    let mut calls = 0;
+    let mut callback = |_: &QueryCursorState| {
+        calls += 1;
+        false
+    };
+    let mut matches = cursor.matches_with_options(
+        query,
+        root,
+        source,
+        QueryCursorOptions::new().progress_callback(&mut callback),
+    );
+    let _ = matches.next();
+    let _: bool = cursor.did_exceed_match_limit();
+    let mut captures = cursor.captures_with_options(
+        query,
+        root,
+        source,
+        QueryCursorOptions::new().progress_callback(&mut callback),
+    );
+    let _ = captures.next();
+    let _: bool = cursor.did_exceed_match_limit();
+    let _: usize = calls;
+}

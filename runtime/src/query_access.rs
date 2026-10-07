@@ -168,18 +168,15 @@ pub(crate) fn ts_query_cursor__add_state(
     todo!("query-4: ts_query_cursor__add_state")
 }
 
+// This is the execution's only capture_list_pool_acquire call site. Record the
+// pool's full slot count in config.allocated_capture_list_count immediately after
+// acquisition, even when a returned u16 id is NONE or truncated. Do not defer
+// persistence to a destructor: a new execution can start after the old iterator's
+// last use but before its lexical scope ends.
 pub(crate) fn ts_query_cursor__prepare_to_capture<'a, 'query, 'tree: 'query>(
     cursor: &'a mut QueryExecution<'query, 'tree>,
     state: &mut QueryState,
     state_index_to_preserve: u32,
 ) -> Option<&'a mut CaptureList<'tree>> {
     todo!("query-4: ts_query_cursor__prepare_to_capture")
-}
-
-// Return lifetime-free scratch storage to the persistent cursor. Never retain
-// tree or callback references; record *every* capture pool slot, even if unused.
-impl Drop for QueryExecution<'_, '_> {
-    fn drop(&mut self) {
-        todo!("query-4: QueryExecution::drop (execution scratch handoff)")
-    }
 }
