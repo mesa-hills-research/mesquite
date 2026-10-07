@@ -348,8 +348,8 @@ fn reserved_words_stop_at_zero_after_comparing() {
 fn table_actions_and_successors() {
     let language = &*LANGUAGE;
     let entry = ts_language_table_entry(language, 0, 1);
-    assert!(entry.is_reusable);
-    assert_eq!(entry.actions.len(), 2);
+    assert!(entry.is_reusable());
+    assert_eq!(entry.actions().len(), 2);
     assert!(ts_language_has_reduce_action(language, 0, 1));
     assert_eq!(ts_language_next_state(language, 0, 1), 2);
     // Only the first action matters for has_reduce; only the last for next_state.
@@ -364,11 +364,11 @@ fn table_actions_and_successors() {
     assert_eq!(ts_language_lookup(language, 2, 0), 0);
     assert!(!ts_language_has_actions(language, 2, 0));
     assert!(ts_language_has_actions(language, 2, 1));
-    assert!(ts_language_table_entry(language, 1, 0).actions.is_empty());
+    assert!(ts_language_table_entry(language, 1, 0).actions().is_empty());
     for symbol in [BUILTIN_SYM_ERROR, BUILTIN_SYM_ERROR_REPEAT] {
         let entry = ts_language_table_entry(language, StateId::MAX, symbol);
-        assert!(entry.actions.is_empty());
-        assert!(!entry.is_reusable);
+        assert!(entry.actions().is_empty());
+        assert!(!entry.is_reusable());
         assert_eq!(ts_language_next_state(language, StateId::MAX, symbol), 0);
     }
 }
@@ -549,6 +549,24 @@ fn all_grammar_states_agree_between_lookup_and_iteration() {
                     assert_eq!(cache.lookup(&language, state, symbol as Symbol), value);
                 }
             }
+            // Compare the thin header-backed handle with the independently
+            // decoded host action run for every terminal in every state.
+            for (symbol, &value) in expected
+                .iter()
+                .enumerate()
+                .take(tables.token_count as usize)
+            {
+                let entry = cache.table_entry(&language, state, symbol as Symbol);
+                let (reusable, actions) = tables.action_list(value as usize);
+                assert_eq!(
+                    entry.actions(), actions,
+                    "{name} state {state} symbol {symbol}"
+                );
+                assert_eq!(
+                    entry.is_reusable(), reusable,
+                    "{name} state {state} symbol {symbol}"
+                );
+            }
             let mut iterator = ts_language_lookaheads(&language, state);
             for symbol in expected_order {
                 assert!(
@@ -594,14 +612,14 @@ fn parse_table_cache_clears_on_language_change() {
                 if u32::from(symbol) < language.tables.token_count {
                     let cached = cache.table_entry(language, state, symbol);
                     let expected = ts_language_table_entry(language, state, symbol);
-                    assert_eq!(cached.actions, expected.actions);
-                    assert_eq!(cached.is_reusable, expected.is_reusable);
+                    assert_eq!(cached.actions(), expected.actions());
+                    assert_eq!(cached.is_reusable(), expected.is_reusable());
                 }
             }
         }
         for symbol in [BUILTIN_SYM_ERROR, BUILTIN_SYM_ERROR_REPEAT] {
             assert_eq!(cache.next_state(language, StateId::MAX, symbol), 0);
-            assert!(cache.table_entry(language, StateId::MAX, symbol).actions.is_empty());
+            assert!(cache.table_entry(language, StateId::MAX, symbol).actions().is_empty());
         }
     }
 }
@@ -621,4 +639,50 @@ fn parser_setting_language_invalidates_parse_table_cache() {
     assert!(ts_parser_set_language(&mut parser, None));
     assert!(ts_parser_set_language(&mut parser, Some(language)));
     assert_eq!(parser.parse_table_cache.lookup(language, 2, 2), 6);
+}
+
+#[test]
+fn table_entry_borrows_its_header_without_widening_the_handle() {
+    assert_eq!(size_of::<TableEntry>(), size_of::<&[ParseActionEntry]>());
+    let empty = TableEntry::default();
+    assert!(empty.actions().is_empty());
+    assert!(!empty.is_reusable());
+
+    for index in [0, 1, 3, 6, 8, 10, 12] {
+        let entry = TableEntry::new(&LANGUAGE, index);
+        let (reusable, actions) = LANGUAGE.tables.action_list(index as usize);
+        assert_eq!(entry.actions(), actions);
+        assert_eq!(entry.is_reusable(), reusable);
+        assert!(std::ptr::eq(entry.actions(), actions));
+    }
+}
+
+#[test]
+fn parse_table_cache_checks_full_keys_and_caches_zero_values() {
+    // The raw lookup accepts every u16 state/symbol pair in compressed rows.
+    // In particular (MAX, MAX) needs the 33rd bit of the nonzero cache key.
+    let mut tables = LANGUAGE.tables.clone();
+    tables.state_count = u32::from(StateId::MAX) + 1;
+    tables.large_state_count = 0;
+    tables.symbol_count = u32::from(Symbol::MAX) + 1;
+    tables.parse_table.clear();
+    tables.small_parse_table = vec![1, 7, 1, 0, 1, u16::MAX, 2, 0, u16::MAX];
+    tables.small_parse_table_map = vec![0; tables.state_count as usize];
+    tables.small_parse_table_map[0] = 4;
+    tables.small_parse_table_map[StateId::MAX as usize] = 4;
+    let language = leak(tables);
+    let mut cache = ParseTableCache::default();
+
+    // These two distinct keys collide under the cache's state*131+symbol
+    // index. One is an absent symbol, so zero must be cached unambiguously.
+    for _ in 0..3 {
+        assert_eq!(cache.lookup(&language, 0, 131), 0);
+        assert_eq!(cache.lookup(&language, 0, 131), 0);
+        assert_eq!(cache.lookup(&language, 1, 0), 7);
+        assert_eq!(cache.lookup(&language, 1, 131), 0);
+        assert_eq!(cache.lookup(&language, 0, 0), u16::MAX);
+        assert_eq!(cache.lookup(&language, StateId::MAX, Symbol::MAX), u16::MAX);
+        assert_eq!(cache.lookup(&language, StateId::MAX, Symbol::MAX), u16::MAX);
+        cache.clear();
+    }
 }
