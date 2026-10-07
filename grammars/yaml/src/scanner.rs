@@ -643,8 +643,8 @@ impl Scanner {
         self.finish(lexer, result_symbol)
     }
 
-    // Select the context once: block scalars only need the character-range
-    // test, whereas flow scalars must also exclude collection delimiters.
+    // Select the context once: only flow scalars exclude collection delimiters
+    // from their content runs.
     fn scn_pln_cnt(&mut self, lexer: &mut dyn Lexer, is_in_blk: bool) -> ScanResult {
         if self.sch_stt == SCH_STT_FRZ && self.rlt_sch == ResultSchema::String {
             return if is_in_blk {
@@ -660,28 +660,27 @@ impl Scanner {
         }
     }
 
-    // A frozen string has no more schema transitions. Decode each ASCII
-    // character's content role once, sharing it with the next loop iteration.
+    // A frozen string has no more schema transitions. Classify content with a
+    // compact ASCII role table; only run boundaries need the outer dispatch.
+    // Do not keep a role live across mark_end: leave registers for the lexer
+    // and coordinates in the content run instead.
     #[inline(never)]
     fn scn_pln_string<const BLOCK: bool>(&mut self, lexer: &mut dyn Lexer) -> ScanResult {
-        let mut kind = plain_kind::<BLOCK>(self.lookahead);
-        if kind == 0 {
+        if plain_kind::<BLOCK>(self.lookahead) == 0 {
             return ScanResult::Stop;
         }
         let mut previous_safe =
             self.lookahead != i32::from(b'#') || plain_kind::<BLOCK>(self.cur_chr) >= 2;
         loop {
-            match kind {
+            match plain_kind::<BLOCK>(self.lookahead) {
                 0 => break,
                 1 => {
                     self.adv(lexer);
-                    kind = plain_kind::<BLOCK>(self.lookahead);
                     previous_safe = false;
                 }
                 2 => {
                     self.adv(lexer);
-                    kind = plain_kind::<BLOCK>(self.lookahead);
-                    if kind < 2 {
+                    if plain_kind::<BLOCK>(self.lookahead) < 2 {
                         return ScanResult::Fail;
                     }
                     self.mrk_end(lexer);
@@ -695,8 +694,7 @@ impl Scanner {
                         col = col.wrapping_add(1);
                         lexer.advance(false);
                         let next = lexer.lookahead();
-                        kind = plain_kind::<BLOCK>(next);
-                        if kind < 3 {
+                        if plain_kind::<BLOCK>(next) < 3 {
                             self.cur_col = col;
                             self.cur_chr = c;
                             self.lookahead = next;
@@ -745,25 +743,11 @@ impl Scanner {
                     }
                     loop {
                         if self.sch_stt == SCH_STT_FRZ {
-                            // Content cannot be a schema terminator. Once frozen,
-                            // this entire run is a string, even if the preceding
-                            // whitespace froze a typed scalar.
+                            // Ordinary content cannot be a schema terminator.
+                            // It makes a frozen typed scalar a string, too, so
+                            // hand the remaining content to the schema-free loop.
                             self.rlt_sch = ResultSchema::String;
-                            let mut c = self.lookahead;
-                            let mut col = self.cur_col;
-                            loop {
-                                col = col.wrapping_add(1);
-                                lexer.advance(false);
-                                let next = lexer.lookahead();
-                                if !is_plain_run(next, is_in_blk) {
-                                    self.cur_col = col;
-                                    self.cur_chr = c;
-                                    self.lookahead = next;
-                                    break;
-                                }
-                                c = next;
-                            }
-                            break;
+                            return self.scn_pln_string::<IS_IN_BLK>(lexer);
                         }
                         self.adv(lexer);
                         self.sch_stt =
@@ -1023,21 +1007,16 @@ impl ExternalScanner for Scanner {
             (false, 0)
         };
 
-        let allow_comment: bool = !(valid_symbols[R_DQT_STR_CTN]
-            || valid_symbols[BR_DQT_STR_CTN]
-            || valid_symbols[R_SQT_STR_CTN]
-            || valid_symbols[BR_SQT_STR_CTN]);
         let current = self.current_indent();
         let cur_ind = current.length;
-        let prt_ind = self
-            .indents
-            .iter()
-            .rev()
-            .nth(1)
-            .map_or(-1, |&indent| Indent::from_bytes(indent).length);
         let cur_ind_typ = current.kind;
 
-        if allow_comment && self.lookahead == i32::from(b'#') {
+        if self.lookahead == i32::from(b'#')
+            && !(valid_symbols[R_DQT_STR_CTN]
+                | valid_symbols[BR_DQT_STR_CTN]
+                | valid_symbols[R_SQT_STR_CTN]
+                | valid_symbols[BR_SQT_STR_CTN])
+        {
             if valid_symbols[BR_BLK_STR_CTN] && valid_symbols[BL] && self.cur_col <= cur_ind {
                 if !self.pop_ind() {
                     return false;
@@ -1073,31 +1052,111 @@ impl ExternalScanner for Scanner {
             return false;
         }
 
-        let bgn_row: i16 = self.cur_row;
         let bgn_col: i16 = self.cur_col;
-        let bgn_chr: i32 = self.lookahead;
 
-        if valid_symbols[BL]
-            && bgn_col <= cur_ind
-            && !has_tab_ind
-            && if cur_ind == prt_ind && cur_ind_typ == IND_SEQ {
+        if valid_symbols[BL] && bgn_col <= cur_ind && !has_tab_ind && {
+            let prt_ind = self
+                .indents
+                .iter()
+                .rev()
+                .nth(1)
+                .map_or(-1, |&indent| Indent::from_bytes(indent).length);
+            if cur_ind == prt_ind && cur_ind_typ == IND_SEQ {
                 bgn_col < cur_ind || self.lookahead != i32::from(b'-')
             } else {
                 bgn_col <= prt_ind || cur_ind_typ == IND_STR
             }
-        {
+        } {
             if !self.pop_ind() {
                 return false;
             }
             return self.finish(lexer, BL);
         }
 
-        let has_nwl: bool = self.cur_row > self.row;
-        let is_r: bool = !has_nwl;
-        let is_br: bool = has_nwl && leading_spaces > cur_ind;
-        let is_b: bool = has_nwl && leading_spaces == cur_ind && !has_tab_ind;
-        let is_s: bool = bgn_col == 0;
+        let has_nwl = self.cur_row > self.row;
+        if !has_nwl {
+            self.scan_tokens::<0>(lexer, valid_symbols, has_tab_ind)
+        } else if leading_spaces > cur_ind {
+            self.scan_tokens::<1>(lexer, valid_symbols, has_tab_ind)
+        } else if leading_spaces == cur_ind && !has_tab_ind {
+            self.scan_tokens::<2>(lexer, valid_symbols, has_tab_ind)
+        } else {
+            self.scan_tokens::<3>(lexer, valid_symbols, has_tab_ind)
+        }
+    }
 
+    fn serialize(&mut self, buffer: &mut [u8]) -> usize {
+        let capacity = buffer.len().min(SERIALIZATION_BUFFER_SIZE);
+        if capacity < 10 {
+            return 0;
+        }
+        let mut size = 0;
+        for value in [
+            self.row,
+            self.col,
+            self.blk_imp_row,
+            self.blk_imp_col,
+            self.blk_imp_tab,
+        ] {
+            buffer[size..size + 2].copy_from_slice(&value.to_ne_bytes());
+            size += 2;
+        }
+        // C checks only size < 1024 and can write a final pair at 1022,
+        // overrunning its buffer by two bytes. Keep complete pairs within
+        // the supplied buffer; all defined C serializations are identical.
+        let indents = &self.indents;
+        let count = indents.len().min((capacity - size) / 4);
+        let bytes = indents[..count].as_flattened();
+        buffer[size..size + bytes.len()].copy_from_slice(bytes);
+        size + bytes.len()
+    }
+
+    fn deserialize(&mut self, buffer: &[u8]) {
+        self.indents.clear();
+        if buffer.is_empty() {
+            self.row = 0;
+            self.col = 0;
+            self.blk_imp_row = -1;
+            self.blk_imp_col = -1;
+            self.blk_imp_tab = 0;
+        } else {
+            assert!(buffer.len() >= 10 && (buffer.len() - 10).is_multiple_of(4));
+            let mut values = buffer
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|bytes| i16::from_ne_bytes([bytes[0], bytes[1]]));
+            self.row = values.next().unwrap();
+            self.col = values.next().unwrap();
+            self.blk_imp_row = values.next().unwrap();
+            self.blk_imp_col = values.next().unwrap();
+            self.blk_imp_tab = values.next().unwrap();
+            self.indents
+                .extend_from_slice(buffer[10..].as_chunks::<4>().0);
+        }
+    }
+}
+
+impl Scanner {
+    // R/BR/B are mutually exclusive. Select the positional variant once so
+    // token dispatch does not load and combine irrelevant token flags.
+    #[inline(always)]
+    fn scan_tokens<const POSITION: u8>(
+        &mut self,
+        lexer: &mut dyn Lexer,
+        valid_symbols: &[bool; ERR_REC + 1],
+        has_tab_ind: bool,
+    ) -> bool {
+        let is_r = POSITION == 0;
+        let is_br = POSITION == 1;
+        let is_b = POSITION == 2;
+        let bgn_row = self.cur_row;
+        let bgn_col = self.cur_col;
+        let bgn_chr = self.lookahead;
+        let is_s = bgn_col == 0;
+        let current = self.current_indent();
+        let cur_ind = current.length;
+        let cur_ind_typ = current.kind;
         if valid_symbols[R_DIR_YML_VER] && is_r {
             return self.scn_dir_yml_ver(lexer, R_DIR_YML_VER);
         }
@@ -1615,59 +1674,6 @@ impl ExternalScanner for Scanner {
         !valid_symbols[ERR_REC]
     }
 
-    fn serialize(&mut self, buffer: &mut [u8]) -> usize {
-        let capacity = buffer.len().min(SERIALIZATION_BUFFER_SIZE);
-        if capacity < 10 {
-            return 0;
-        }
-        let mut size = 0;
-        for value in [
-            self.row,
-            self.col,
-            self.blk_imp_row,
-            self.blk_imp_col,
-            self.blk_imp_tab,
-        ] {
-            buffer[size..size + 2].copy_from_slice(&value.to_ne_bytes());
-            size += 2;
-        }
-        // C checks only size < 1024 and can write a final pair at 1022,
-        // overrunning its buffer by two bytes. Keep complete pairs within
-        // the supplied buffer; all defined C serializations are identical.
-        let indents = &self.indents;
-        let count = indents.len().min((capacity - size) / 4);
-        let bytes = indents[..count].as_flattened();
-        buffer[size..size + bytes.len()].copy_from_slice(bytes);
-        size + bytes.len()
-    }
-
-    fn deserialize(&mut self, buffer: &[u8]) {
-        self.indents.clear();
-        if buffer.is_empty() {
-            self.row = 0;
-            self.col = 0;
-            self.blk_imp_row = -1;
-            self.blk_imp_col = -1;
-            self.blk_imp_tab = 0;
-        } else {
-            assert!(buffer.len() >= 10 && (buffer.len() - 10).is_multiple_of(4));
-            let mut values = buffer
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|bytes| i16::from_ne_bytes([bytes[0], bytes[1]]));
-            self.row = values.next().unwrap();
-            self.col = values.next().unwrap();
-            self.blk_imp_row = values.next().unwrap();
-            self.blk_imp_col = values.next().unwrap();
-            self.blk_imp_tab = values.next().unwrap();
-            self.indents
-                .extend_from_slice(buffer[10..].as_chunks::<4>().0);
-        }
-    }
-}
-
-impl Scanner {
     fn scn_dir_tag_pfx(&mut self, lexer: &mut dyn Lexer, result_symbol: usize) -> bool {
         if self.lookahead == i32::from(b'!') {
             self.adv(lexer);
@@ -3118,6 +3124,49 @@ mod tests {
                     plain_kind::<false>(c)
                 };
                 assert_eq!(actual, expected, "codepoint {c:#x}, block={block}");
+            }
+        }
+    }
+
+    #[test]
+    fn positional_dispatch_keeps_r_br_b_and_invalid_context_distinct() {
+        let families = [
+            ('[', [R_FLW_SEQ_BGN, BR_FLW_SEQ_BGN, B_FLW_SEQ_BGN]),
+            (']', [R_FLW_SEQ_END, BR_FLW_SEQ_END, B_FLW_SEQ_END]),
+            ('{', [R_FLW_MAP_BGN, BR_FLW_MAP_BGN, B_FLW_MAP_BGN]),
+            ('}', [R_FLW_MAP_END, BR_FLW_MAP_END, B_FLW_MAP_END]),
+            ('"', [R_DQT_STR_BGN, BR_DQT_STR_BGN, B_DQT_STR_BGN]),
+            ('\'', [R_SQT_STR_BGN, BR_SQT_STR_BGN, B_SQT_STR_BGN]),
+        ];
+        let contexts = [
+            ("", 2, 0, Some(0)),
+            ("\n   ", 2, 0, Some(1)),
+            ("\n  ", 2, 0, Some(2)),
+            ("\n ", 2, 0, None),
+            ("\n \t", 1, 0, None),
+            ("\n \t", 0, 0, Some(1)),
+            // C compares wrapping i16 rows with '>', not inequality.
+            ("\n  ", 2, i16::MAX, Some(0)),
+        ];
+        for (character, symbols) in families {
+            for (prefix, indent, row, expected) in contexts {
+                let mut scanner = scanner();
+                scanner.row = row;
+                scanner.push_ind(IND_MAP, indent);
+                let mut lexer = TestLexer::new(&format!("{prefix}{character}"));
+                let flags = valid(&[symbols[0], symbols[1], symbols[2], ERR_REC]);
+                assert_eq!(scanner.scan(&mut lexer, &flags), expected.is_some());
+                if let Some(mut position) = expected {
+                    // C accepts B closing-delimiter flags but emits BR tokens.
+                    if position == 2 && matches!(character, ']' | '}') {
+                        position = 1;
+                    }
+                    assert_eq!(lexer.symbol, symbols[position] as u16);
+                    assert_eq!(lexer.end, prefix.len() + 1);
+                } else {
+                    assert_eq!(lexer.symbol, u16::MAX);
+                    assert_eq!(lexer.end, 0);
+                }
             }
         }
     }
