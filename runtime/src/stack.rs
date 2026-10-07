@@ -128,16 +128,17 @@ pub(crate) fn stack_node_release(
     node: StackNodeId,
     subtree_pool: &mut SubtreePool,
 ) {
-    // This worklist preserves C's release order: links N-1 through 1,
-    // link 0's subtree, this node, then link 0's predecessor (the tail call).
-    // In particular, a long unbranched stack never grows the worklist.
+    // Preserve C's release order: links N-1 through 1, link 0's subtree,
+    // this node, then link 0's predecessor (the tail call). Shared nodes and
+    // unbranched paths need no worklist allocation at all.
     enum Release {
         Node(StackNodeId),
         Subtree(Subtree),
         Recycle(StackNodeId),
     }
-    let mut pending = vec![Release::Node(node)];
-    while let Some(action) = pending.pop() {
+    let mut pending = Vec::new();
+    let mut action = Release::Node(node);
+    loop {
         match action {
             Release::Subtree(subtree) => ts_subtree_release(subtree_pool, subtree),
             Release::Recycle(node) => arena.free.push(node),
@@ -145,28 +146,44 @@ pub(crate) fn stack_node_release(
                 let data = arena.node_mut(node);
                 assert_ne!(data.ref_count, 0);
                 data.ref_count -= 1;
-                if data.ref_count > 0 {
-                    continue;
-                }
-                let mut data = arena.nodes[node.0].take().expect("live stack node");
-                if let Some(first) = &data.links[0] {
-                    pending.push(Release::Node(first.node));
-                }
-                pending.push(Release::Recycle(node));
-                for (i, link) in data.links[..data.link_count as usize]
-                    .iter_mut()
-                    .enumerate()
-                {
-                    let link = link.take().expect("initialized stack link");
-                    if i > 0 {
-                        pending.push(Release::Node(link.node));
-                    }
-                    if !link.subtree.is_null() {
-                        pending.push(Release::Subtree(link.subtree));
+                if data.ref_count == 0 {
+                    if data.link_count <= 1 {
+                        let first = data.links[0].take();
+                        arena.nodes[node.0] = None;
+                        if let Some(first) = first {
+                            if !first.subtree.is_null() {
+                                ts_subtree_release(subtree_pool, first.subtree);
+                            }
+                            arena.free.push(node);
+                            action = Release::Node(first.node);
+                            continue;
+                        }
+                        arena.free.push(node);
+                    } else {
+                        let mut data = arena.nodes[node.0].take().expect("live stack node");
+                        let first = data.links[0].as_ref().expect("initialized stack link");
+                        pending.push(Release::Node(first.node));
+                        pending.push(Release::Recycle(node));
+                        for (i, link) in data.links[..data.link_count as usize]
+                            .iter_mut()
+                            .enumerate()
+                        {
+                            let link = link.take().expect("initialized stack link");
+                            if i > 0 {
+                                pending.push(Release::Node(link.node));
+                            }
+                            if !link.subtree.is_null() {
+                                pending.push(Release::Subtree(link.subtree));
+                            }
+                        }
                     }
                 }
             }
         }
+        let Some(next) = pending.pop() else {
+            break;
+        };
+        action = next;
     }
     // Vacant arena slots are bookkeeping, not individually allocated C nodes.
     // Keep all of them reusable, as required by the arena ownership contract.
@@ -1404,6 +1421,49 @@ mod stack_1_tests {
         assert_eq!(arena.node(reused).ref_count, 1);
         assert_eq!(arena.node(reused).link_count, 0);
         assert!(arena.node(reused).links.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn branched_release_pools_subtrees_in_c_order() {
+        let heap = |symbol| {
+            let data = Arc::new(SubtreeHeapData {
+                symbol,
+                children: Vec::new(),
+                payload: SubtreePayload::Leaf,
+                ..SubtreeHeapData::default()
+            });
+            (Arc::as_ptr(&data), Subtree::Heap(data))
+        };
+        let mut arena = StackArena::default();
+        let mut pool = ts_subtree_pool_new(32);
+        let base = stack_node_new(&mut arena, None, Subtree::Null, false, 1);
+        let (left_ptr, left_tree) = heap(1);
+        let left = stack_node_new(&mut arena, Some(base), left_tree, false, 2);
+        stack_node_retain(&mut arena, base);
+        let (right_ptr, right_tree) = heap(2);
+        let right = stack_node_new(&mut arena, Some(base), right_tree, false, 3);
+        let (first_ptr, first_tree) = heap(3);
+        let top = stack_node_new(&mut arena, Some(left), first_tree, false, 4);
+        let (last_ptr, last_tree) = heap(4);
+        stack_node_add_link(
+            &mut arena,
+            top,
+            StackLink {
+                node: right,
+                subtree: last_tree,
+                is_pending: false,
+            },
+            &mut pool,
+        );
+        stack_node_release(&mut arena, right, &mut pool);
+        assert!(pool.free_trees.is_empty());
+        stack_node_release(&mut arena, top, &mut pool);
+        assert_eq!(arena.free, [right, top, left, base]);
+        assert_eq!(
+            pool.free_trees.iter().map(Arc::as_ptr).collect::<Vec<_>>(),
+            [last_ptr, right_ptr, first_ptr, left_ptr],
+        );
+        assert!(pool.free_trees.iter().all(|tree| Arc::strong_count(tree) == 1));
     }
 
     #[test]

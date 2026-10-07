@@ -1017,9 +1017,9 @@ pub(crate) fn ts_parser__reduce(
 ) -> StackVersion {
     let language = parser.language.unwrap();
     let initial_version_count = ts_stack_version_count(&parser.stack);
-    let pop = ts_stack_pop_count(&mut parser.stack, &mut parser.tree_pool, version, count);
-    let pop_size = pop.len();
-    let mut pop = pop.into_iter().peekable();
+    let mut slices = ts_stack_pop_count(&mut parser.stack, &mut parser.tree_pool, version, count);
+    let pop_size = slices.len();
+    let mut pop = slices.drain(..).peekable();
     let mut removed_version_count = 0;
     let halted_version_count = ts_stack_halted_version_count(&parser.stack);
 
@@ -1108,6 +1108,11 @@ pub(crate) fn ts_parser__reduce(
             }
         }
     }
+    // Return only the drained scratch allocation, never retained tree handles.
+    // C keeps this array on the stack; freeing it after every reduce needlessly
+    // allocates a new buffer for the next pop.
+    drop(pop);
+    parser.stack.slices = slices;
     if ts_stack_version_count(&parser.stack) > initial_version_count {
         initial_version_count
     } else {
@@ -2529,6 +2534,43 @@ mod parser3_tests {
             payload: SubtreePayload::Branch(BranchData::default()),
             ..SubtreeHeapData::default()
         }))
+    }
+
+    #[test]
+    fn reductions_reuse_slice_storage_without_retaining_children() {
+        // Reductions only need the tables, not a generated lexer or scanner.
+        static TABLES: std::sync::LazyLock<ts_port_tables::LanguageTables> =
+            std::sync::LazyLock::new(|| {
+                ts_port_tables::LanguageTables::decode(
+                    include_bytes!("../../grammars/c/src/tables.bin"),
+                    |_, _| panic!("reduction test does not lex"),
+                    Some(|_, _| panic!("reduction test does not lex keywords")),
+                    None,
+                )
+            });
+        let mut parser = ts_parser_new();
+        parser.language = Some(Language::from(&*TABLES));
+        let symbol = TABLES.token_count as Symbol;
+        let allocation = parser.stack.slices.as_ptr();
+        let capacity = parser.stack.slices.capacity();
+        for i in 0..128 {
+            let version =
+                ts_parser__reduce(&mut parser, 0, symbol, u32::from(i > 0), 0, 0, false, false);
+            assert!(parser.stack.slices.is_empty());
+            assert_eq!(parser.stack.slices.as_ptr(), allocation);
+            assert_eq!(parser.stack.slices.capacity(), capacity);
+            ts_stack_renumber_version(&mut parser.stack, &mut parser.tree_pool, version, 0);
+            let head = parser.stack.heads[0].node;
+            let node = parser.stack.arena.nodes[head.0].as_ref().unwrap();
+            let tree = &node.links[0].as_ref().unwrap().subtree;
+            let Subtree::Heap(data) = tree else {
+                panic!("reduced branch")
+            };
+            assert_eq!(std::sync::Arc::strong_count(data), 1);
+            assert_eq!(data.children.len(), usize::from(i > 0));
+        }
+        ts_parser_reset(&mut parser);
+        assert!(parser.stack.slices.is_empty());
     }
 
     #[test]
