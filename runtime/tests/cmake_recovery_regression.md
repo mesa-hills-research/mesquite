@@ -181,10 +181,10 @@ lexer warning noted above. This change only strengthens regression coverage;
 there are no runtime changes, C deviations, new unsafe code, or generated-file
 changes.
 
-### ERROR-range revalidation at `309e13e`
+### ERROR-range revalidation at `a177fa3`
 
 Rechecked the previously resolved bucket at this starting revision; all checks
-below were rerun, rather than relying on the earlier verification at `e49d25c`.
+below were rerun, rather than relying on the earlier verification at `309e13e`.
 Bucket `e0b0bff8` already passes on this starting checkout. Comparing the current
 C scanner with Rust confirms the merged zero-valued creation/reset fix remains
 correct; no new implementation change or duplicate regression is needed.
@@ -202,9 +202,9 @@ Checks rerun at this revision:
 - `cargo test -p ts_port_cmake -p ts_port`: passes, including 212 runtime unit
   tests, all integration/doc tests, both ERROR-range tests, and 24 CMake tests.
 - `cargo clippy -p ts_port_cmake -p ts_port --all-targets -- -D warnings`: passes.
-- `cargo clippy --workspace --all-targets -- -D warnings`: blocked by that same
-  pre-existing unused-assignment warning in host-owned `grammars/yaml/src/lex.rs:20`.
-  The generated lexer was not modified.
+- Prior `cargo clippy --workspace --all-targets -- -D warnings` validation was
+  blocked by that same pre-existing unused-assignment warning in host-owned
+  `grammars/yaml/src/lex.rs:20`. The generated lexer was not modified.
 
 This follow-up only records verification: no behavior changes, C deviations,
 new unsafe code, warnings, or generated-file modifications are introduced.
@@ -258,7 +258,7 @@ changes are introduced.
 
 ## Unterminated-call bucket `7f8795fb`
 
-Reverified at `755e745` (previously at `1550ea4`): all three
+Reverified at `256fe11` (previously at `755e745`): all three
 reported inputs already pass on the starting checkout with the merged scanner
 initialization/reset correction above. The current C scanner uses
 `ts_calloc` and clears both fields on empty or invalid-length snapshots, matching
@@ -276,11 +276,7 @@ input chunks. The earlier verification note incorrectly described all three coun
 as zero; the existing tests already assert the correct counts. No additional
 behavior change or duplicate test is needed.
 
-The C source and Rust scanner were compared directly again at this revision.
-Both still use zero-valued creation/reset, and all three parser regressions were
-already present. No additional behavior change or duplicate test is warranted.
-
-Validation rerun for this bucket at `755e745`:
+Validation rerun for this bucket at `256fe11`:
 
 - `run_oracle(inputs = "bucket:7f8795fb")`: 3/3 pass.
 - `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs
