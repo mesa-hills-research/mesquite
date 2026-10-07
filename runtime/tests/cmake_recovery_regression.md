@@ -59,14 +59,13 @@ This follow-up changes only this verification note; it introduces no deviation
 from C and no new unsafe code.
 
 
-### Revalidation of `4d6cc948` at `3e39027`
+### Revalidation of `4d6cc948` at `8f652b4`
 
-The assigned Registry-query input still passes before any new changes, as it did
-at `cabce01`, `9c27be8`, and `88489b8`. Direct comparison with the current C scanner confirms
-that the merged zero-valued creation/reset behavior above is the required
-correction; no additional runtime change is warranted. The checks below were
-rerun at `3e39027`,
-including the parser regression with both fresh and reused scanner state,
+The assigned Registry-query input already passes on this starting revision.
+Direct comparison with the current C scanner confirms that the merged
+zero-valued creation/reset behavior above is the required correction; no
+additional runtime change is warranted. All checks below were rerun at this
+revision, including the parser regression with fresh and reused scanner state,
 single-byte input chunks, and incremental repair/restoration. The reduced
 Registry-query expression is already present in both scanner and parser tests;
 no duplicate regression was added.
@@ -76,11 +75,10 @@ no duplicate regression was added.
   **9878/9878 fresh** pass.
 - `cargo check --workspace --all-targets`: passes; only the pre-existing
   host-owned YAML lexer unused-assignment warning remains.
-- `cargo test -p ts_port_cmake`: **24 tests pass**, including the reduced
-  Registry-query scanner regression.
-- `cargo test -p ts_port --test cmake_quoted_variable_recovery`: **2 tests pass**,
-  covering fresh/reused scanners and incremental repair/restoration of malformed
-  quoted variable references.
+- `cargo test -p ts_port_cmake -p ts_port`: all unit, integration, and doc tests
+  pass, including **24** CMake tests and **3** quoted-variable parser regressions.
+  These cover fresh/reused scanners, chunked input, incremental repair/restoration,
+  and malformed quotes after valid arguments.
 - `cargo clippy -p ts_port_cmake -p ts_port --all-targets -- -D warnings`: passes.
 
 This revalidation only updates this note. No behavior changes, C deviations,
@@ -255,7 +253,7 @@ changes are introduced.
 
 ## Unterminated-call bucket `7f8795fb`
 
-Reverified at `9a8563b`: all three reported inputs already pass on the starting
+Reverified at `6674d74` (previously at `9a8563b`): all three reported inputs already pass on the starting
 checkout with the merged scanner
 initialization/reset correction above. The current C scanner uses
 `ts_calloc` and clears both fields on empty or invalid-length snapshots, matching
@@ -273,7 +271,7 @@ input chunks. The earlier verification note incorrectly described all three coun
 as zero; the existing tests already assert the correct counts. No additional
 behavior change or duplicate test is needed.
 
-Validation rerun for this bucket at `9a8563b`:
+Validation rerun for this bucket at `6674d74`:
 
 - `run_oracle(inputs = "bucket:7f8795fb")`: 3/3 pass.
 - `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs
