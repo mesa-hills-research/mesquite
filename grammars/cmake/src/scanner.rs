@@ -182,12 +182,26 @@ impl ExternalScanner for Scanner {
 
 /// Creates a scanner (C's `tree_sitter_cmake_external_scanner_create`).
 pub(crate) fn create() -> Box<dyn ExternalScanner> {
+    // C allocates the payload with calloc.
     Box::<Scanner>::default()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bare_backslash_is_bracket_content_during_recovery() {
+        let mut scanner = create();
+        for _ in 0..2 {
+            let mut lexer = TestLexer::new("\\");
+            assert!(scanner.scan(&mut lexer, &[true; 7]));
+            assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
+            assert_eq!(lexer.position, 1);
+            assert_eq!(lexer.end, Some(1));
+            scanner.deserialize(&[]);
+        }
+    }
 
     #[derive(Debug, PartialEq, Eq)]
     enum Event {
@@ -313,12 +327,35 @@ mod tests {
             assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
             assert_eq!(lexer.position, input.len());
             assert_eq!(lexer.end, (!input.is_empty()).then_some(input.len()));
+            assert_eq!(scanner.serialize(&mut snapshot), STATE_SIZE);
+            assert_eq!(&snapshot[..4], &0u32.to_ne_bytes());
+            assert_eq!(&snapshot[4..], &(BRACKET_ARGUMENT_CONTENT as u32).to_ne_bytes());
 
             // Content changed the token; an empty snapshot must reset it so
             // that the next scan can emit content again, even at EOF.
             scanner.deserialize(&[]);
             assert_eq!(scanner.serialize(&mut snapshot), STATE_SIZE);
             assert_eq!(snapshot, [0; STATE_SIZE]);
+        }
+    }
+
+    #[test]
+    fn fresh_and_reset_scanners_emit_zero_width_content_at_eof() {
+        let mut scanner = create();
+        for reset in [false, true] {
+            if reset {
+                // The previous scan changed token to CONTENT; resetting must
+                // allow the same zero-width recovery token to be emitted again.
+                scanner.deserialize(&[]);
+            }
+            let mut lexer = TestLexer::new("");
+            assert!(scanner.scan(&mut lexer, &[true; 7]));
+            assert_eq!(lexer.position, 0);
+            assert_eq!(lexer.end, None);
+            assert_eq!(
+                lexer.events,
+                [Event::Symbol(BRACKET_ARGUMENT_CONTENT as u16)]
+            );
         }
     }
 
@@ -505,7 +542,11 @@ mod tests {
         restored.deserialize(&buffer[..8]);
         assert_eq!(restored.level, scanner.level);
         assert_eq!(restored.token, scanner.token);
-        for token in [BRACKET_COMMENT_OPEN as u32, scanner.token] {
+        for token in [
+            BRACKET_COMMENT_OPEN as u32,
+            BRACKET_COMMENT_CONTENT as u32,
+            scanner.token,
+        ] {
             for length in [0, 1, 7, 9, 16] {
                 restored.level = 42;
                 restored.token = token;
@@ -519,5 +560,39 @@ mod tests {
                 assert_eq!(lexer.end, Some(4));
             }
         }
+    }
+
+    #[test]
+    fn fresh_scanner_emits_empty_content_at_eof_during_recovery() {
+        let mut scanner = create();
+        let mut snapshot = [0xff; STATE_SIZE];
+        assert_eq!(scanner.serialize(&mut snapshot), STATE_SIZE);
+        assert_eq!(snapshot, [0; STATE_SIZE]);
+
+        let mut lexer = TestLexer::new("");
+        assert!(scanner.scan(&mut lexer, &[true; 7]));
+        assert_eq!(lexer.position, 0);
+        assert_eq!(lexer.end, None);
+        assert_eq!(
+            lexer.events,
+            [Event::Symbol(BRACKET_ARGUMENT_CONTENT as u16)]
+        );
+    }
+
+    #[test]
+    fn empty_snapshot_resets_token_and_allows_content_at_eof() {
+        let mut scanner = Scanner {
+            level: 2,
+            token: BRACKET_COMMENT_CONTENT as u32,
+        };
+        scanner.deserialize(&[]);
+        let mut lexer = TestLexer::new("");
+        assert!(scanner.scan(&mut lexer, &[true; 7]));
+        assert_eq!(scanner.level, 0);
+        assert_eq!(scanner.token, BRACKET_ARGUMENT_CONTENT as u32);
+        assert_eq!(
+            lexer.events,
+            [Event::Symbol(BRACKET_ARGUMENT_CONTENT as u16)]
+        );
     }
 }
