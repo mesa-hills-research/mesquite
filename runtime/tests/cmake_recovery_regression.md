@@ -181,10 +181,10 @@ lexer warning noted above. This change only strengthens regression coverage;
 there are no runtime changes, C deviations, new unsafe code, or generated-file
 changes.
 
-### ERROR-range revalidation at `1e805f4`
+### ERROR-range revalidation at `8355397`
 
 Rechecked the previously resolved bucket at this starting revision; all checks
-below were rerun, rather than relying on the earlier verification at `1b1b92d`.
+below were rerun, rather than relying on the earlier verification at `1e805f4`.
 Bucket `e0b0bff8` already passes on this starting checkout. Comparing the current
 C scanner with Rust confirms the merged zero-valued creation/reset fix remains
 correct; no new implementation change or duplicate regression is needed.
@@ -211,7 +211,7 @@ new unsafe code, warnings, or generated-file modifications are introduced.
 
 ## Empty recovery-content bucket `f5e2762e`
 
-Reverified at `bb5c9ba` (previously at `10fc4fc`):
+Reverified at `094475a` (previously at `bb5c9ba`):
 all 16 reported inputs already pass on the starting checkout. The merged scanner
 initialization/reset correction above allows `bracket_argument_content` at EOF
 without an opener, including after `a` and after skipping the newline in `if(\n`.
@@ -239,7 +239,7 @@ The current C source was compared directly with the Rust scanner: creation uses
 The matching implementation and all regression cases were already present at
 this starting revision, so no duplicate test or behavior change was warranted.
 
-Checks rerun for this bucket at `bb5c9ba`:
+Checks rerun for this bucket at `094475a`:
 
 - `run_oracle(inputs = "bucket:f5e2762e")`: 16/16 pass.
 - `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs
@@ -250,9 +250,10 @@ Checks rerun for this bucket at `bb5c9ba`:
   unit tests, and all integration/doc tests pass, including the four
   `cmake_empty_recovery_content` tests.
 - `cargo clippy -p ts_port_cmake -p ts_port --all-targets -- -D warnings`: passes.
-- `cargo clippy --workspace --all-targets -- -D warnings`: blocked by the same
-  pre-existing unused-assignment warning in host-owned
-  `grammars/yaml/src/lex.rs:20`. That generated file was left unchanged.
+- Prior `cargo clippy --workspace --all-targets -- -D warnings` validation
+  was blocked by the same pre-existing unused-assignment warning in host-owned
+  `grammars/yaml/src/lex.rs:20`, still reported by the workspace check above.
+  That generated file was left unchanged.
 
 This follow-up only updates the verification record: the implementation and
 regression coverage were already present at the starting revision. No further
@@ -261,7 +262,7 @@ changes are introduced.
 
 ## Unterminated-call bucket `7f8795fb`
 
-Reverified at `e979ae3` (previously at `256fe11`): all three
+Reverified at `836de0d` (previously at `e979ae3`): all three
 reported inputs already pass on the starting checkout with the merged scanner
 initialization/reset correction above. The current C scanner uses
 `ts_calloc` and clears both fields on empty or invalid-length snapshots, matching
@@ -282,7 +283,7 @@ incorrectly described all three callback counts as zero; the existing tests
 already assert the correct counts. No additional behavior change or duplicate
 test is needed.
 
-Validation rerun for this bucket at `e979ae3`:
+Validation rerun for this bucket at `836de0d`:
 
 - `run_oracle(inputs = "bucket:7f8795fb")`: 3/3 pass.
 - `run_oracle(languages = "cmake", inputs = "all")`: 270/270 gate inputs

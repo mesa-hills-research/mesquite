@@ -76,7 +76,7 @@ Bucket `548436bf` was already resolved when reassigned on baselines `ddcce0a`,
 `91c0515`, `e2cf12d`, `549fdf3`, `b55992b`, `156e4d4`, `3f877ff`, `04c4945`,
 `dc3e913`, `b5fc1cc`, `4d2f528`, `3187cdd`, `efbc5d8`, `abc605a`, `ac8d546`,
 `4c28d69`, `74ea53d`, `e19913d`, `dc8675e`, `9a5d3da`, `188037c`, `7ed515e`,
-`8c603d1`, `97aa08a`, `70eab23`, `ea0053e`, and `72cb09d`.
+`8c603d1`, `97aa08a`, `70eab23`, `ea0053e`, `72cb09d`, `e883860`, and `a598c22`.
 Compared scanner creation, reset, and bracket-content scanning against the current
 C source;
 the merged implementation still matches, including consuming embedded NULs until
