@@ -240,96 +240,58 @@ impl<'a> Tag<'a> {
     }
 }
 
-/// Builtin tags occupy just one byte each. Custom names share a byte arena;
-/// their ends form a separate stack, since only CUSTOM entries need a name.
-/// All three buffers retain their capacity across scanner-state restores.
-#[derive(Default, Debug)]
+/// Tags are kept in serialization order: one byte per builtin and a type,
+/// length byte, and spelling for customs. Long names keep their full spelling
+/// here; only serialization truncates them. A sparse index locates custom
+/// names when popping, without imposing an offset word on every builtin.
+#[derive(Default, Debug, PartialEq, Eq)]
 struct TagStack {
-    kinds: Vec<u8>,
-    names: Vec<u8>,
-    name_ends: Vec<usize>,
-    snapshot: Snapshot,
+    bytes: Vec<u8>,
+    custom: Vec<CustomTag>,
+    depth: usize,
+    // Names that require truncation or strncpy's NUL padding on serialization.
+    noncanonical_names: usize,
 }
 
-// A scanner is often restored to its current state (including after failed
-// external scans). Keep an exact snapshot, invalidated on every stack mutation,
-// so those restores need not decode custom names and rebuild the three buffers.
-// `canonical` additionally means serializing the live stack yields these bytes.
-// Restored snapshots need not be canonical: strncpy can zero-pad custom names,
-// and END_ placeholders can fit where a truncated custom tag did not.
-struct Snapshot {
-    bytes: [u8; SERIALIZATION_BUFFER_SIZE],
-    len: usize,
-    canonical: bool,
+#[derive(Debug, PartialEq, Eq)]
+struct CustomTag {
+    depth: usize,
+    start: usize,
+    end: usize,
+    noncanonical: bool,
 }
-
-impl Default for Snapshot {
-    fn default() -> Self {
-        Self {
-            bytes: [0; SERIALIZATION_BUFFER_SIZE],
-            len: 0,
-            canonical: false,
-        }
-    }
-}
-
-impl std::fmt::Debug for Snapshot {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("Snapshot")
-            .field(&&self.bytes[..self.len])
-            .finish()
-    }
-}
-
-impl Snapshot {
-    fn save(&mut self, buffer: &[u8], canonical: bool) {
-        self.bytes[..buffer.len()].copy_from_slice(buffer);
-        self.len = buffer.len();
-        self.canonical = canonical;
-    }
-
-    fn matches(&self, buffer: &[u8]) -> bool {
-        self.len != 0 && self.bytes[..self.len] == *buffer
-    }
-}
-
-// Snapshot caching does not change the semantic identity of a tag stack.
-impl PartialEq for TagStack {
-    fn eq(&self, other: &Self) -> bool {
-        self.kinds == other.kinds && self.names == other.names && self.name_ends == other.name_ends
-    }
-}
-
-impl Eq for TagStack {}
 
 impl TagStack {
     fn len(&self) -> usize {
-        self.kinds.len()
+        self.depth
     }
 
     fn is_empty(&self) -> bool {
-        self.kinds.is_empty()
+        self.depth == 0
     }
 
     fn clear(&mut self) {
-        self.snapshot.len = 0;
-        self.kinds.clear();
-        self.names.clear();
-        self.name_ends.clear();
+        self.bytes.clear();
+        self.custom.clear();
+        self.depth = 0;
+        self.noncanonical_names = 0;
     }
 
     fn last(&self) -> Option<Tag<'_>> {
-        let kind = TagType::from_byte(*self.kinds.last()?);
-        let custom_tag_name = if kind == TagType::Custom {
-            let start = self.name_ends.iter().rev().nth(1).copied().unwrap_or(0);
-            &self.names[start..]
+        if self.is_empty() {
+            return None;
+        }
+        if let Some(custom) = self.custom.last().filter(|tag| tag.depth + 1 == self.depth) {
+            Some(Tag {
+                kind: TagType::Custom,
+                custom_tag_name: &self.bytes[custom.start + 2..],
+            })
         } else {
-            &[]
-        };
-        Some(Tag {
-            kind,
-            custom_tag_name,
-        })
+            Some(Tag {
+                kind: TagType::from_byte(*self.bytes.last().unwrap()),
+                custom_tag_name: &[],
+            })
+        }
     }
 
     fn last_matches_name(&self, name: &[u8]) -> bool {
@@ -345,32 +307,55 @@ impl TagStack {
     }
 
     fn push(&mut self, tag: Tag<'_>) {
-        self.snapshot.len = 0;
-        self.kinds.push(tag.kind as u8);
         if tag.kind == TagType::Custom {
-            self.names.extend_from_slice(tag.custom_tag_name);
-            self.name_ends.push(self.names.len());
+            let name = tag.custom_tag_name;
+            let start = self.bytes.len();
+            let noncanonical = name.len() > usize::from(u8::MAX) || name.contains(&0);
+            self.bytes.reserve(2 + name.len());
+            self.bytes.push(tag.kind as u8);
+            self.bytes.push(name.len().min(usize::from(u8::MAX)) as u8);
+            self.bytes.extend_from_slice(name);
+            self.custom.push(CustomTag {
+                depth: self.depth,
+                start,
+                end: self.bytes.len(),
+                noncanonical,
+            });
+            self.noncanonical_names += usize::from(noncanonical);
+        } else {
+            self.bytes.push(tag.kind as u8);
         }
+        self.depth += 1;
     }
 
     fn pop(&mut self) {
-        self.snapshot.len = 0;
-        if self.kinds.pop() == Some(TagType::Custom as u8) {
-            self.name_ends.pop();
-            self.names
-                .truncate(self.name_ends.last().copied().unwrap_or(0));
+        if self.depth == 0 {
+            return;
+        }
+        self.depth -= 1;
+        if self
+            .custom
+            .last()
+            .is_some_and(|tag| tag.depth == self.depth)
+        {
+            let tag = self.custom.pop().unwrap();
+            self.bytes.truncate(tag.start);
+            self.noncanonical_names -= usize::from(tag.noncanonical);
+        } else {
+            self.bytes.pop();
         }
     }
 
     fn iter(&self) -> impl Iterator<Item = Tag<'_>> {
-        let mut ends = self.name_ends.iter();
-        let mut start = 0;
-        self.kinds.iter().map(move |&kind| {
-            let kind = TagType::from_byte(kind);
+        let mut custom = self.custom.iter();
+        let mut offset = 0;
+        (0..self.depth).map(move |_| {
+            let kind = TagType::from_byte(self.bytes[offset]);
+            offset += 1;
             let custom_tag_name = if kind == TagType::Custom {
-                let end = *ends.next().expect("custom tag has a name");
-                let name = &self.names[start..end];
-                start = end;
+                let end = custom.next().expect("custom tag has an index").end;
+                let name = &self.bytes[offset + 1..end];
+                offset = end;
                 name
             } else {
                 &[]
@@ -380,6 +365,44 @@ impl TagStack {
                 custom_tag_name,
             }
         })
+    }
+
+    fn contains_kind(&self, kind: TagType) -> bool {
+        // Search from the top, like C. Custom spelling bytes can equal a tag
+        // discriminant, so only inspect the builtin runs between customs.
+        let mut end = self.bytes.len();
+        for custom in self.custom.iter().rev() {
+            if self.bytes[custom.end..end]
+                .iter()
+                .rev()
+                .any(|&byte| byte == kind as u8)
+                || kind == TagType::Custom
+            {
+                return true;
+            }
+            end = custom.start;
+        }
+        self.bytes[..end]
+            .iter()
+            .rev()
+            .any(|&byte| byte == kind as u8)
+    }
+
+    fn matches(&self, buffer: &[u8]) -> bool {
+        // A full snapshot is already in our live representation. Comparing it
+        // directly avoids maintaining (and invalidating) a second cached copy.
+        // Long live names have a clamped length byte but retain all bytes. They
+        // are not wire format: their tail can even look like additional tags.
+        // Conservatively rebuild states containing any noncanonical name.
+        if self.noncanonical_names != 0 {
+            return false;
+        }
+        let Some((counts, bytes)) = buffer.split_first_chunk::<4>() else {
+            return buffer.is_empty() && self.is_empty();
+        };
+        usize::from(u16::from_ne_bytes([counts[0], counts[1]])) == self.depth
+            && usize::from(u16::from_ne_bytes([counts[2], counts[3]])) == self.depth
+            && bytes == self.bytes
     }
 }
 
@@ -539,13 +562,7 @@ impl Scanner {
             let next_tag = Tag::for_name(&self.tag_name);
             // Recovery deliberately compares only types here, not custom names.
             // Only one stack entry is removed, even if the match is much deeper.
-            if self
-                .tags
-                .kinds
-                .iter()
-                .rev()
-                .any(|&kind| kind == next_tag.kind as u8)
-            {
+            if self.tags.contains_kind(next_tag.kind) {
                 self.tags.pop();
                 lexer.set_result_symbol(IMPLICIT_END_TAG as u16);
                 return true;
@@ -661,30 +678,30 @@ impl ExternalScanner for Scanner {
     }
 
     fn serialize(&mut self, buffer: &mut [u8]) -> usize {
-        let snapshot = &self.tags.snapshot;
-        if snapshot.len != 0 && snapshot.canonical {
-            buffer[..snapshot.len].copy_from_slice(&snapshot.bytes[..snapshot.len]);
-            return snapshot.len;
-        }
         let tag_count = self.tags.len().min(usize::from(u16::MAX)) as u16;
         let mut serialized_tag_count = 0u16;
         // C uses memcpy for both uint16_t counts, so the format is native-endian.
         buffer[2..4].copy_from_slice(&tag_count.to_ne_bytes());
         let mut size = 4;
 
-        if self.tags.name_ends.is_empty() {
-            // No custom names: the stack is already in wire format. C leaves
-            // the last buffer byte unused even when another tag would fit.
+        // Each entry occupies at least one byte, so fitting also implies the
+        // depth fits u16. C always leaves the last buffer byte unused.
+        if self.tags.noncanonical_names == 0
+            && self.tags.bytes.len() < SERIALIZATION_BUFFER_SIZE - 4
+        {
+            let count = self.tags.len() as u16;
+            buffer[..2].copy_from_slice(&count.to_ne_bytes());
+            let size = 4 + self.tags.bytes.len();
+            buffer[4..size].copy_from_slice(&self.tags.bytes);
+            return size;
+        }
+        if self.tags.custom.is_empty() {
             let count = usize::from(tag_count).min(SERIALIZATION_BUFFER_SIZE - 5);
-            buffer[4..4 + count].copy_from_slice(&self.tags.kinds[..count]);
+            buffer[4..4 + count].copy_from_slice(&self.tags.bytes[..count]);
             buffer[..2].copy_from_slice(&(count as u16).to_ne_bytes());
-            if count == self.tags.len() {
-                self.tags.snapshot.save(&buffer[..4 + count], true);
-            }
             return 4 + count;
         }
 
-        let mut lossless = true;
         for tag in self.tags.iter().take(usize::from(tag_count)) {
             if tag.kind == TagType::Custom {
                 let name_length = tag.custom_tag_name.len().min(usize::from(u8::MAX));
@@ -699,7 +716,6 @@ impl ExternalScanner for Scanner {
                 // deserialize that contain an embedded NUL.
                 let name = &tag.custom_tag_name[..name_length];
                 let copy_length = name.iter().position(|&c| c == 0).unwrap_or(name_length);
-                lossless &= copy_length == tag.custom_tag_name.len();
                 buffer[size..size + copy_length].copy_from_slice(&name[..copy_length]);
                 buffer[size + copy_length..size + name_length].fill(0);
                 size += name_length;
@@ -713,21 +729,18 @@ impl ExternalScanner for Scanner {
             serialized_tag_count += 1;
         }
         buffer[..2].copy_from_slice(&serialized_tag_count.to_ne_bytes());
-        if lossless && usize::from(serialized_tag_count) == self.tags.len() {
-            self.tags.snapshot.save(&buffer[..size], true);
-        }
         size
     }
 
     fn deserialize(&mut self, buffer: &[u8]) {
-        if !self.tags.snapshot.matches(buffer) {
+        if !self.tags.matches(buffer) {
             self.restore(buffer);
         }
     }
 }
 
 impl Scanner {
-    // Keep the rebuilding path's register/stack setup out of cache-hit restores.
+    // Keep the rebuilding path's register/stack setup out of identical restores.
     #[inline(never)]
     fn restore(&mut self, buffer: &[u8]) {
         self.tags.clear();
@@ -737,48 +750,37 @@ impl Scanner {
 
         let serialized_tag_count = usize::from(u16::from_ne_bytes([buffer[0], buffer[1]]));
         let tag_count = usize::from(u16::from_ne_bytes([buffer[2], buffer[3]]));
-        let mut size = 4;
-        self.tags.kinds.reserve(tag_count);
-        if tag_count > 0 {
-            // Every custom tag needs a length byte in addition to its type,
-            // even for an empty name. Equal counts/bytes imply all builtins.
-            if buffer.len() == 4 + serialized_tag_count {
-                self.tags.kinds.extend_from_slice(&buffer[4..]);
-                self.tags.kinds.resize(tag_count, TagType::End as u8);
-                self.tags.snapshot.save(buffer, false);
-                return;
-            }
-            let mut remaining = serialized_tag_count;
-            while remaining > 0 {
-                // Builtins already have exactly the representation we need.
-                // Copy whole runs rather than constructing a Tag/Vec per byte.
-                let builtin_count = buffer[size..]
-                    .iter()
-                    .take(remaining)
-                    .position(|&kind| kind == TagType::Custom as u8)
-                    .unwrap_or(remaining);
-                self.tags
-                    .kinds
-                    .extend_from_slice(&buffer[size..size + builtin_count]);
-                size += builtin_count;
-                remaining -= builtin_count;
-                if remaining == 0 {
-                    break;
-                }
-                let name_length = usize::from(buffer[size + 1]);
-                size += 2;
-                self.tags.push(Tag {
-                    kind: TagType::Custom,
-                    custom_tag_name: &buffer[size..size + name_length],
-                });
-                size += name_length;
-                remaining -= 1;
-            }
-            // The stack depth survives buffer exhaustion. Missing entries are
-            // END_ tags (tag_new), not zero-valued AREA tags.
-            self.tags.kinds.resize(tag_count, TagType::End as u8);
+        if tag_count == 0 {
+            return;
         }
-        self.tags.snapshot.save(buffer, false);
+        self.tags.bytes.extend_from_slice(&buffer[4..]);
+        if buffer.len() != 4 + serialized_tag_count {
+            let mut offset = 0;
+            for depth in 0..serialized_tag_count {
+                if self.tags.bytes[offset] == TagType::Custom as u8 {
+                    let start = offset;
+                    let end = offset + 2 + usize::from(self.tags.bytes[offset + 1]);
+                    let noncanonical = self.tags.bytes[offset + 2..end].contains(&0);
+                    self.tags.custom.push(CustomTag {
+                        depth,
+                        start,
+                        end,
+                        noncanonical,
+                    });
+                    self.tags.noncanonical_names += usize::from(noncanonical);
+                    offset = end;
+                } else {
+                    offset += 1;
+                }
+            }
+        }
+        // The stack depth survives buffer exhaustion. Missing entries are
+        // END_ tags (tag_new), not zero-valued AREA tags.
+        self.tags.bytes.resize(
+            self.tags.bytes.len() + tag_count - serialized_tag_count,
+            TagType::End as u8,
+        );
+        self.tags.depth = tag_count;
     }
 }
 
@@ -989,7 +991,7 @@ mod tests {
         let mut restored = Scanner::default();
         restored.deserialize(&bytes);
         assert_eq!(restored.tags.len(), usize::from(u16::MAX));
-        assert_eq!(restored.tags.kinds[..1019], scanner.tags.kinds[..1019]);
+        assert_eq!(restored.tags.bytes[..1019], scanner.tags.bytes[..1019]);
         assert!(
             restored
                 .tags
@@ -1039,7 +1041,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_name_arena_preserves_stack_order_across_pops_and_restores() {
+    fn packed_names_preserve_stack_order_across_pops_and_restores() {
         let mut bytes = header(7, 7);
         bytes.extend_from_slice(&[
             TagType::Div as u8,
@@ -1073,9 +1075,8 @@ mod tests {
         assert_eq!(serialized(&mut scanner), bytes);
         assert_eq!(scanner.tags.iter().collect::<Vec<_>>(), expected);
         let capacities = (
-            scanner.tags.kinds.capacity(),
-            scanner.tags.names.capacity(),
-            scanner.tags.name_ends.capacity(),
+            scanner.tags.bytes.capacity(),
+            scanner.tags.custom.capacity(),
         );
         for _ in 0..3 {
             for remaining in (0..expected.len()).rev() {
@@ -1086,27 +1087,24 @@ mod tests {
                     expected[..remaining]
                 );
             }
-            assert!(scanner.tags.names.is_empty());
-            assert!(scanner.tags.name_ends.is_empty());
+            assert!(scanner.tags.custom.is_empty());
             scanner.deserialize(&bytes);
             assert_eq!(serialized(&mut scanner), bytes);
             assert_eq!(
                 (
-                    scanner.tags.kinds.capacity(),
-                    scanner.tags.names.capacity(),
-                    scanner.tags.name_ends.capacity(),
+                    scanner.tags.bytes.capacity(),
+                    scanner.tags.custom.capacity(),
                 ),
                 capacities,
             );
         }
 
         // Replacing custom tags with a builtin-only snapshot must clear the
-        // name arena too, including when the depth is filled with END_ tags.
+        // custom index too, including when the depth is filled with END_ tags.
         let mut truncated = header(1, 3);
         truncated.push(TagType::Div as u8);
         scanner.deserialize(&truncated);
-        assert!(scanner.tags.names.is_empty());
-        assert!(scanner.tags.name_ends.is_empty());
+        assert!(scanner.tags.custom.is_empty());
         assert_eq!(
             scanner.tags.iter().collect::<Vec<_>>(),
             [Tag::for_name(b"DIV"), Tag::default(), Tag::default()],
@@ -1117,26 +1115,180 @@ mod tests {
         assert_eq!(scanner.tags, TagStack::default());
     }
 
+    // The C serializer's entry-at-a-time algorithm, independent of the packed
+    // representation and its bulk-copy fast path.
+    fn reference_serialized(tags: &[Tag<'_>]) -> Vec<u8> {
+        let count = tags.len().min(usize::from(u16::MAX));
+        let mut bytes = header(0, count as u16);
+        let mut written = 0u16;
+        for tag in tags.iter().take(count) {
+            if tag.kind == TagType::Custom {
+                let name = &tag.custom_tag_name[..tag.custom_tag_name.len().min(255)];
+                if bytes.len() + 2 + name.len() >= SERIALIZATION_BUFFER_SIZE {
+                    break;
+                }
+                bytes.extend_from_slice(&[tag.kind as u8, name.len() as u8]);
+                let mut terminated = false;
+                for &byte in name {
+                    terminated |= byte == 0;
+                    bytes.push(if terminated { 0 } else { byte });
+                }
+            } else {
+                if bytes.len() + 1 >= SERIALIZATION_BUFFER_SIZE {
+                    break;
+                }
+                bytes.push(tag.kind as u8);
+            }
+            written += 1;
+        }
+        bytes[..2].copy_from_slice(&written.to_ne_bytes());
+        bytes
+    }
+
     #[test]
-    fn snapshot_cache_tracks_mutations_and_backtracking() {
+    fn packed_mutations_match_entrywise_serialization() {
+        let long_name = [b'X'; 300];
+        let boundary_name = [b'Y'; 255];
+        let choices = [
+            Tag::for_name(b"DIV"),
+            Tag::for_name(b"X-ONE"),
+            Tag::for_name(b""),
+            Tag::for_name(&long_name),
+            Tag::for_name(&boundary_name),
+            Tag::for_name(b"X\0YZ"),
+            Tag::for_name(b"SPAN"),
+            Tag::default(),
+            Tag {
+                kind: TagType::Custom,
+                custom_tag_name: b"DIV",
+            },
+        ];
+        let mut scanner = Scanner::default();
+        let mut expected = Vec::new();
+        let mut random = 1u32;
+        for _ in 0..1000 {
+            random = random.wrapping_mul(1664525).wrapping_add(1013904223);
+            if random.is_multiple_of(4) && !expected.is_empty() {
+                expected.pop();
+                scanner.tags.pop();
+            } else {
+                let tag = choices[random as usize % choices.len()];
+                expected.push(tag);
+                scanner.tags.push(tag);
+            }
+            assert_eq!(scanner.tags.iter().collect::<Vec<_>>(), expected);
+            assert_eq!(scanner.tags.last(), expected.last().copied());
+            assert_eq!(serialized(&mut scanner), reference_serialized(&expected));
+        }
+        while !expected.is_empty() {
+            scanner.tags.pop();
+            expected.pop();
+            assert_eq!(scanner.tags.iter().collect::<Vec<_>>(), expected);
+            assert_eq!(serialized(&mut scanner), reference_serialized(&expected));
+        }
+        assert_eq!(scanner.tags, TagStack::default());
+    }
+
+    #[test]
+    fn recovery_search_skips_custom_spelling_and_length_bytes() {
+        // Every builtin discriminant occurs inside this restored custom name.
+        let name: Vec<u8> = (0..=TagType::End as u8).collect();
+        let mut expected = vec![
+            Tag::for_name(b"DIV"),
+            Tag::for_name(&name),
+            Tag::for_name(b"P"),
+            Tag::for_name(b""),
+            Tag::for_name(b"SCRIPT"),
+        ];
+        let mut tags: TagStack = expected.iter().copied().collect();
+        loop {
+            for byte in 0..=TagType::End as u8 {
+                let kind = TagType::from_byte(byte);
+                assert_eq!(
+                    tags.contains_kind(kind),
+                    expected.iter().any(|tag| tag.kind == kind)
+                );
+            }
+            if expected.pop().is_none() {
+                break;
+            }
+            tags.pop();
+        }
+    }
+
+    #[test]
+    fn popping_lossy_names_reenables_bulk_serialization() {
+        let long_name = [b'X'; 300];
+        let mut scanner = Scanner::default();
+        let mut tags = Vec::new();
+        for tag in [
+            Tag::for_name(b"DIV"),
+            Tag::for_name(&long_name),
+            Tag::for_name(b"P"),
+            Tag::for_name(b"X\0YZ"),
+            Tag::for_name(b"SPAN"),
+        ] {
+            tags.push(tag);
+            scanner.tags.push(tag);
+            assert_eq!(serialized(&mut scanner), reference_serialized(&tags));
+        }
+        for expected_noncanonical in [2, 1, 1, 0, 0] {
+            scanner.tags.pop();
+            tags.pop();
+            assert_eq!(scanner.tags.noncanonical_names, expected_noncanonical);
+            let bytes = serialized(&mut scanner);
+            assert_eq!(bytes, reference_serialized(&tags));
+            if expected_noncanonical == 0 {
+                assert_eq!(&bytes[4..], scanner.tags.bytes);
+            }
+        }
+    }
+
+    #[test]
+    fn long_live_names_cannot_alias_a_different_wire_stack() {
+        let mut long_name = [b'X'; 300];
+        // The tail of this live name spells a second CUSTOM header. Together
+        // with the following builtin, it could be mistaken for a custom name
+        // of length 44 if the first name were read at its clamped length 255.
+        long_name[255] = TagType::Custom as u8;
+        long_name[256] = 44;
+        let mut scanner = Scanner::default();
+        scanner.tags.push(Tag::for_name(&long_name));
+        scanner.tags.push(Tag::for_name(b"P"));
+        let mut snapshot = header(2, 2);
+        snapshot.extend_from_slice(&scanner.tags.bytes);
+        assert!(!scanner.tags.matches(&snapshot));
+        scanner.deserialize(&snapshot);
+        let tags: Vec<_> = scanner.tags.iter().collect();
+        assert_eq!(tags.len(), 2);
+        assert_eq!(tags[0].custom_tag_name, [b'X'; 255]);
+        assert_eq!(tags[1].kind, TagType::Custom);
+        assert_eq!(tags[1].custom_tag_name.len(), 44);
+        assert_eq!(tags[1].custom_tag_name.last(), Some(&(TagType::P as u8)));
+        assert_eq!(serialized(&mut scanner), snapshot);
+    }
+
+    #[test]
+    fn packed_state_matches_mutations_and_backtracking() {
         let mut scanner = with_tags(&["HTML", "DIV", "X-ONE"]);
         let original = serialized(&mut scanner);
-        assert!(scanner.tags.snapshot.matches(&original));
-        assert!(scanner.tags.snapshot.canonical);
+        assert!(scanner.tags.matches(&original));
+        assert_eq!(scanner.tags.noncanonical_names, 0);
         for _ in 0..3 {
             scanner.deserialize(&original);
-            assert!(scanner.tags.snapshot.canonical); // Cache hit, not a rebuild.
+            assert!(scanner.tags.matches(&original));
             assert!(!scan(&mut scanner, "</x-one>", &[IMPLICIT_END_TAG]).0);
             assert_eq!(serialized(&mut scanner), original);
         }
 
         assert!(scan(&mut scanner, "span>", &[START_TAG_NAME]).0);
-        assert_eq!(scanner.tags.snapshot.len, 0);
+        assert!(!scanner.tags.matches(&original));
         let deeper = serialized(&mut scanner);
-        assert!(scanner.tags.snapshot.canonical);
+        assert!(scanner.tags.matches(&deeper));
         assert_ne!(deeper, original);
         assert!(scan(&mut scanner, "span>", &[END_TAG_NAME]).0);
-        assert_eq!(scanner.tags.snapshot.len, 0);
+        assert!(scanner.tags.matches(&original));
+        assert!(!scanner.tags.matches(&deeper));
         scanner.deserialize(&deeper);
         assert_eq!(scanner.tags.last(), Some(Tag::for_name(b"SPAN")));
         assert_eq!(serialized(&mut scanner), deeper);
@@ -1155,31 +1307,28 @@ mod tests {
         assert_eq!(scanner.tags, with_tags(&["HTML", "DIV", "X-ONE"]).tags);
         scanner.deserialize(&[]);
         assert!(scanner.tags.is_empty());
-        assert_eq!(scanner.tags.snapshot.len, 0);
         assert_eq!(serialized(&mut scanner), header(0, 0));
     }
 
     #[test]
-    fn snapshot_cache_does_not_skip_lossy_restores_or_canonicalization() {
+    fn packed_state_does_not_skip_lossy_restores_or_canonicalization() {
         let long_name = [b'X'; 300];
         let mut scanner = Scanner::default();
         scanner.tags.push(Tag::for_name(&long_name));
         let truncated_name = serialized(&mut scanner);
-        assert_eq!(scanner.tags.snapshot.len, 0);
+        assert!(!scanner.tags.matches(&truncated_name));
         assert_eq!(scanner.tags.last().unwrap().custom_tag_name.len(), 300);
         scanner.deserialize(&truncated_name);
         assert_eq!(scanner.tags.last().unwrap().custom_tag_name.len(), 255);
         assert_eq!(serialized(&mut scanner), truncated_name);
-        assert!(scanner.tags.snapshot.canonical);
+        assert_eq!(scanner.tags.noncanonical_names, 0);
 
         // The original last tag cannot fit, but its restored END_ sentinel can.
         scanner.tags = std::iter::repeat_n(Tag::for_name(b"DIV"), 763).collect();
         scanner.tags.push(Tag::for_name(&long_name));
         let truncated_stack = serialized(&mut scanner);
-        assert_eq!(scanner.tags.snapshot.len, 0);
         scanner.deserialize(&truncated_stack);
-        assert!(scanner.tags.snapshot.matches(&truncated_stack));
-        assert!(!scanner.tags.snapshot.canonical);
+        assert!(!scanner.tags.matches(&truncated_stack));
         let canonical = serialized(&mut scanner);
         assert_eq!(canonical[..4], header(764, 764));
         assert_eq!(canonical.last(), Some(&(TagType::End as u8)));
@@ -1189,7 +1338,7 @@ mod tests {
         let mut embedded_nul = header(1, 1);
         embedded_nul.extend_from_slice(&[126, 4, b'X', 0, b'Y', b'Z']);
         scanner.deserialize(&embedded_nul);
-        assert!(scanner.tags.snapshot.matches(&embedded_nul));
+        assert!(!scanner.tags.matches(&embedded_nul));
         for _ in 0..2 {
             assert_eq!(&serialized(&mut scanner)[4..], &[126, 4, b'X', 0, 0, 0]);
             assert_eq!(scanner.tags.last().unwrap().custom_tag_name, b"X\0YZ");
@@ -1228,7 +1377,7 @@ mod tests {
         let (_, right_end) = scan(&mut scanner, &long_name, &[END_TAG_NAME]);
         assert_eq!(right_end.symbol, END_TAG_NAME as u16);
         assert_eq!(scanner.tags, with_tags(&["DIV"]).tags);
-        assert!(scanner.tags.names.is_empty());
+        assert!(scanner.tags.custom.is_empty());
         assert_eq!(scanner.tag_name.capacity(), capacity);
     }
 
