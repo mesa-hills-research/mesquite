@@ -237,8 +237,31 @@ fn is_punctuation(c: i32) -> bool {
 
 impl ExternalScanner for Scanner {
     fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
+        // Check the grammar's fixed external-token count once, rather than
+        // carrying a slice length and checking it in every parsing helper.
+        let valid_symbols = valid_symbols
+            .first_chunk::<47>()
+            .expect("Markdown external tokens");
         self.simulate = false;
-        self.scan_inner(&mut ScanLexer::new(lexer), valid_symbols)
+        let mut lexer = ScanLexer::new(lexer);
+        // Ordinary text cannot start an external token without table lookahead,
+        // unused indentation, block matching, or an explicit control request.
+        // Avoid entering the full dispatcher in this common case. Keep NUL,
+        // whitespace and every dispatch character on the general path; compare
+        // full code points, just as scan_inner does.
+        if !matches!(
+            lexer.lookahead(),
+            0 | 0x09 | 0x0a | 0x0d | 0x20 | 0x23 | 0x2a | 0x2b | 0x2d
+                | 0x30..=0x39 | 0x3c..=0x3e | 0x5f | 0x60 | 0x7e
+        ) && self.state & STATE_MATCHING == 0
+            && self.indentation < 4
+            && !valid_symbols[PIPE_TABLE_START]
+            && !valid_symbols[TRIGGER_ERROR]
+            && !valid_symbols[CLOSE_BLOCK]
+        {
+            return false;
+        }
+        self.scan_inner(&mut lexer, valid_symbols)
     }
 
     fn serialize(&mut self, buffer: &mut [u8]) -> usize {
@@ -259,21 +282,29 @@ impl ExternalScanner for Scanner {
 
     fn deserialize(&mut self, buffer: &[u8]) {
         self.open_blocks.clear();
-        self.state = 0;
-        self.matched = 0;
-        self.indentation = 0;
-        self.column = 0;
-        self.fenced_code_block_delimiter_length = 0;
         // simulate is neither serialized nor reset by C's deserialize.
-        if !buffer.is_empty() {
-            self.state = buffer[0];
-            self.matched = buffer[1];
-            self.indentation = buffer[2];
-            self.column = buffer[3];
-            self.fenced_code_block_delimiter_length = buffer[4];
-            for &bytes in buffer[5..].as_chunks::<4>().0 {
-                self.open_blocks.push(Block(u32::from_ne_bytes(bytes)));
-            }
+        if buffer.is_empty() {
+            self.state = 0;
+            self.matched = 0;
+            self.indentation = 0;
+            self.column = 0;
+            self.fenced_code_block_delimiter_length = 0;
+        } else {
+            // Validate the complete header once, and overwrite it directly:
+            // nonempty snapshots need neither per-field checks nor zeroing.
+            let (header, blocks) = buffer.split_at(5);
+            self.state = header[0];
+            self.matched = header[1];
+            self.indentation = header[2];
+            self.column = header[3];
+            self.fenced_code_block_delimiter_length = header[4];
+            self.open_blocks.extend(
+                blocks
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|&bytes| Block(u32::from_ne_bytes(bytes))),
+            );
         }
     }
 }
@@ -413,7 +444,7 @@ impl Scanner {
         &mut self,
         delimiter: u8,
         lexer: &mut ScanLexer<'_>,
-        valid_symbols: &[bool],
+        valid_symbols: &[bool; 47],
     ) -> bool {
         let mut level = 0u8;
         while lexer.lookahead() == i32::from(delimiter) {
@@ -479,7 +510,7 @@ impl Scanner {
         extra
     }
 
-    fn parse_star(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool]) -> bool {
+    fn parse_star(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool; 47]) -> bool {
         self.advance(lexer);
         self.mark_end(lexer);
         let mut star_count = 1usize;
@@ -538,7 +569,7 @@ impl Scanner {
     fn parse_thematic_break_underscore(
         &mut self,
         lexer: &mut ScanLexer<'_>,
-        valid_symbols: &[bool],
+        valid_symbols: &[bool; 47],
     ) -> bool {
         self.advance(lexer);
         self.mark_end(lexer);
@@ -563,7 +594,7 @@ impl Scanner {
         false
     }
 
-    fn parse_block_quote(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool]) -> bool {
+    fn parse_block_quote(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool; 47]) -> bool {
         if valid_symbols[BLOCK_QUOTE_START] {
             self.advance(lexer);
             self.indentation = 0;
@@ -579,7 +610,7 @@ impl Scanner {
         false
     }
 
-    fn parse_atx_heading(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool]) -> bool {
+    fn parse_atx_heading(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool; 47]) -> bool {
         if valid_symbols[ATX_H1_MARKER] && self.indentation <= 3 {
             self.mark_end(lexer);
             let mut level = 0u16;
@@ -597,7 +628,11 @@ impl Scanner {
         false
     }
 
-    fn parse_setext_underline(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool]) -> bool {
+    fn parse_setext_underline(
+        &mut self,
+        lexer: &mut ScanLexer<'_>,
+        valid_symbols: &[bool; 47],
+    ) -> bool {
         if valid_symbols[SETEXT_H1_UNDERLINE] && usize::from(self.matched) == self.open_blocks.len()
         {
             self.mark_end(lexer);
@@ -618,7 +653,12 @@ impl Scanner {
 
     /// The metadata branches for `+++` and `---` have identical line scanning.
     /// Called at the newline after the opening marker (never at EOF).
-    fn parse_metadata_body(&mut self, lexer: &mut ScanLexer<'_>, delimiter: u8, symbol: usize) -> bool {
+    fn parse_metadata_body(
+        &mut self,
+        lexer: &mut ScanLexer<'_>,
+        delimiter: u8,
+        symbol: usize,
+    ) -> bool {
         loop {
             self.consume_newline(lexer);
             let mut count = 0usize;
@@ -647,7 +687,7 @@ impl Scanner {
         false
     }
 
-    fn parse_plus(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool]) -> bool {
+    fn parse_plus(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool; 47]) -> bool {
         if self.indentation <= 3
             && (valid_symbols[LIST_MARKER_PLUS]
                 || valid_symbols[LIST_MARKER_PLUS_DONT_INTERRUPT]
@@ -698,7 +738,11 @@ impl Scanner {
         false
     }
 
-    fn parse_ordered_list_marker(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool]) -> bool {
+    fn parse_ordered_list_marker(
+        &mut self,
+        lexer: &mut ScanLexer<'_>,
+        valid_symbols: &[bool; 47],
+    ) -> bool {
         if self.indentation <= 3
             && (valid_symbols[LIST_MARKER_PARENTHESIS]
                 || valid_symbols[LIST_MARKER_DOT]
@@ -767,7 +811,7 @@ impl Scanner {
         false
     }
 
-    fn parse_minus(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool]) -> bool {
+    fn parse_minus(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool; 47]) -> bool {
         if self.indentation <= 3
             && (valid_symbols[LIST_MARKER_MINUS]
                 || valid_symbols[LIST_MARKER_MINUS_DONT_INTERRUPT]
@@ -855,7 +899,7 @@ impl Scanner {
         false
     }
 
-    fn parse_html_block(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool]) -> bool {
+    fn parse_html_block(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool; 47]) -> bool {
         if !(valid_symbols[HTML_BLOCK_1_START]
             || valid_symbols[HTML_BLOCK_1_END]
             || valid_symbols[HTML_BLOCK_2_START]
@@ -1197,7 +1241,7 @@ impl Scanner {
         true
     }
 
-    fn scan_inner(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool]) -> bool {
+    fn scan_inner(&mut self, lexer: &mut ScanLexer<'_>, valid_symbols: &[bool; 47]) -> bool {
         if valid_symbols[TRIGGER_ERROR] {
             lexer.set_result_symbol(ERROR as u16);
             return true;
@@ -1482,7 +1526,11 @@ mod tests {
                 valid(&[PIPE_TABLE_START]),
                 PIPE_TABLE_START,
             ),
-            ("a\\ż | c\n- | -\n", valid(&[PIPE_TABLE_START]), PIPE_TABLE_START),
+            (
+                "a\\ż | c\n- | -\n",
+                valid(&[PIPE_TABLE_START]),
+                PIPE_TABLE_START,
+            ),
             (
                 "\ncontinued text\n",
                 valid(&[LINE_ENDING, SOFT_LINE_ENDING]),
@@ -1497,6 +1545,82 @@ mod tests {
             // lookahead in the column tracker must not add another trait call.
             assert_eq!(lexer.lookahead_calls.get(), lexer.position + 1);
             assert_eq!(lexer.eof_calls.get(), usize::from(input.contains('\0')));
+        }
+    }
+
+    #[test]
+    fn ordinary_text_shortcut_matches_full_dispatch() {
+        let characters = (0..=127).chain([0xe9, 0x109, 0x10a, 0x17c, 0x1f600]);
+        let states = [
+            (0, 0),
+            (0, 3),
+            (0, 4),
+            (0, 255),
+            (STATE_MATCHING, 0),
+            (STATE_CLOSE_BLOCK, 0),
+            (STATE_WAS_SOFT_LINE_BREAK, 0),
+            (STATE_MATCHING | STATE_WAS_SOFT_LINE_BREAK, 0),
+        ];
+        for c in characters {
+            let input = format!("{} text\n- | -\n", char::from_u32(c).unwrap());
+            for tokens in std::iter::once(valid(&[]))
+                .chain((0..47).map(|token| valid(&[token])))
+                .chain([[true; 47]])
+            {
+                for (state, indentation) in states {
+                    let make_scanner = || Scanner {
+                        open_blocks: vec![Block::QUOTE],
+                        state,
+                        indentation,
+                        column: 2,
+                        ..Scanner::default()
+                    };
+                    let mut fast = make_scanner();
+                    // scan must reset this even when taking the shortcut.
+                    fast.simulate = true;
+                    let mut full = make_scanner();
+                    let mut fast_lexer = TestLexer::new(&input);
+                    let mut full_lexer = TestLexer::new(&input);
+                    let fast_result = fast.scan(&mut fast_lexer, &tokens);
+                    let full_result =
+                        full.scan_inner(&mut ScanLexer::new(&mut full_lexer), &tokens);
+                    assert_eq!(fast_result, full_result, "{input:?}");
+                    assert_eq!(fast_lexer.events, full_lexer.events, "{input:?}");
+                    assert_eq!(fast_lexer.position, full_lexer.position);
+                    assert_eq!(fast_lexer.end, full_lexer.end);
+                    assert_eq!(fast_lexer.symbol, full_lexer.symbol);
+                    assert_eq!(
+                        fast_lexer.lookahead_calls.get(),
+                        full_lexer.lookahead_calls.get()
+                    );
+                    assert_eq!(fast_lexer.eof_calls.get(), full_lexer.eof_calls.get());
+                    assert_eq!(serialized(&mut fast), serialized(&mut full));
+                    assert_eq!(fast.simulate, full.simulate);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn deserialization_replaces_blocks_and_reuses_capacity() {
+        let mut scanner = Scanner::default();
+        let mut capacity = 0;
+        for count in [0, 21, 2, 0, 254, 1, 0] {
+            let mut snapshot = vec![STATE_MATCHING, 1, 255, 3, 255];
+            for index in 0..count {
+                // Preserve the full native u32, including unnamed Block values.
+                snapshot.extend_from_slice(&(u32::MAX - index).to_ne_bytes());
+            }
+            scanner.simulate = true;
+            scanner.deserialize(&snapshot);
+            assert_eq!(serialized(&mut scanner), snapshot);
+            assert!(scanner.simulate);
+            assert!(scanner.open_blocks.capacity() >= capacity);
+            capacity = scanner.open_blocks.capacity();
+            scanner.deserialize(&[]);
+            assert_eq!(serialized(&mut scanner), [0; 5]);
+            assert_eq!(scanner.open_blocks.capacity(), capacity);
+            assert!(scanner.simulate);
         }
     }
 
