@@ -99,3 +99,21 @@ checkout, not inherited from the earlier verification):
 
 This follow-up records verification only. No scanner/runtime behavior changes,
 C deviations, unsafe code, generated-file edits, or new warnings are introduced.
+
+### Stop-time verification at `4e8767f`
+
+The reassigned bucket `4d6cc948` still passes on the merged starting baseline:
+`run_oracle(inputs = "bucket:4d6cc948")` reports **1/1 pass**, queries enabled.
+The scanner's zero-initialized creation and whole-state reset on invalid snapshots
+still match the current C reference; no additional behavioral fix is necessary.
+
+Before the operator stopped this run, the following checks completed:
+
+- `cargo check --workspace --all-targets`: passes; the existing host-owned YAML
+  lexer unused-assignment warning remains unchanged.
+- `cargo test -p ts_port_cmake`: **24/24 tests pass**, plus doc tests.
+- `cargo test -p ts_port --test cmake_quoted_variable_recovery`: **3/3 pass**.
+- `cargo clippy -p ts_port -p ts_port_cmake --all-targets -- -D warnings`: passes.
+
+The full multi-language oracle was not rerun during this stop-time verification.
+No code, generated files, or behavior changed; no bucket failure remains to fix.
