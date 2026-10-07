@@ -1,6 +1,6 @@
 # CMake backslash/NUL recovery (bucket `9a8ee9c6`)
 
-Reverified at starting revision `d2ce9a9` (after the latest main merge).
+Reverified at starting revision `47534ec` (after the latest main merge).
 The reported 113-byte input,
 `Tests/RunCMake/Syntax/NullAfterBackslash.cmake`, already passes with the merged
 CMake scanner correction; no additional runtime or scanner change is needed.
@@ -45,6 +45,9 @@ changes, and both the existing scanner tests and parser regression pass.
 - `cargo test -p ts_port_cmake`: **24 tests pass**.
 - `cargo test -p ts_port --test cmake_backslash_nul`: **1 test passes**.
 - `cargo clippy -p ts_port_cmake -p ts_port --all-targets -- -D warnings`: passes.
+- Strict workspace Clippy was also attempted; it stops at the same pre-existing
+  unused-assignment warning in host-owned `grammars/yaml/src/lex.rs:20`. That
+  generated file is outside this task's permitted edits and remains unchanged.
 
 The assigned `bucket:9a8ee9c6` passed on the first oracle run at this starting
 revision, and the full CMake rerun reported no remaining divergence to fix. This
