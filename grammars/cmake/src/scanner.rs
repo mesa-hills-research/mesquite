@@ -15,21 +15,12 @@ const LINE_COMMENT: usize = 6;
 const STATE_SIZE: usize = 8;
 
 /// The scanner's state (C's `payload`).
+/// C's calloc initializes both fields to zero, including the opening token.
+#[derive(Default)]
 pub(crate) struct Scanner {
     level: u32,
     // Keep the raw enum representation so deserialization preserves every byte.
     token: u32,
-}
-
-impl Default for Scanner {
-    fn default() -> Self {
-        // Zero would mean BRACKET_ARGUMENT_OPEN and spuriously allow content
-        // before any opener, notably when error recovery enables all symbols.
-        Self {
-            level: 0,
-            token: u32::MAX,
-        }
-    }
 }
 
 impl Scanner {
@@ -180,16 +171,14 @@ impl ExternalScanner for Scanner {
             self.level = u32::from_ne_bytes(buffer[..4].try_into().unwrap());
             self.token = u32::from_ne_bytes(buffer[4..STATE_SIZE].try_into().unwrap());
         } else {
-            // C resets only the level, leaving the previous token untouched.
-            self.level = 0;
+            // Empty or wrong-sized snapshots restore C's zero-initialized state.
+            *self = Self::default();
         }
     }
 }
 
 /// Creates a scanner (C's `tree_sitter_cmake_external_scanner_create`).
 pub(crate) fn create() -> Box<dyn ExternalScanner> {
-    // C uses uninitialized malloc storage. Use an inert token for that
-    // indeterminate initial value; subsequent mutations follow C exactly.
     Box::<Scanner>::default()
 }
 
@@ -271,12 +260,37 @@ mod tests {
     }
 
     #[test]
-    fn fresh_scanner_does_not_start_in_bracket_content() {
+    fn fresh_scanner_accepts_bracket_content_during_recovery() {
         let mut scanner = create();
-        scanner.deserialize(&[]);
-        let mut lexer = TestLexer::new("text");
-        assert!(!scanner.scan(&mut lexer, &[true; 7]));
+        let mut snapshot = [0xff; STATE_SIZE];
+        assert_eq!(scanner.serialize(&mut snapshot), STATE_SIZE);
+        assert_eq!(snapshot, [0; STATE_SIZE]);
+
+        // Zero is BRACKET_ARGUMENT_OPEN, so recovery can scan content even
+        // without an opener. Normal lexing does not enable the content symbol.
+        let mut lexer = TestLexer::new("text)");
+        assert!(!scanner.scan(&mut lexer, &valid(&[BRACKET_ARGUMENT_OPEN])));
         assert!(lexer.events.is_empty());
+        assert!(scanner.scan(&mut lexer, &[true; 7]));
+        assert_eq!(lexer.symbol, BRACKET_ARGUMENT_CONTENT as u16);
+        assert_eq!(lexer.end, Some(5));
+    }
+
+    #[test]
+    fn empty_snapshot_resets_token_and_delimiter_level() {
+        let mut scanner = Scanner::default();
+        let mut opener = TestLexer::new("#[==[");
+        assert!(scanner.scan(&mut opener, &valid(&[BRACKET_COMMENT_OPEN])));
+        assert_eq!(scanner.level, 2);
+        assert_eq!(scanner.token, BRACKET_COMMENT_OPEN as u32);
+
+        scanner.deserialize(&[]);
+        let mut content = TestLexer::new("text]]tail");
+        assert!(scanner.scan(&mut content, &[true; 7]));
+        assert_eq!(content.symbol, BRACKET_ARGUMENT_CONTENT as u16);
+        assert_eq!(content.end, Some(4));
+        assert_eq!(content.position, 5);
+        assert_eq!(scanner.level, 0);
     }
 
     #[test]
@@ -428,7 +442,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshots_are_native_endian_and_bad_lengths_reset_only_level() {
+    fn snapshots_are_native_endian_and_bad_lengths_reset_both_fields() {
         let mut scanner = Scanner {
             level: 0x12345678,
             token: 0xa1b2c3d4,
@@ -445,9 +459,10 @@ mod tests {
         assert_eq!(restored.token, scanner.token);
         for length in [0, 1, 7, 9, 16] {
             restored.level = 42;
+            restored.token = scanner.token;
             restored.deserialize(&buffer[..length]);
             assert_eq!(restored.level, 0);
-            assert_eq!(restored.token, scanner.token);
+            assert_eq!(restored.token, BRACKET_ARGUMENT_OPEN as u32);
         }
     }
 }
