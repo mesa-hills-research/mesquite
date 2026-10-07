@@ -339,6 +339,26 @@ mod tests {
     }
 
     #[test]
+    fn fresh_and_reset_scanners_emit_zero_width_content_at_eof() {
+        let mut scanner = create();
+        for reset in [false, true] {
+            if reset {
+                // The previous scan changed token to CONTENT; resetting must
+                // allow the same zero-width recovery token to be emitted again.
+                scanner.deserialize(&[]);
+            }
+            let mut lexer = TestLexer::new("");
+            assert!(scanner.scan(&mut lexer, &[true; 7]));
+            assert_eq!(lexer.position, 0);
+            assert_eq!(lexer.end, None);
+            assert_eq!(
+                lexer.events,
+                [Event::Symbol(BRACKET_ARGUMENT_CONTENT as u16)]
+            );
+        }
+    }
+
+    #[test]
     fn empty_snapshot_clears_bracket_comment_state_during_recovery() {
         let mut scanner = create();
         let mut comment = TestLexer::new("#[=[");
@@ -521,7 +541,11 @@ mod tests {
         restored.deserialize(&buffer[..8]);
         assert_eq!(restored.level, scanner.level);
         assert_eq!(restored.token, scanner.token);
-        for token in [BRACKET_COMMENT_OPEN as u32, scanner.token] {
+        for token in [
+            BRACKET_COMMENT_OPEN as u32,
+            BRACKET_COMMENT_CONTENT as u32,
+            scanner.token,
+        ] {
             for length in [0, 1, 7, 9, 16] {
                 restored.level = 42;
                 restored.token = token;
@@ -535,5 +559,39 @@ mod tests {
                 assert_eq!(lexer.end, Some(4));
             }
         }
+    }
+
+    #[test]
+    fn fresh_scanner_emits_empty_content_at_eof_during_recovery() {
+        let mut scanner = create();
+        let mut snapshot = [0xff; STATE_SIZE];
+        assert_eq!(scanner.serialize(&mut snapshot), STATE_SIZE);
+        assert_eq!(snapshot, [0; STATE_SIZE]);
+
+        let mut lexer = TestLexer::new("");
+        assert!(scanner.scan(&mut lexer, &[true; 7]));
+        assert_eq!(lexer.position, 0);
+        assert_eq!(lexer.end, None);
+        assert_eq!(
+            lexer.events,
+            [Event::Symbol(BRACKET_ARGUMENT_CONTENT as u16)]
+        );
+    }
+
+    #[test]
+    fn empty_snapshot_resets_token_and_allows_content_at_eof() {
+        let mut scanner = Scanner {
+            level: 2,
+            token: BRACKET_COMMENT_CONTENT as u32,
+        };
+        scanner.deserialize(&[]);
+        let mut lexer = TestLexer::new("");
+        assert!(scanner.scan(&mut lexer, &[true; 7]));
+        assert_eq!(scanner.level, 0);
+        assert_eq!(scanner.token, BRACKET_ARGUMENT_CONTENT as u32);
+        assert_eq!(
+            lexer.events,
+            [Event::Symbol(BRACKET_ARGUMENT_CONTENT as u16)]
+        );
     }
 }
