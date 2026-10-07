@@ -107,6 +107,13 @@ Ownership rules for signatures:
 State comparison is byte equality with length checks, not allocation identity.
 Copying long immutable scanner snapshots shares bytes safely.
 
+Leaf construction keeps the inline case separate from the heap allocator. The
+`ts_subtree_new_leaf_with` initializer runs only for heap leaves, before sharing
+the header, to install serialized external-scanner state without an immediate
+COW check. Never use this heap-only initializer to mutate inline-leaf metadata.
+The release entry point similarly dispatches heap handles to the existing
+worklist/pool algorithm; null and inline releases do not clear pool scratch.
+
 ## Graph-structured stack
 
 The stack is a parser-local arena. `StackNodeId(usize)` indexes

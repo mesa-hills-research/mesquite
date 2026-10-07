@@ -231,6 +231,7 @@ pub(crate) fn ts_subtree_can_inline(padding: Length, size: Length, lookahead_byt
         && lookahead_bytes < 16
 }
 
+#[inline]
 pub(crate) fn ts_subtree_new_leaf(
     pool: &mut SubtreePool,
     symbol: Symbol,
@@ -242,6 +243,38 @@ pub(crate) fn ts_subtree_new_leaf(
     depends_on_column: bool,
     is_keyword: bool,
     language: &Language,
+) -> Subtree {
+    ts_subtree_new_leaf_with(
+        pool,
+        symbol,
+        padding,
+        size,
+        lookahead_bytes,
+        parse_state,
+        has_external_tokens,
+        depends_on_column,
+        is_keyword,
+        language,
+        |_| {},
+    )
+}
+
+/// Initialize heap-only token metadata before sharing the header. The callback
+/// is intentionally not invoked for inline leaves; external tokens always take
+/// the heap path, using the same inline eligibility rules as C.
+#[inline]
+pub(crate) fn ts_subtree_new_leaf_with(
+    pool: &mut SubtreePool,
+    symbol: Symbol,
+    padding: Length,
+    size: Length,
+    lookahead_bytes: u32,
+    parse_state: StateId,
+    has_external_tokens: bool,
+    depends_on_column: bool,
+    is_keyword: bool,
+    language: &Language,
+    initialize: impl FnOnce(&mut SubtreeHeapData),
 ) -> Subtree {
     let metadata = ts_language_symbol_metadata(language, symbol);
     let extra = symbol == BUILTIN_SYM_END;
@@ -262,41 +295,74 @@ pub(crate) fn ts_subtree_new_leaf(
             padding_rows_and_lookahead: padding.extent.row as u8 | ((lookahead_bytes as u8) << 4),
         })
     } else {
-        let header = SubtreeHeapData {
+        new_heap_leaf(
+            pool,
+            symbol,
             padding,
             size,
             lookahead_bytes,
-            symbol,
             parse_state,
-            visible: metadata.visible,
-            named: metadata.named,
-            extra,
             has_external_tokens,
             depends_on_column,
             is_keyword,
-            children: Vec::new(),
-            payload: if has_external_tokens {
-                SubtreePayload::External(ExternalScannerState::default())
-            } else {
-                SubtreePayload::Leaf
-            },
-            error_cost: 0,
-            fragile_left: false,
-            fragile_right: false,
-            has_changes: false,
-            has_external_scanner_state_change: false,
-            is_missing: false,
-        };
-        let data = if let Some(mut data) = pool.free_trees.pop() {
-            *Arc::get_mut(&mut data).expect("pooled subtrees must be unique") = header;
-            data
-        } else {
-            // Initialize fresh allocations directly: no default header to
-            // overwrite, and no uniqueness synchronization before first use.
-            Arc::new(header)
-        };
-        Subtree::Heap(data)
+            language,
+            initialize,
+        )
     }
+}
+
+// Keep allocation/pool cleanup off the common inline-leaf construction path.
+#[inline(never)]
+fn new_heap_leaf(
+    pool: &mut SubtreePool,
+    symbol: Symbol,
+    padding: Length,
+    size: Length,
+    lookahead_bytes: u32,
+    parse_state: StateId,
+    has_external_tokens: bool,
+    depends_on_column: bool,
+    is_keyword: bool,
+    language: &Language,
+    initialize: impl FnOnce(&mut SubtreeHeapData),
+) -> Subtree {
+    let metadata = ts_language_symbol_metadata(language, symbol);
+    let extra = symbol == BUILTIN_SYM_END;
+    let mut header = SubtreeHeapData {
+        padding,
+        size,
+        lookahead_bytes,
+        symbol,
+        parse_state,
+        visible: metadata.visible,
+        named: metadata.named,
+        extra,
+        has_external_tokens,
+        depends_on_column,
+        is_keyword,
+        children: Vec::new(),
+        payload: if has_external_tokens {
+            SubtreePayload::External(ExternalScannerState::default())
+        } else {
+            SubtreePayload::Leaf
+        },
+        error_cost: 0,
+        fragile_left: false,
+        fragile_right: false,
+        has_changes: false,
+        has_external_scanner_state_change: false,
+        is_missing: false,
+    };
+    initialize(&mut header);
+    let data = if let Some(mut data) = pool.free_trees.pop() {
+        *Arc::get_mut(&mut data).expect("pooled subtrees must be unique") = header;
+        data
+    } else {
+        // Initialize fresh allocations directly: no default header to
+        // overwrite, and no uniqueness synchronization before first use.
+        Arc::new(header)
+    };
+    Subtree::Heap(data)
 }
 
 pub(crate) fn ts_subtree_set_symbol(tree: &mut Subtree, symbol: Symbol, language: &Language) {
@@ -810,10 +876,16 @@ pub(crate) fn ts_subtree_retain(tree: &Subtree) -> Subtree {
     tree.clone()
 }
 
+// Inline and null handles have no allocation or worklist state to release.
+// Keep their callers out of the heap traversal's register-save/cleanup path.
+#[inline]
 pub(crate) fn ts_subtree_release(pool: &mut SubtreePool, tree: Subtree) {
-    let Subtree::Heap(mut data) = tree else {
-        return;
-    };
+    if let Subtree::Heap(data) = tree {
+        release_heap(pool, data);
+    }
+}
+
+fn release_heap(pool: &mut SubtreePool, mut data: Arc<SubtreeHeapData>) {
     pool.tree_stack.clear();
     // Shared handles only need Arc's decrement. The initial unique handle can
     // be consumed directly, without a round trip through the worklist.
@@ -1710,6 +1782,22 @@ mod construction_tests {
     }
 
     #[test]
+    fn release_fast_paths_preserve_scratch_and_shared_ownership() {
+        let shared = Arc::new(SubtreeHeapData::default());
+        let mut pool = ts_subtree_pool_new(32);
+        pool.tree_stack.push(Subtree::Heap(shared.clone()));
+        ts_subtree_release(&mut pool, Subtree::Null);
+        ts_subtree_release(&mut pool, leaf(1, false));
+        assert_eq!(pool.tree_stack.len(), 1);
+        assert_eq!(Arc::strong_count(&shared), 2);
+
+        ts_subtree_release(&mut pool, Subtree::Heap(shared.clone()));
+        assert!(pool.tree_stack.is_empty());
+        assert!(pool.free_trees.is_empty());
+        assert_eq!(Arc::strong_count(&shared), 1);
+    }
+
+    #[test]
     fn scanner_state_inline_boundary_and_byte_equality() {
         for length in [0, 1, 23, 24, 25, 1024] {
             let bytes: Vec<_> = (0..length).map(|i| i as u8).collect();
@@ -2131,6 +2219,45 @@ mod summary_tests {
             tables
         });
         Language::from(&*TABLES)
+    }
+
+    #[test]
+    fn heap_leaf_initialization_precedes_sharing_for_fresh_and_pooled_headers() {
+        let language = language();
+        let mut pool = ts_subtree_pool_new(32);
+        let inline = ts_subtree_new_leaf_with(
+            &mut pool, 1, length_zero(), length_zero(), 0, 7, false, false, false,
+            &language, |_| panic!("inline leaves do not construct a heap header"),
+        );
+        assert!(matches!(inline, Subtree::Inline(_)));
+
+        for length in [0, 24, 25, 1024] {
+            let bytes: Vec<_> = (0..length).map(|i| i as u8).collect();
+            let mut initialized = false;
+            let tree = ts_subtree_new_leaf_with(
+                &mut pool, 1, length_zero(), length_zero(), 0, 7, true, true, false,
+                &language,
+                |header| {
+                    assert!(header.has_external_tokens);
+                    assert!(header.children.is_empty());
+                    header.payload = SubtreePayload::External(ts_external_scanner_state_init(&bytes));
+                    header.has_external_scanner_state_change = true;
+                    initialized = true;
+                },
+            );
+            assert!(initialized);
+            assert!(pool.free_trees.is_empty());
+            let Subtree::Heap(header) = &tree else { panic!("external tokens are heap leaves") };
+            assert_eq!(Arc::strong_count(header), 1);
+            assert!(header.has_external_scanner_state_change && header.depends_on_column);
+            assert_eq!(header.parse_state, 7);
+            assert_eq!(
+                ts_external_scanner_state_data(ts_subtree_external_scanner_state(&tree).unwrap()),
+                bytes,
+            );
+            ts_subtree_release(&mut pool, tree);
+            assert_eq!(pool.free_trees.len(), 1);
+        }
     }
 
     #[test]
