@@ -407,7 +407,10 @@ fn scan_after_newline(lexer: &mut Cursor<'_>, valid_symbols: &[bool]) -> bool {
             0x40 => {
                 // '@'
                 if valid_symbols[CONSTRUCTOR] {
-                    while !is_space(lexer.lookahead()) {
+                    // The eof checks here and below are not in C, which loops forever
+                    // on an annotation at the end of the input: the lookahead is then
+                    // 0, neither a space nor a newline, and advancing stays put.
+                    while !is_space(lexer.lookahead()) && !lexer.eof() {
                         lexer.advance(true);
                     }
                     while is_space(lexer.lookahead()) {
@@ -421,7 +424,8 @@ fn scan_after_newline(lexer: &mut Cursor<'_>, valid_symbols: &[bool]) -> bool {
                         lexer.lookahead() != i32::from(b'\n')
                     } else {
                         !is_space(lexer.lookahead())
-                    } {
+                    } && !lexer.eof()
+                    {
                         lexer.advance(true);
                         if lexer.lookahead() == i32::from(b'(') {
                             saw_paren = true;
@@ -692,6 +696,28 @@ mod tests {
             let (result, lexer) = scan(&input, &[SEMI]);
             assert!(result, "{input:?}");
             assert_eq!((lexer.position, lexer.end), (1, Some(0)), "{input:?}");
+        }
+    }
+
+    #[test]
+    fn annotation_at_end_of_input_ends_the_scan() {
+        // C loops forever on these: an annotation after a newline, cut off by the end
+        // of the input, while a constructor or a property accessor may follow.
+        for (input, tokens) in [
+            ("\n@", &[SEMI, CONSTRUCTOR][..]),
+            ("\n@Inject", &[SEMI, CONSTRUCTOR]),
+            ("\n@", &[SEMI, GET]),
+            ("\n    @Inject", &[CLASS_MEMBER_SEMI, GET, SET]),
+            ("\n@JvmName(\"getX", &[SEMI, GET]),
+            ("\n@Deprecated(\"a b\")", &[SEMI, SET]),
+        ] {
+            let (result, lexer) = scan(input, tokens);
+            assert!(result, "{input:?}");
+            assert_eq!(
+                (lexer.position, lexer.end),
+                (input.len(), Some(0)),
+                "{input:?}"
+            );
         }
     }
 

@@ -44,3 +44,8 @@ port keeps it. Otherwise both sides of the comparison carried the same fixes:
   these fixes the C scanner's incremental results depend on earlier parses.
 - **CMake scanner:** a new scanner starts zeroed, and a reset also clears the pending
   token, for the same reason.
+
+The port also fixes inputs on which C never returns or writes past a buffer:
+
+- **Kotlin scanner:** a file that ends right after an annotation (`val a` then `@` on
+  the last line) parses. C's scanner loops forever at the end of the input.

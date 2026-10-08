@@ -46,6 +46,26 @@ mod tests {
     }
 
     #[test]
+    fn annotation_at_end_of_input_parses() {
+        // The C scanner loops forever on each of these files (no newline at the end).
+        let language = tree_sitter::Language::new(super::LANGUAGE);
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&language).unwrap();
+        for text in [
+            "val a\n@",
+            "class A\n@",
+            "class A\n@Suppress(\"x\")",
+            "class Repo {\n    val db: Db\n    @Inject",
+            "package p\n\nclass A {\n    var x: Int = 0\n        @JvmName(\"getX\")",
+            "val x: Int\n    @Deprecated(\"a b\")",
+            "val x = 1\n@file:JvmName(\"A\")",
+        ] {
+            let tree = parser.parse(text, None).expect(text);
+            assert_eq!(tree.root_node().end_byte(), text.len(), "{text:?}");
+        }
+    }
+
+    #[test]
     fn tables_decode() {
         let language = super::language();
         assert_eq!(language.abi_version, 14);
