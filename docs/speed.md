@@ -66,22 +66,15 @@ templates and CMake are slower.
 
 ## Method
 
-- **Machine:** AMD EPYC 9354P (32 cores, 64 threads), 755 GB of memory, Ubuntu 24.04 on
-  Linux 6.8. Each job ran pinned to its own physical core with the core's second thread
-  idle. Other work ran on the remaining cores at the time.
-- **Builds:** both sides in Cargo's release profile, at `opt-level = 3` with 16 codegen
-  units and no LTO. GCC 13.3 compiled the C library and grammars through the `cc` crate,
-  and Rust 1.99 compiled the port.
-- **Inputs:** up to 300 files per grammar, picked by a hash of the path, from the sets
-  the correctness checks used: the grammars' test corpora, a corpus of real projects per
-  language and the Linux 6.17 sources for C.
-- **What was timed:** parsing alone, with a fresh parser per file created outside the
-  timed part. Each file is parsed five times and its fastest parse counts. Each grammar
-  runs three rounds on one core, with C first in two of them, and a file's time is its
-  fastest round. A grammar's ratio is the port's total time over C's for the files both
-  parsed. The overall figure is the geometric mean of the grammars' ratios, with the
-  kernel row left out because it repeats the `c` grammar.
-- **Noise:** a grammar's three per-round ratios differ by at most 4.4%.
+- **Machine:** AMD EPYC 9354P with Ubuntu 24.04, each job pinned to its own physical
+  core.
+- **Builds:** Cargo's release profile (`opt-level = 3`, no LTO) for both. GCC 13.3
+  compiled the C library and grammars, and Rust 1.99 compiled the port.
+- **Inputs:** up to 300 files per grammar from the grammars' test corpora and real
+  projects in each language, and the Linux 6.17 sources for the kernel row.
+- **Timing:** parsing alone, with a fresh parser per file. A file's time is its fastest
+  of 15 parses, and a grammar's ratio is the port's total time over C's. The overall
+  figure is the geometric mean of the grammars' ratios, without the kernel row.
 
 ## Memory and startup
 
@@ -94,3 +87,44 @@ ranges from 0.1 ms (JSON) to 619 ms (Verilog), with a median of 24 ms and 3.8 s 
 Peak memory of a process that parses one small file with each of the 54 grammars is
 224 MB for the port and 45 MB for C. With one grammar (JSON) it is 3.5 MB for the port
 and 4.0 MB for C.
+
+## Comparing on your own files
+
+Cargo can rename dependencies, so one program can use both libraries:
+
+```toml
+[dependencies]
+c_tree_sitter = { package = "tree-sitter", version = "=0.25.10" }
+c_rust = { package = "tree-sitter-rust", version = "=0.24.2" }
+port_tree_sitter = { package = "mhr_tree_sitter", git = "https://github.com/mesa-hills-research/mhr_tree_sitter" }
+port_rust = { package = "mhr_tree_sitter_rust", git = "https://github.com/mesa-hills-research/mhr_tree_sitter" }
+```
+
+```rust
+use std::time::{Duration, Instant};
+
+fn main() {
+    let (mut c, mut port) = (Duration::ZERO, Duration::ZERO);
+    for path in std::env::args().skip(1) {
+        let source = std::fs::read(path).unwrap();
+
+        let mut parser = c_tree_sitter::Parser::new();
+        parser.set_language(&c_rust::LANGUAGE.into()).unwrap();
+        let start = Instant::now();
+        parser.parse(&source, None).unwrap();
+        c += start.elapsed();
+
+        let mut parser = port_tree_sitter::Parser::new();
+        parser.set_language(&port_rust::LANGUAGE.into()).unwrap();
+        let start = Instant::now();
+        parser.parse(&source, None).unwrap();
+        port += start.elapsed();
+    }
+    println!("port/C {:.2}", port.as_secs_f64() / c.as_secs_f64());
+}
+```
+
+Build it with `cargo build --release` (the C side needs a C compiler) and pass it the
+files to parse. Pin it to one core (`taskset -c 2 ...`) and run it a few times for
+steady numbers. Other grammars work the same way, with the crates and constants listed
+in [grammars.md](grammars.md).

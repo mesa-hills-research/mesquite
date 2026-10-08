@@ -84,10 +84,8 @@ Library names follow the upstream crates, suffixes included: `tree_sitter_kotlin
 
 ## Repository layout
 
-- `runtime/`: the runtime (`mhr_tree_sitter`). `runtime/PORTING.md` is the translation
-  contract the swarm worked from, and `runtime/tests/*.md` are its optimization notes.
-  Both use the crates' names from before the rename (`ts_port`, `ts_port_tables`,
-  `ts_port_<key>`).
+- `runtime/`: the runtime (`mhr_tree_sitter`). Most of its modules mirror a C source
+  file of the same name and keep C's function names.
 - `tables/`: `mhr_tree_sitter_language` (library `tree_sitter_language`), the
   counterpart of upstream's tree-sitter-language crate. The runtime and the grammar
   crates share it. It holds the grammar tables and `LanguageFn`.

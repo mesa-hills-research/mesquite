@@ -10,12 +10,8 @@ A pure, safe Rust port of the [tree-sitter](https://github.com/tree-sitter/tree-
   Rust API. Each grammar crate's library and constants are named like the upstream
   crate's (`tree_sitter_rust::LANGUAGE`), so most code that uses tree-sitter only needs
   its `Cargo.toml` changed.
-- **Same trees as C.** Trees, incremental reparses, query results and progress
-  callbacks were identical to the C library's on more than 700,000 inputs.
-
-It was made by an AI agent swarm. Agents translated the C runtime and the grammars'
-external scanners unit by unit, and a test gate compared every change with the C
-library.
+- **Same results as C.** Trees, incremental reparses, query results and progress
+  callbacks match the C library's, apart from a few [C bugs it fixes](docs/api-differences.md#fixes).
 
 ## Languages
 
@@ -45,8 +41,8 @@ Parse time relative to C tree-sitter 0.25.10 with the same grammars (below 1 is 
 | Java | 0.67 |
 
 The port is faster on 49 of the 54 grammars. Each grammar's tables are decoded the first
-time it is used, which takes a median of 24 ms. Every grammar, the inputs, the machine and
-the method are in [docs/speed.md](docs/speed.md).
+time it is used, which takes a median of 24 ms. Every grammar, the machine, the method and
+how to compare on your own files are in [docs/speed.md](docs/speed.md).
 
 ## Installation
 
@@ -67,8 +63,8 @@ tree-sitter = { package = "mhr_tree_sitter", git = "https://github.com/mesa-hill
 tree-sitter-rust = { package = "mhr_tree_sitter_rust", git = "https://github.com/mesa-hills-research/mhr_tree_sitter" }
 ```
 
-The crates use the 2024 edition and are tested with Rust 1.97. Clippy's
-`incompatible_msrv` check finds no standard-library API newer than Rust 1.89.
+The crates use the 2024 edition. They are tested with Rust 1.97 and use no
+standard-library API newer than Rust 1.89.
 
 ## Usage
 
@@ -104,11 +100,16 @@ while let Some(found) = matches.next() {
 
 - [Grammars](docs/grammars.md): every grammar crate, its upstream crate and constants,
   and the repository layout.
-- [API differences](docs/api-differences.md) from tree-sitter 0.25.10's Rust binding,
-  chiefly the missing C API and WebAssembly support, and a `Parser` that is `Send` but
-  not `Sync`.
-- [Verification](docs/verification.md): how the port was compared with the C library.
+- [Differences](docs/api-differences.md) from tree-sitter 0.25.10: chiefly the missing C
+  API and WebAssembly support, a `Parser` that is `Send` but not `Sync`, and the C bugs
+  the port fixes.
 - [Speed](docs/speed.md): the full comparison with C.
+
+## Tests
+
+```sh
+cargo test --workspace
+```
 
 ## License
 

@@ -1,6 +1,7 @@
-# API differences from tree-sitter 0.25.10
+# Differences from tree-sitter 0.25.10
 
-Compared with tree-sitter's Rust binding (`binding_rust/lib.rs` at v0.25.10).
+The API is compared with tree-sitter's Rust binding (`binding_rust/lib.rs` at v0.25.10).
+The last section lists the [bugs the port fixes](#fixes).
 
 ## Not available
 
@@ -60,3 +61,22 @@ Compared with tree-sitter's Rust binding (`binding_rust/lib.rs` at v0.25.10).
 - More trait impls: `Clone` for `QueryMatch`, `Debug` for `LanguageRef`, `TreeCursor`,
   `ParseState` and `QueryCursorState`, `Default` for the two state types, and the
   common derives on `LanguageMetadata`.
+
+## Fixes
+
+These are bugs in the C runtime and the upstream grammars. Everywhere else the port's
+results match C's.
+
+- **Runtime:** a lex function or external scanner that keeps advancing at the end of
+  the input made C hang. The port ends that parse with no tree (see above).
+- **CMake scanner:** a new scanner starts zeroed, and a reset also clears the pending
+  token. Upstream leaves the state uninitialized and resets only the bracket level, so
+  its incremental results can vary from run to run.
+- **Kotlin scanner:** a file that ends right after an annotation (`val a` then `@` on
+  the last line) parses. Upstream's scanner loops forever at the end of the input.
+- **Markdown scanner:** from 255 nested block quotes or list items on, the saved
+  scanner state keeps the outermost 254 blocks, and the parser recovers from the rest.
+  Upstream writes past the end of its 1,024-byte buffer.
+- **Perl scanner:** a reset also clears `recovery_emitted`, and the serialized state
+  holds no uninitialized padding. Upstream's incremental results can depend on what the
+  parser parsed before and vary between processes.
