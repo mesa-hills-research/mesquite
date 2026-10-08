@@ -35,7 +35,6 @@ Parse time relative to C tree-sitter 0.25.10 with the same grammars (below 1 is 
 | Inputs | Port / C |
 |---|---:|
 | All 54 grammars (geometric mean) | 0.74 |
-| Never-seen repositories (25 grammars) | 0.72 |
 | C (Linux kernel) | 0.66 |
 | C++ | 0.66 |
 | Rust | 0.70 |

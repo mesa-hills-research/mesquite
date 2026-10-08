@@ -13,7 +13,7 @@ They were identical on 727,612 inputs across the 54 grammars:
 - the gate's sets, used during development: the grammars' test corpora, a development
   corpus per language and fuzzed variants of both
 - the Linux kernel sources (C)
-- repositories that were never seen during development
+- a further set of open-source repositories
 - a separate fuzzing run with its own fuzzer and seed
 
 The comparison ran on an overflow-checked build and on a normal build.
@@ -21,7 +21,7 @@ The comparison ran on an overflow-checked build and on a normal build.
 | Set | Inputs | Identical |
 |---|---:|---:|
 | Development sets: the gate's sets, real projects per language and the Linux kernel | 267,285 | 267,283 |
-| Repositories never seen during development | 166,254 | 166,254 |
+| Further open-source repositories | 166,254 | 166,254 |
 | Earlier development and safety sets (25 grammars) | 179,033 | 179,033 |
 | Perl and CMake sets, at two incremental seeds | 15,043 | 15,043 |
 | Separate fuzzing run | 100,000 | 99,999 |
