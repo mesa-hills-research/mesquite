@@ -55,6 +55,8 @@ pub(crate) struct LexerState {
     pub column_data: ColumnData,
     pub debug_buffer: String,
     ascii_window: AsciiWindow,
+    // Advances that could not move (at the end of the input) since the token began.
+    advances_at_eof: u32,
 }
 /// The generated lexers see this transient adapter. No client callback or chunk
 /// reference is ever stored in the persistent parser.
@@ -414,6 +416,7 @@ fn advance_range(state: &mut LexerState) -> bool {
 #[inline]
 pub(crate) fn ts_lexer__advance(lexer: &mut Lexer<'_>, skip: bool) {
     if lexer.state.chunk_size == 0 {
+        advance_at_eof(lexer.state);
         return;
     }
     if lexer.logger.is_some() {
@@ -421,6 +424,39 @@ pub(crate) fn ts_lexer__advance(lexer: &mut Lexer<'_>, skip: bool) {
     } else {
         ts_lexer__do_advance(lexer, skip);
     }
+}
+
+/// How many times a lex function or an external scanner may advance at the end of the
+/// input while lexing one token. Advancing there does not move, so a loop that keeps
+/// advancing never ends: the C library hangs on such scanner bugs. Working scanners
+/// advance there a handful of times at most (five in Odin's).
+pub(crate) const MAX_ADVANCES_AT_EOF: u32 = 1 << 20;
+
+/// The panic payload with which the lexer leaves a lex function or scanner that keeps
+/// advancing at the end of the input. The parser catches it and returns no tree.
+pub(crate) struct LexerStalled;
+
+#[cold]
+#[inline(never)]
+fn advance_at_eof(state: &mut LexerState) {
+    state.advances_at_eof += 1;
+    if state.advances_at_eof >= MAX_ADVANCES_AT_EOF {
+        stalled();
+    }
+}
+
+// resume_unwind skips the panic hook: the parse ends quietly, like a cancellation.
+#[cfg(panic = "unwind")]
+fn stalled() -> ! {
+    std::panic::resume_unwind(Box::new(LexerStalled))
+}
+
+#[cfg(not(panic = "unwind"))]
+fn stalled() -> ! {
+    panic!(
+        "a lexer or external scanner advanced at the end of the input {MAX_ADVANCES_AT_EOF} \
+         times while lexing one token, so it would never return"
+    )
 }
 
 // Do not rejoin the hot path after logging: making the complete logged advance
@@ -545,6 +581,7 @@ pub(crate) fn ts_lexer_reset(lexer: &mut LexerState, position: Length) {
 
 #[inline]
 pub(crate) fn ts_lexer_start(lexer: &mut Lexer<'_>) {
+    lexer.state.advances_at_eof = 0;
     lexer.state.token_start_position = lexer.state.current_position;
     lexer.state.token_end_position = LENGTH_UNDEFINED;
     lexer.state.result_symbol = 0;

@@ -48,6 +48,9 @@ Compared with tree-sitter's Rust binding (`binding_rust/lib.rs` at v0.25.10).
   `Parser::set_timeout_micros` are deprecated upstream but not here.
 - The error types implement `std::error::Error` unconditionally (upstream: with the
   `std` feature).
+- A parse returns `None` and resets the parser when a lex function or external scanner
+  advances at the end of the input 2^20 times while lexing one token, a grammar bug on
+  which C hangs. With `panic = "abort"` the process aborts with a message instead.
 
 ## Additional
 

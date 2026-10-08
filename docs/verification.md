@@ -52,3 +52,5 @@ The port also fixes inputs on which C never returns or writes past a buffer:
 - **Markdown scanner:** from 255 nested block quotes or list items on, the saved scanner
   state keeps the outermost 254 blocks, and the parser recovers from the rest. C writes
   past the end of its 1,024-byte buffer.
+- **Runtime:** a lexer or scanner that keeps advancing at the end of the input ends the
+  parse with no tree (see [API differences](api-differences.md)). C hangs.

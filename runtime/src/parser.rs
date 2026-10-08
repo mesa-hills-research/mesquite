@@ -2484,12 +2484,26 @@ pub(crate) fn ts_parser_parse(
     old_tree: Option<&Tree>,
     context: &mut ParseContext<'_, '_>,
 ) -> Option<Tree> {
-    // The exclusive parser borrow keeps diagnostic configuration fixed during
-    // this call. Reselect on every entry, including after cancellation/resume.
-    if parser.logger.is_some() || parser.dot_graph.is_some() {
-        parse_with_logging::<true>(parser, old_tree, context)
-    } else {
-        parse_with_logging::<false>(parser, old_tree, context)
+    // Not in C: a lex function or scanner that keeps advancing at the end of the
+    // input ends the parse (C hangs). The lexer unwinds out of it with LexerStalled,
+    // while no parse stack is being changed. The parse is reset, like after a
+    // scanner error, so the next call starts over.
+    let parsed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // The exclusive parser borrow keeps diagnostic configuration fixed during
+        // this call. Reselect on every entry, including after cancellation/resume.
+        if parser.logger.is_some() || parser.dot_graph.is_some() {
+            parse_with_logging::<true>(parser, old_tree, context)
+        } else {
+            parse_with_logging::<false>(parser, old_tree, context)
+        }
+    }));
+    match parsed {
+        Ok(tree) => tree,
+        Err(payload) if payload.is::<crate::lexer::LexerStalled>() => {
+            ts_parser_reset(parser);
+            None
+        }
+        Err(payload) => std::panic::resume_unwind(payload),
     }
 }
 
