@@ -14,9 +14,11 @@ const LINE_COMMENT: usize = 6;
 // four-byte TokenType enum, both native-endian, with no padding.
 const STATE_SIZE: usize = 8;
 
-/// The scanner's state (C's `payload`), zero-initialized by `ts_calloc`.
-// The initial token is BRACKET_ARGUMENT_OPEN (zero), including when error
-// recovery enables content without a preceding opener.
+/// The scanner's state (C's `payload`).
+// A new scanner starts zeroed, so its token is BRACKET_ARGUMENT_OPEN, which lets
+// error recovery emit content without a preceding opener. Upstream allocates
+// the state with `ts_malloc` and leaves it uninitialized, and since the state is
+// serialized whole, its incremental results can vary from run to run.
 #[derive(Default)]
 pub(crate) struct Scanner {
     level: u32,
@@ -99,7 +101,7 @@ impl Scanner {
 
 impl ExternalScanner for Scanner {
     fn scan(&mut self, lexer: &mut dyn Lexer, valid_symbols: &[bool]) -> bool {
-        // `iswspace` in the reference's default C locale, not Unicode whitespace.
+        // `iswspace` in C's default locale, not Unicode whitespace.
         // C skips it even when scanning bracketed content.
         while matches!(lexer.lookahead(), 0x09..=0x0d | 0x20) {
             lexer.advance(true);
@@ -174,7 +176,8 @@ impl ExternalScanner for Scanner {
         } else {
             // Empty or invalid snapshots reset both fields. Token zero is
             // BRACKET_ARGUMENT_OPEN, allowing content during recovery even
-            // without an opening token.
+            // without an opening token. Upstream resets only `level`, so its
+            // results depend on what the parser scanned before.
             *self = Self::default();
         }
     }
@@ -182,7 +185,6 @@ impl ExternalScanner for Scanner {
 
 /// Creates a scanner (C's `tree_sitter_cmake_external_scanner_create`).
 pub(crate) fn create() -> Box<dyn ExternalScanner> {
-    // C allocates the payload with calloc.
     Box::<Scanner>::default()
 }
 
@@ -358,7 +360,7 @@ mod tests {
         for input in [
             "message(\"${var\twith\ttab}\")\n",
             "message(\"${var with space}\")\n",
-            // Reduced Registry-query.cmake (bucket 4d6cc948): recovery also
+            // Reduced from CMake's Registry-query.cmake: recovery also
             // consumes a second variable reference after the malformed one.
             "message(\"${CMAKE_ CURRENT_SOURCE_DIR}/${FILE_DIR}\")\n",
         ] {

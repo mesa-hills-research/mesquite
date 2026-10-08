@@ -406,8 +406,10 @@ fn heredoc_token_handling(lexer: &mut dyn Lexer) -> bool {
     false
 }
 
-// C ABI snapshot sizes: TSPString is 36 bytes; TSPQuote is 16 (three
-// native-endian i32s, one bool, three zero padding bytes).
+// C ABI snapshot sizes: TSPString is 36 bytes, TSPQuote is 16 (three
+// native-endian i32s, one bool and three padding bytes). The padding is written
+// as zeros. Upstream copies it uninitialized, so its incremental results can
+// vary between processes.
 const MAX_SERIALIZED_QUOTES: usize = (1024 - (1 + 1 + 1 + 8 * (2 + 36) + 1)) / 16;
 
 impl ExternalScanner for Scanner {
@@ -447,6 +449,8 @@ impl ExternalScanner for Scanner {
         self.quotes.clear();
         self.heredoc_count = 0;
         self.heredoc_state = HeredocState::None;
+        // Upstream's reset leaves `recovery_emitted` set, so a reused parser's
+        // results depend on what it parsed before.
         self.recovery_emitted = false;
         if buffer.is_empty() {
             return;
@@ -631,7 +635,7 @@ impl ExternalScanner for Scanner {
                 }
             }
         }
-        // iswspace in the reference's C locale (not the Unicode whitespace table).
+        // iswspace in C's default locale (not the Unicode whitespace table).
         if !is_error && matches!(c, 9..=13 | 32) && v(NoInterpWhitespaceZw) {
             token!(NoInterpWhitespaceZw);
         }
