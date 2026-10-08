@@ -21,7 +21,7 @@ impl ExternalScanner for Scanner {
             match lexer.lookahead() {
                 // NUL (including EOF), '}', ';', ')', or newline.
                 0 | 0x7d | 0x3b | 0x29 | 0x0a => return true,
-                // iswspace in the reference's C locale. Newline returns above;
+                // iswspace in C's default locale. Newline returns above;
                 // notably, CR alone is skipped rather than ending a statement.
                 0x09..=0x0d | 0x20 => lexer.advance(true),
                 _ => return false,
@@ -149,7 +149,7 @@ mod tests {
 
     #[test]
     fn nonterminators_fail_even_after_carriage_return() {
-        // Unicode whitespace is not iswspace in the reference's C locale.
+        // Unicode whitespace is not iswspace in C's default locale.
         for tail in [
             "x", "{", "(", "#", "\u{85}", "\u{a0}", "\u{2003}", "\u{2028}",
         ] {

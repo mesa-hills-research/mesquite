@@ -1,4 +1,4 @@
-//! Parser-level regression for CMake oracle bucket 9a8ee9c6.
+//! CMake error recovery from an escaped NUL byte.
 
 use tree_sitter::{Language, ParseOptions, ParseState, Parser, Point};
 
@@ -17,7 +17,7 @@ fn backslash_nul_recovers_as_one_bracket_content_token() {
         .unwrap();
 
     // Check the initial scanner and reuse after tokens that change both scanner
-    // fields. C's calloc and empty-state deserialization both restore token zero
+    // fields. A new scanner and an empty-state reset both start at token zero
     // (BRACKET_ARGUMENT_OPEN), enabling content without an opener in recovery.
     for preceding_source in [None, Some("message([[value]])"), Some("#[=[comment]=]")] {
         // Also split immediately before/after the backslash, NUL, and newline:

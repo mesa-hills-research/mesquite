@@ -1,9 +1,8 @@
-//! Regression for CMake oracle bucket 7f8795fb.
+//! CMake error recovery from a command call left open at the end of the input.
 //!
-//! The reference scanner's zero token is BRACKET_ARGUMENT_OPEN. Recovery can
-//! therefore emit bracket content without an opener, including at EOF. An
-//! inert initial token instead makes these inputs source_file trees with
-//! inserted missing delimiters, rather than the reference's top-level ERROR.
+//! The scanner's zero token is BRACKET_ARGUMENT_OPEN. Recovery can therefore
+//! emit bracket content without an opener, including at EOF, and these inputs
+//! parse to a top-level ERROR.
 
 use std::ops::Range;
 use tree_sitter::{InputEdit, Language, ParseOptions, ParseState, Parser, Point};

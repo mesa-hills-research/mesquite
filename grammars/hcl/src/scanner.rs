@@ -34,7 +34,7 @@ pub(crate) struct Scanner {
     context_stack: Vec<Context>,
 }
 
-// The reference uses the default C locale for its wide-character predicates.
+// Wide-character predicates as in C's default locale.
 fn is_space(c: i32) -> bool {
     matches!(c, 0x09..=0x0d | 0x20)
 }
@@ -178,7 +178,7 @@ impl ExternalScanner for Scanner {
         {
             let expected_identifier = &self.context_stack.last().unwrap().heredoc_identifier;
             for &c in expected_identifier {
-                // Preserve the reference platform's signed-char promotion.
+                // Promote as C does with a signed `char` (x86-64).
                 if lexer.lookahead() == i32::from(c as i8) {
                     lexer.advance(false);
                 } else {
@@ -242,7 +242,7 @@ impl ExternalScanner for Scanner {
     }
 
     fn serialize(&mut self, buffer: &mut [u8]) -> usize {
-        // C's CHAR_MAX is 127 on the reference platform, despite writing u32s.
+        // C's CHAR_MAX is 127 where `char` is signed (x86-64), despite writing u32s.
         if self.context_stack.len() > i8::MAX as usize || buffer.len() < 4 {
             return 0;
         }

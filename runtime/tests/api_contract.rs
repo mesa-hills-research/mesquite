@@ -1,5 +1,5 @@
-//! Compile-only clients of the public surface: these are deliberately not tests
-//! that execute the algorithm stubs. Keep them compiling as translators land.
+//! Code written against tree-sitter's Rust API that must keep compiling: signatures,
+//! borrows and lifetimes. The one runnable test checks the thread-safety traits.
 #![allow(dead_code)]
 
 use std::{cell::Cell, num::NonZeroU16, rc::Rc};

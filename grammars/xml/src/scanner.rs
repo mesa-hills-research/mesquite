@@ -32,7 +32,7 @@ fn advance_if_eq(lexer: &mut dyn Lexer, ch: u8) -> bool {
 }
 
 fn is_valid_name_start_char(ch: i32) -> bool {
-    // The reference runs in the C locale: iswalpha only accepts ASCII letters.
+    // In C's default locale iswalpha only accepts ASCII letters.
     matches!(ch, 0x41..=0x5a | 0x61..=0x7a | 0x5f | 0x3a)
 }
 

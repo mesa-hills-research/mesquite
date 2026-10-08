@@ -55,7 +55,7 @@ impl<'a> Cursor<'a> {
     }
 }
 
-// The reference process uses the default C locale, not Unicode character classes.
+// Character classes as in C's default locale, not Unicode's.
 fn is_alpha(c: i32) -> bool {
     matches!(c, 0x41..=0x5a | 0x61..=0x7a)
 }

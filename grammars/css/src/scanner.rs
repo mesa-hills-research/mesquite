@@ -10,7 +10,7 @@ const ERROR_RECOVERY: usize = 2;
 /// The C scanner has no payload or persistent state.
 pub(crate) struct Scanner;
 
-// Match wctype.h in the reference's default C locale, not Unicode character
+// Match wctype.h in C's default locale, not Unicode character
 // classes. In particular, C whitespace includes vertical tab.
 fn is_space(c: i32) -> bool {
     matches!(c, 0x09..=0x0d | 0x20)

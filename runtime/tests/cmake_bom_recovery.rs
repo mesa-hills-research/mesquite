@@ -1,11 +1,11 @@
-//! Parser-level regression for CMake oracle bucket 548436bf.
+//! CMake error recovery from UTF-16 and UTF-32 files with a byte order mark.
 
 use tree_sitter::{Language, ParseOptions, ParseState, Parser, Point};
 
 #[test]
 fn non_utf8_boms_recover_as_a_single_bracket_content_token() {
-    // These are deliberately passed to the UTF-8 parser as raw bytes, matching
-    // the oracle. Invalid UTF-8 and embedded NULs are content, not EOF.
+    // These are deliberately passed to the UTF-8 parser as raw bytes. Invalid
+    // UTF-8 and embedded NULs are content, not EOF.
     let source = "\u{feff}message(STATUS \"message\")\n";
     let encodings: [(&str, Vec<u8>, usize); 4] = [
         (
@@ -47,7 +47,7 @@ fn non_utf8_boms_recover_as_a_single_bracket_content_token() {
 
             // Fresh scanners and scanners reset after bracket arguments/comments
             // must both restore token zero (BRACKET_ARGUMENT_OPEN). Recovery then
-            // permits content without an actual opener, as in the C reference.
+            // permits content without an actual opener.
             for preceding_source in [None, Some("message([[value]])"), Some("#[=[comment]=]")] {
                 if let Some(preceding_source) = preceding_source {
                     let tree = parser.parse(preceding_source, None).unwrap();

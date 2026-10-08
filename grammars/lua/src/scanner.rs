@@ -46,7 +46,7 @@ impl<'a> Cursor<'a> {
     }
 
     fn skip_whitespaces(&mut self) {
-        // `iswspace` in the reference's default C locale, including vertical tab.
+        // `iswspace` in C's default locale, including vertical tab.
         while matches!(self.lookahead, 0x09..=0x0d | 0x20) {
             self.advance(true);
         }

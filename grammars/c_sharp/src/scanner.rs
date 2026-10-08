@@ -50,7 +50,7 @@ pub(crate) struct Scanner {
     interpolation_stack: Vec<Interpolation>,
 }
 
-// The reference uses iswspace in the default C locale, not Unicode whitespace.
+// C's iswspace in the default locale, not Unicode whitespace.
 // Rust's is_ascii_whitespace also differs: it excludes vertical tab.
 fn is_space(c: i32) -> bool {
     matches!(c, 0x09..=0x0d | 0x20)

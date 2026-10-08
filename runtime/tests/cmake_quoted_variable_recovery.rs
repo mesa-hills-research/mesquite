@@ -1,4 +1,4 @@
-//! Regressions for CMake oracle buckets 1b5a6fb7 and 4d6cc948.
+//! CMake error recovery from whitespace in quoted variable names.
 
 use tree_sitter::{InputEdit, Language, ParseOptions, ParseState, Parser, Point, Tree};
 
@@ -93,9 +93,8 @@ fn repairing_and_restoring_quoted_variable_names_resets_recovery_state() {
 
 #[test]
 fn malformed_quotes_after_valid_arguments_keep_flat_recovery_children() {
-    // The two larger bucket inputs exercise recovery after valid arguments and
-    // comments, rather than immediately after a command's opening parenthesis.
-    // These trees and callback counts match the C oracle for the full fixtures.
+    // Two larger files from CMake's tests exercise recovery after valid arguments
+    // and comments, rather than immediately after a command's opening parenthesis.
     let deferred_call = concat!(
         "# Argument syntax error evaluated at deferred call site.\n",
         "cmake_language(DEFER CALL message \"Deferred \\X Error\")\n",

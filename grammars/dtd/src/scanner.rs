@@ -20,7 +20,7 @@ fn advance_if_eq(lexer: &mut dyn Lexer, ch: u8) -> bool {
     }
 }
 
-// The reference's iswalpha/iswalnum use the default C locale, not Unicode
+// C's iswalpha/iswalnum follow the default C locale, not Unicode
 // categories. The scanner explicitly allows middle dot only after the start.
 fn is_valid_name_start_char(ch: i32) -> bool {
     matches!(ch, 0x41..=0x5a | 0x61..=0x7a | 0x5f | 0x3a)

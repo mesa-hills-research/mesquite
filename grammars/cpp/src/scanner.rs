@@ -5,7 +5,7 @@ use tree_sitter_language::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE, Sy
 const RAW_STRING_DELIMITER: Symbol = 0;
 const RAW_STRING_CONTENT: Symbol = 1;
 const MAX_DELIMITER_LENGTH: usize = 16;
-// The reference scanner stores native-endian, 32-bit wchar_t values.
+// The C scanner stores native-endian, 32-bit wchar_t values.
 const WCHAR_SIZE: usize = size_of::<i32>();
 const _: () = assert!(MAX_DELIMITER_LENGTH * WCHAR_SIZE < SERIALIZATION_BUFFER_SIZE);
 
@@ -43,7 +43,7 @@ impl Scanner {
             if self.delimiter_length >= MAX_DELIMITER_LENGTH
                 || lexer.eof()
                 || lexer.lookahead() == i32::from(b'\\')
-                // iswspace in the reference process's default C locale. Rust's
+                // iswspace in C's default locale. Rust's
                 // Unicode is_whitespace would reject additional delimiters.
                 || matches!(lexer.lookahead(), 0x09..=0x0d | 0x20)
             {

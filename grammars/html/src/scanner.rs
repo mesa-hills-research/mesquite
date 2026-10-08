@@ -459,7 +459,7 @@ impl<'a> FromIterator<Tag<'a>> for TagStack {
     }
 }
 
-// The reference uses the default C locale, not Unicode character classes.
+// Character classes as in C's default locale, not Unicode's.
 // iswspace includes vertical tab, unlike Rust's u8::is_ascii_whitespace.
 fn is_space(c: i32) -> bool {
     matches!(c, 0x09..=0x0d | 0x20)

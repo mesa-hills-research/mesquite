@@ -1,12 +1,14 @@
-//! A safe Rust translation of the tree-sitter 0.25.10 runtime.
-//! See `runtime/PORTING.md` for the translation contract.
+//! A safe Rust port of the tree-sitter 0.25.10 runtime.
+//!
+//! Most modules mirror the C source file of the same name (`parser.c` is `parser`)
+//! and keep C's function names (`ts_parser_parse`), so the two read side by side.
+//! `api` and `query_api` implement tree-sitter's Rust binding on top of them.
 #![forbid(unsafe_code)]
-// Temporary skeleton allowances; remove unused allowances as units land.
+// The port keeps C functions that the Rust API doesn't call, such as the
+// `*_delete` functions and the logging and DOT-graph output.
 #![allow(dead_code, unused_imports, unused_variables, unused_macros)]
 // Preserve C private/public helper distinctions (e.g. __child versus _child).
 #![allow(non_snake_case)]
-// Stub bodies cannot yet demonstrate that these output buffers grow.
-#![allow(clippy::ptr_arg)]
 #![allow(clippy::too_many_arguments)]
 
 mod alloc;

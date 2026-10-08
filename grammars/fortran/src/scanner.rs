@@ -47,7 +47,7 @@ struct NumberResult {
     digit_count: i32,
 }
 
-// The reference uses the default C locale for wide character classification.
+// Wide character classes as in C's default locale.
 fn is_space(c: i32) -> bool {
     matches!(c, 0x09..=0x0d | 0x20)
 }

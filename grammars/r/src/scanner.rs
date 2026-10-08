@@ -237,7 +237,7 @@ impl Scanner {
 }
 
 fn is_space(c: i32) -> bool {
-    // `iswspace` in the reference's C locale includes vertical tab, not Unicode spaces.
+    // `iswspace` in C's default locale includes vertical tab, not Unicode spaces.
     matches!(c, 0x09..=0x0d | 0x20)
 }
 

@@ -119,7 +119,7 @@ impl ExternalScanner for Scanner {
             return true;
         }
 
-        // `iswspace` in the reference's C locale includes vertical tab, but no
+        // `iswspace` in C's default locale includes vertical tab, but no
         // non-ASCII whitespace.
         while matches!(lexer.lookahead(), 0x09..=0x0d | 0x20) {
             lexer.advance(true);

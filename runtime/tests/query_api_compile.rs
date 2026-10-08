@@ -1,5 +1,5 @@
-//! Compile-only clients of the official query API. The skeleton does not execute
-//! queries yet; the one runnable test checks required automatic thread traits.
+//! Code written against tree-sitter's query API that must keep compiling: signatures,
+//! borrows and lifetimes. The one runnable test checks the thread-safety traits.
 #![allow(dead_code)]
 
 use tree_sitter::{
@@ -143,8 +143,8 @@ fn move_match<'query, 'tree: 'query>(
     std::mem::replace(matches.get_mut().unwrap(), replacement)
 }
 
-// The oracle reads the limit flag without an explicit iterator drop or nested
-// scope. Like the binding, iterators must release borrows at their last use.
+// Reading the limit flag needs no explicit iterator drop or nested scope. As in
+// tree-sitter's binding, iterators release their borrows at their last use.
 fn cursor_reborrow_after_last_use(query: &Query, root: Node<'_>, source: &[u8]) {
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, root, source);

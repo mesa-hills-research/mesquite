@@ -209,7 +209,7 @@ fn is_cross_semi_token(token: Token) -> bool {
     )
 }
 
-// The reference uses the C locale's wide-character predicates, not Unicode classes.
+// Wide-character predicates as in C's default locale, not Unicode classes.
 fn is_space(character: i32) -> bool {
     matches!(character, 0x09..=0x0d | 0x20)
 }

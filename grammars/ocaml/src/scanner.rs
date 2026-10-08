@@ -191,7 +191,7 @@ fn consume_or_clear_last(lexer: &mut dyn Lexer, last: &mut i32) {
     }
 }
 
-// The reference uses iswspace/iswdigit/towupper in the default C locale.
+// iswspace/iswdigit/towupper as in C's default locale.
 fn is_space(c: i32) -> bool {
     matches!(c, 0x09..=0x0d | 0x20)
 }

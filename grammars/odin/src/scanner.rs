@@ -10,7 +10,7 @@ const BLOCK_COMMENT: usize = 4;
 const BRACKET: usize = 5;
 // External token 6 (QUOTE) is not used by the C scanner.
 
-// The reference scanner uses iswspace in the default C locale, including VT.
+// iswspace as in C's default locale, including VT.
 fn is_space(c: i32) -> bool {
     matches!(c, 0x09..=0x0d | 0x20)
 }

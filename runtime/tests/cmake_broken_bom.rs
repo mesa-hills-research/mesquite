@@ -1,4 +1,4 @@
-//! Parser-level regression for CMake oracle bucket 381f9bd4.
+//! CMake error recovery from truncated UTF-32 byte order marks.
 
 use tree_sitter::{Language, ParseOptions, ParseState, Parser, Point};
 
@@ -15,7 +15,7 @@ fn truncated_utf32_boms_recover_as_one_bracket_content_token() {
 
             // Exercise creation and reuse after both bracket token families.
             // Empty-state deserialization must reset token AND delimiter level,
-            // just like the reference scanner's zero-initialized allocation.
+            // just like a new scanner's zeroed state.
             for preceding_source in [None, Some("message([=[value]=])"), Some("#[==[comment]==]")] {
                 if let Some(preceding_source) = preceding_source {
                     let tree = parser.parse(preceding_source, None).unwrap();

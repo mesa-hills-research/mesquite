@@ -1,4 +1,4 @@
-//! Regression for CMake oracle bucket 289f3584.
+//! CMake error recovery from a malformed `endif`.
 
 use tree_sitter::{Language, ParseOptions, ParseState, Parser, Point};
 
@@ -10,7 +10,7 @@ fn malformed_endif_retains_identifier_and_recovery_content() {
     parser.set_language(&language).unwrap();
 
     // Exercise both the newly created scanner and reuse after bracket scans
-    // leave nonzero token state. The C scanner resets both fields to zero;
+    // leave nonzero token state. The scanner resets both fields to zero, and
     // zero is BRACKET_ARGUMENT_OPEN, allowing content during recovery without
     // an actual opening bracket.
     for preceding_source in [None, Some("message([[value]])"), Some("#[=[comment]=]")] {

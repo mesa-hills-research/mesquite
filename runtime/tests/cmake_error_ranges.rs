@@ -1,4 +1,4 @@
-//! Parser-level regressions for CMake oracle bucket e0b0bff8.
+//! The ranges of CMake ERROR nodes that run to the end of the input.
 
 use tree_sitter::{InputEdit, Language, ParseOptions, ParseState, Parser, Point, Tree};
 
@@ -9,8 +9,8 @@ fn assert_recovery_range(source: &str, identifier_end: usize, eof: Point, chunk_
         .unwrap();
 
     // Cover both fresh scanner creation and parser reuse after scans that leave
-    // nonzero token state. C resets both scanner fields before the next parse;
-    // token zero permits bracket content during recovery without an opener.
+    // nonzero token state. The scanner resets both fields before the next parse,
+    // and token zero permits bracket content during recovery without an opener.
     for preceding_source in [None, Some("message([[value]])"), Some("#[=[comment]=]")] {
         if let Some(preceding_source) = preceding_source {
             let preceding_tree = parser.parse(preceding_source, None).unwrap();

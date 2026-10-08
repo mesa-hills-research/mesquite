@@ -254,7 +254,7 @@ impl Default for Scanner {
     }
 }
 
-// The reference uses the default C locale for the wide-character predicates.
+// Wide-character predicates as in C's default locale.
 fn is_alpha(c: i32) -> bool {
     matches!(c, 0x41..=0x5a | 0x61..=0x7a)
 }

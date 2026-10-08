@@ -795,8 +795,7 @@ mod tests {
         };
         let node = crate::tree::ts_tree_root_node(&tree);
         let mut config = ts_query_cursor_new();
-        // Construct only the storage needed by add_state; compilation and pool
-        // allocation are independently translated units.
+        // Construct only the storage needed by add_state, without compiling a query.
         let mut execution = QueryExecution {
             config: &mut config,
             query: &query,

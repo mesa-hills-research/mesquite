@@ -1,5 +1,5 @@
-//! Binding-only tests use inert tables and explicit matches, independently of
-//! the query compiler/state machine so their units need not be implemented yet.
+//! Tests of the query API alone. They use inert tables and explicit matches,
+//! without the query compiler or state machine.
 use super::*;
 use crate::{length::Length, subtree::Subtree, tree::Tree};
 use std::sync::OnceLock;
@@ -274,8 +274,7 @@ fn owned_next_supports_capture_loops_and_preserves_streaming_current_match() {
     let query = query(vec![]);
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(&query, tree.root_node(), b"x".as_slice());
-    // Seed a completed engine state so this binding regression does not depend
-    // on the separate query parser/compiler units.
+    // Seed a completed engine state so this test needs no query parser or compiler.
     let slot = capture_list_pool_acquire(&mut matches.execution.capture_list_pool);
     capture_list_pool_get_mut(&mut matches.execution.capture_list_pool, slot).push(QueryCapture {
         node: tree.root_node(),

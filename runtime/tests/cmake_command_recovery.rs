@@ -1,4 +1,4 @@
-//! Regressions for CMake oracle bucket 6c68c51b.
+//! CMake error recovery from malformed variable references and command calls.
 
 use tree_sitter::{InputEdit, Language, ParseOptions, ParseState, Parser, Point};
 
@@ -6,8 +6,8 @@ use tree_sitter::{InputEdit, Language, ParseOptions, ParseState, Parser, Point};
 fn malformed_variable_references_recover_as_top_level_errors() {
     let language = Language::from(tree_sitter_cmake::language());
 
-    // Expected shapes and ranges come from the C oracle. In particular, these
-    // must not become normal_command nodes with a nested argument-list error.
+    // These must not become normal_command nodes with a nested argument-list
+    // error.
     for (source, child_count, named_child_count, content_start) in [
         ("set(var \"${\")\n", 7, 3, 11),
         ("message(${var\twith\ttab})\n", 5, 2, 14),
@@ -90,8 +90,8 @@ fn multiline_command_errors_preserve_recovery_boundaries() {
     let language = Language::from(tree_sitter_cmake::language());
 
     // CommandError0 and ParenInVarName0 from the CMake syntax tests. These
-    // oracle-verified cases cover whitespace before the recovery token and a
-    // valid command preceding ERROR, unlike the single-line regressions above.
+    // cover whitespace before the recovery token and a valid command preceding
+    // ERROR, unlike the single-line cases above.
     for (source, error_index, error_start, child_count, content_start, content_column) in [
         ("message\n  (\"Example Message\")\n", 0, 0, 2, 10, 2),
         (

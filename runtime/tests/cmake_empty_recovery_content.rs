@@ -1,4 +1,4 @@
-//! Regression for CMake oracle bucket f5e2762e.
+//! CMake error recovery with empty bracket content at the end of the input.
 
 use std::ops::Range;
 use tree_sitter::{InputEdit, Language, ParseOptions, ParseState, Parser, Point};
@@ -14,7 +14,7 @@ fn assert_empty_recovery_content(
     parser.set_language(&language).unwrap();
 
     // Check both initial scanner state and reuse after bracket argument/comment
-    // tokens. C zero-initializes the scanner and resets both state fields when
+    // tokens. The scanner starts zeroed and resets both state fields when
     // there is no previous external token. Zero means BRACKET_ARGUMENT_OPEN,
     // so recovery can emit content at EOF without an actual opening bracket.
     for preceding_source in [None, Some("message([[value]])"), Some("#[=[comment]=]")] {

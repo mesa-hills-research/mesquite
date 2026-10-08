@@ -33,8 +33,8 @@ pub(crate) struct Scanner {
     heredoc_count: usize,
 }
 
-// The reference runs in the default C locale: its wide-character predicates
-// classify ASCII, not Unicode. In particular, iswspace includes vertical tab.
+// In C's default locale the wide-character predicates classify ASCII, not
+// Unicode. In particular, iswspace includes vertical tab.
 fn is_space(c: i32) -> bool {
     c == 0x20 || matches!(c, 0x09..=0x0d)
 }

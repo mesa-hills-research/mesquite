@@ -13,7 +13,7 @@ pub(crate) struct Scanner {
 }
 
 fn is_space(c: i32) -> bool {
-    // `iswspace` in the reference's default C locale.
+    // `iswspace` in C's default locale.
     matches!(c, 0x09..=0x0d | 0x20)
 }
 

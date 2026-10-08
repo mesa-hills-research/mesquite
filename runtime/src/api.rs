@@ -994,7 +994,7 @@ mod tests {
                 2,
                 "\n    (root\n      (left)\n      (right))",
             ),
-            // Retain the reference formatter's final-empty-token behavior.
+            // Keep upstream format_sexp's final-empty-token behavior.
             ("(identifier)", 2, "\n    (identifier))"),
             ("(MISSING)", 2, "\n    (MISSING)))"),
         ] {

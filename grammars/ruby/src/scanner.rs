@@ -104,7 +104,7 @@ impl<'a> CachedLexer<'a> {
     }
 }
 
-// The reference uses wctype in the default C locale, not Unicode categories.
+// wctype as in C's default locale, not Unicode categories.
 fn is_space(c: i32) -> bool {
     matches!(c, 0x09..=0x0d | 0x20)
 }

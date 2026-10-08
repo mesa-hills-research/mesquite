@@ -1,4 +1,4 @@
-//! Official 0.25.10 Rust query binding surface; implementation unit query-api.
+//! The query API of tree-sitter 0.25.10's Rust binding.
 use crate::{Language, Node, Point, query::*};
 use std::{fmt, iter, marker::PhantomData, ops, sync::Mutex};
 use streaming_iterator::{StreamingIterator, StreamingIteratorMut};

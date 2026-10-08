@@ -1,4 +1,4 @@
-//! Query compiler and execution data, mirroring query.c. See PORTING.md.
+//! Query compiler and execution data, mirroring query.c.
 use crate::{
     clock::{Clock, DurationMicros},
     language::Language,
@@ -284,7 +284,7 @@ pub(crate) struct InProgressCapture {
     pub is_definite: bool,
 }
 
-// query-1 functions follow. Other units are isolated in sibling source files.
+// The query parser, analysis and execution are in the sibling `query_*` files.
 pub(crate) fn stream_advance(stream: &mut Stream<'_>) -> bool {
     stream.input += usize::from(stream.next_size);
     if stream.input < stream.source.len() {
@@ -320,7 +320,7 @@ pub(crate) fn stream_new(source: &[u8]) -> Stream<'_> {
 
 pub(crate) fn stream_skip_whitespace(stream: &mut Stream<'_>) {
     loop {
-        // iswspace in the reference's C locale, including vertical tab.
+        // iswspace in C's default locale, including vertical tab.
         if matches!(stream.next, 0x09..=0x0d | 0x20) {
             stream_advance(stream);
         } else if stream.next == i32::from(b';') {
@@ -337,7 +337,7 @@ pub(crate) fn stream_skip_whitespace(stream: &mut Stream<'_>) {
 }
 
 pub(crate) fn stream_is_ident_start(stream: &Stream<'_>) -> bool {
-    // iswalnum in the reference's C locale, plus '_' and '-'.
+    // iswalnum in C's default locale, plus '_' and '-'.
     matches!(stream.next, 0x30..=0x39 | 0x41..=0x5a | 0x61..=0x7a | 0x5f | 0x2d)
 }
 

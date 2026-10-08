@@ -15,8 +15,8 @@ const REGEX_PATTERN: usize = 6;
 const JSX_TEXT: usize = 7;
 const FUNCTION_SIGNATURE_AUTOMATIC_SEMICOLON: usize = 8;
 
-// The reference runs in the C locale. In particular, iswspace includes vertical
-// tab but not Unicode whitespace, and iswalpha/iswdigit only include ASCII.
+// Character classes as in C's default locale. In particular, iswspace includes
+// vertical tab but not Unicode whitespace, and iswalpha/iswdigit only include ASCII.
 fn is_space(c: i32) -> bool {
     matches!(c, 0x09..=0x0d | 0x20)
 }

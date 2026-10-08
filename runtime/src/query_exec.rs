@@ -639,8 +639,8 @@ mod tests {
         }
     }
 
-    // Construct the execution directly so that these tests also run before the
-    // independently translated compiler and cursor initialization units land.
+    // Construct the execution directly, so these tests need no query compiler or
+    // cursor setup.
     fn execution<'query, 'tree: 'query>(
         config: &'query mut CursorConfig,
         query: &'query CompiledQuery,

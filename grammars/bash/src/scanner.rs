@@ -218,7 +218,7 @@ impl<'a> ScannerLexer<'a> {
     }
 }
 
-// The reference uses the default C locale, not Unicode character classes.
+// Character classes as in C's default locale, not Unicode's.
 #[cfg(test)]
 fn is_space(c: i32) -> bool {
     matches!(c, 0x09..=0x0d | 0x20)
@@ -279,7 +279,7 @@ impl Heredoc {
             while lexer.lookahead() != 0
                 && lexer.lookahead() != i32::from(b'\n')
                 && size < self.delimiter.len()
-                // The reference target has signed char, including after the
+                // As C with a signed `char` (x86-64), including after the
                 // truncation performed by advance_word.
                 && i32::from(self.delimiter[size] as i8) == lexer.lookahead()
             {
