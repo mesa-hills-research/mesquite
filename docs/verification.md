@@ -49,3 +49,6 @@ The port also fixes inputs on which C never returns or writes past a buffer:
 
 - **Kotlin scanner:** a file that ends right after an annotation (`val a` then `@` on
   the last line) parses. C's scanner loops forever at the end of the input.
+- **Markdown scanner:** from 255 nested block quotes or list items on, the saved scanner
+  state keeps the outermost 254 blocks, and the parser recovers from the rest. C writes
+  past the end of its 1,024-byte buffer.

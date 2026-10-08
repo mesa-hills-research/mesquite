@@ -2,7 +2,7 @@
 
 use std::sync::OnceLock;
 
-use tree_sitter_language::{ExternalScanner, Lexer};
+use tree_sitter_language::{ExternalScanner, Lexer, SERIALIZATION_BUFFER_SIZE};
 
 // Indices in the grammar's external-token array.
 const LINE_ENDING: usize = 0;
@@ -207,6 +207,9 @@ const COLUMN: usize = 3;
 const FENCE_LENGTH: usize = 4;
 const HEADER_SIZE: usize = 5;
 const INLINE_BLOCKS: usize = 4;
+/// The most open blocks a snapshot holds: as many as fit in the runtime's buffer after
+/// the header (254).
+const SERIALIZED_BLOCKS: usize = (SERIALIZATION_BUFFER_SIZE - HEADER_SIZE) / 4;
 const CONTENT_LINE: u8 = 1;
 const CONTENT_SOFT: u8 = 1 << 1;
 const CONTENT_EOF: u8 = 1 << 2;
@@ -771,7 +774,15 @@ impl Scanner {
     #[cold]
     fn serialize_spilled(&self, buffer: &mut [u8]) -> usize {
         buffer[..HEADER_SIZE].copy_from_slice(&self.snapshot[..HEADER_SIZE]);
-        let blocks = self.spilled_blocks.as_flattened();
+        // Not in C, which writes past the end of the buffer from 255 open blocks on.
+        // The snapshot keeps the outermost blocks that fit and caps the matched count
+        // at their number, so the restored scanner has a consistent, shallower stack:
+        // it closes the blocks it kept, and the parser recovers from the rest.
+        let kept = &self.spilled_blocks[..self.spilled_blocks.len().min(SERIALIZED_BLOCKS)];
+        if kept.len() < self.spilled_blocks.len() {
+            buffer[MATCHED] = buffer[MATCHED].min(SERIALIZED_BLOCKS as u8);
+        }
+        let blocks = kept.as_flattened();
         let size = HEADER_SIZE + blocks.len();
         buffer[HEADER_SIZE..size].copy_from_slice(blocks);
         size
@@ -2665,6 +2676,28 @@ mod tests {
             assert_eq!(serialized(&mut scanner), [0; HEADER_SIZE]);
             assert_eq!(scanner.spilled_blocks.capacity(), capacity);
             assert!(scanner.simulating());
+        }
+    }
+
+    #[test]
+    fn snapshots_keep_the_outermost_blocks_that_fit_the_buffer() {
+        // C writes 5 + 4 * blocks bytes into its 1,024-byte buffer: 255 blocks overflow.
+        for count in [254u32, 255, 256, 300, 1000] {
+            let mut scanner = Scanner::with_blocks((0..count).map(|i| Block(i % 20)));
+            let header = [STATE_MATCHING, u8::MAX, 2, 3, 4];
+            scanner.snapshot[..HEADER_SIZE].copy_from_slice(&header);
+            let snapshot = serialized(&mut scanner);
+            let mut expected = vec![STATE_MATCHING, if count > 254 { 254 } else { 255 }, 2, 3, 4];
+            for i in 0..count.min(254) {
+                expected.extend_from_slice(&(i % 20).to_ne_bytes());
+            }
+            assert_eq!(snapshot, expected, "{count}");
+            assert!(snapshot.len() <= tree_sitter_language::SERIALIZATION_BUFFER_SIZE);
+
+            let mut restored = Scanner::default();
+            restored.deserialize(&snapshot);
+            assert_eq!(restored.block_count(), count.min(254) as usize);
+            assert_eq!(serialized(&mut restored), snapshot);
         }
     }
 

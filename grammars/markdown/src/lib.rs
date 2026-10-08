@@ -57,6 +57,41 @@ mod tests {
     }
 
     #[test]
+    fn deep_nesting_parses() {
+        // From 255 nested blocks on, the scanner's state is larger than the runtime's
+        // buffer (C writes past its end).
+        let language = tree_sitter::Language::new(super::LANGUAGE);
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&language).unwrap();
+        for depth in [254, 255, 256, 300, 1000] {
+            let indented = |marker: &str| -> String {
+                (0..depth)
+                    .map(|i| format!("{}{marker} item\n", "  ".repeat(i)))
+                    .collect()
+            };
+            for body in [
+                format!("{} quoted text\n", ">".repeat(depth)),
+                format!("{}quoted text\n", "> ".repeat(depth)),
+                format!("{}item\n", "- ".repeat(depth)),
+                format!("{}item\n", "> - ".repeat(depth / 2 + 1)),
+                indented("-"),
+                (0..depth)
+                    .map(|i| format!("{}1. x\n", "   ".repeat(i)))
+                    .collect(),
+            ] {
+                for text in [
+                    format!("# Title\n\n{body}\nAfter.\n"),
+                    format!("# Title\n\n{body}"),
+                    body.trim_end().to_owned(),
+                ] {
+                    let tree = parser.parse(&text, None).expect("a tree");
+                    assert_eq!(tree.root_node().end_byte(), text.len(), "{depth}: {text:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn tables_decode() {
         let language = super::language();
         assert_eq!(language.abi_version, 15);
