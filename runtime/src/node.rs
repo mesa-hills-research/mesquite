@@ -400,8 +400,8 @@ pub(crate) fn ts_node__descendant_for_point_range(
 }
 
 #[cfg(test)]
-#[path = "node1_tests.rs"]
-mod node1_tests;
+#[path = "node_tests.rs"]
+mod node_tests;
 
 #[inline]
 pub(crate) fn ts_node_end_byte(node: Node<'_>) -> u32 {
@@ -835,7 +835,7 @@ fn field_name_for_child(
 }
 
 #[cfg(test)]
-mod node_2_tests {
+mod identity_tests {
     use super::*;
     use std::sync::{Arc, LazyLock};
     use tree_sitter_language::LanguageTables;

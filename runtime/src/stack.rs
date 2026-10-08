@@ -1558,7 +1558,7 @@ pub(crate) fn ts_stack_print_dot_graph(
 }
 
 #[cfg(test)]
-mod stack2_tests {
+mod version_tests {
     use super::*;
     use std::sync::Arc;
 
@@ -2111,7 +2111,7 @@ mod stack2_tests {
 }
 
 #[cfg(test)]
-mod stack_1_tests {
+mod tests {
     use super::*;
     use std::sync::Arc;
 

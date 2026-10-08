@@ -2258,7 +2258,7 @@ mod construction_tests {
 }
 
 #[cfg(test)]
-mod subtree_2_tests {
+mod operation_tests {
     use super::*;
 
     fn leaf(symbol: u8, size: u8) -> Subtree {

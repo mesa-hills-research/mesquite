@@ -15,11 +15,11 @@ use crate::{
 use std::sync::{Arc, atomic::AtomicUsize};
 use tree_sitter_language::{ExternalScanner, LexMode, SERIALIZATION_BUFFER_SIZE};
 #[cfg(test)]
-#[path = "parser_tests_1.rs"]
-mod parser1_tests;
-#[cfg(test)]
 #[path = "parser_logging_tests.rs"]
 mod parser_logging_tests;
+#[cfg(test)]
+#[path = "parser_tests.rs"]
+mod parser_tests;
 pub(crate) const MAX_VERSION_COUNT: u32 = 6;
 pub(crate) const MAX_VERSION_COUNT_OVERFLOW: u32 = 4;
 pub(crate) const MAX_SUMMARY_DEPTH: u32 = 16;
@@ -100,10 +100,10 @@ macro_rules! parser_log {
 
 // Evaluate diagnostic arguments lazily, including symbol and stack lookups.
 // Building fmt::Arguments at a function call evaluates them even with no logger.
-macro_rules! parser3_log {
+macro_rules! parser_log_args {
     ($parser:expr, $message:expr $(,)?) => {
         if $parser.logger.is_some() || $parser.dot_graph.is_some() {
-            parser3_log_message($parser, $message);
+            parser_log_message($parser, $message);
         }
     };
 }
@@ -720,31 +720,10 @@ pub(crate) fn ts_parser__lex<const LOGGING: bool>(
     result
 }
 
-// This unit's diagnostics use the same buffer and logger as the parser's other
-// phases. Keep formatting lazy: normal parsing does not allocate log messages.
-macro_rules! parser2_log {
-    ($parser:expr, $($args:tt)*) => {
-        if $parser.logger.is_some() || $parser.dot_graph.is_some() {
-            $parser.lexer.debug_buffer = format!($($args)*);
-            ts_parser__log($parser);
-        }
-    };
-}
-
-fn parser2_tree_name(parser: &Parser, tree: &Subtree) -> &'static str {
+// C's TREE_NAME.
+fn tree_name(parser: &Parser, tree: &Subtree) -> &'static str {
     ts_language_symbol_name(parser.language.as_ref().unwrap(), ts_subtree_symbol(tree))
         .unwrap_or("")
-}
-
-fn parser2_log_stack(parser: &mut Parser) {
-    if let Some(output) = parser.dot_graph.as_mut() {
-        let _ = ts_stack_print_dot_graph(
-            &mut parser.stack,
-            parser.language.as_ref().unwrap(),
-            output.as_mut(),
-        );
-        let _ = output.write_all(b"\n\n");
-    }
 }
 
 // A miss is the usual case on the next token. Keep it at the call site rather
@@ -858,18 +837,18 @@ pub(crate) fn ts_parser__reuse_node(
             end_byte_offset = u32::MAX;
         }
         if byte_offset > position {
-            parser2_log!(
+            parser_log!(
                 parser,
                 "before_reusable_node symbol:{}",
-                parser2_tree_name(parser, &result)
+                tree_name(parser, &result)
             );
             break;
         }
         if byte_offset < position {
-            parser2_log!(
+            parser_log!(
                 parser,
                 "past_reusable_node symbol:{}",
-                parser2_tree_name(parser, &result)
+                tree_name(parser, &result)
             );
             if end_byte_offset <= position || !reusable_node_descend(&mut parser.reusable_node) {
                 reusable_node_advance(&mut parser.reusable_node);
@@ -880,10 +859,10 @@ pub(crate) fn ts_parser__reuse_node(
             &parser.reusable_node.last_external_token,
             ts_stack_last_external_token(&parser.stack, version),
         ) {
-            parser2_log!(
+            parser_log!(
                 parser,
                 "reusable_node_has_different_external_scanner_state symbol:{}",
-                parser2_tree_name(parser, &result)
+                tree_name(parser, &result)
             );
             reusable_node_advance(&mut parser.reusable_node);
             continue;
@@ -903,11 +882,11 @@ pub(crate) fn ts_parser__reuse_node(
             None
         };
         if let Some(reason) = reason {
-            parser2_log!(
+            parser_log!(
                 parser,
                 "cant_reuse_node_{} tree:{}",
                 reason,
-                parser2_tree_name(parser, &result)
+                tree_name(parser, &result)
             );
             if !reusable_node_descend(&mut parser.reusable_node) {
                 reusable_node_advance(&mut parser.reusable_node);
@@ -924,21 +903,17 @@ pub(crate) fn ts_parser__reuse_node(
             leaf_symbol,
         );
         if !ts_parser__can_reuse_first_leaf(parser, *state, &result, table_entry) {
-            parser2_log!(
+            parser_log!(
                 parser,
                 "cant_reuse_node symbol:{}, first_leaf_symbol:{}",
-                parser2_tree_name(parser, &result),
+                tree_name(parser, &result),
                 ts_language_symbol_name(parser.language.as_ref().unwrap(), leaf_symbol)
                     .unwrap_or("")
             );
             reusable_node_advance_past_leaf(&mut parser.reusable_node);
             break;
         }
-        parser2_log!(
-            parser,
-            "reuse_node symbol:{}",
-            parser2_tree_name(parser, &result)
-        );
+        parser_log!(parser, "reuse_node symbol:{}", tree_name(parser, &result));
         // reusable_node_tree already returns a retained handle.
         return result;
     }
@@ -953,41 +928,41 @@ pub(crate) fn ts_parser__select_tree(parser: &mut Parser, left: &Subtree, right:
         return false;
     }
     if ts_subtree_error_cost(right) < ts_subtree_error_cost(left) {
-        parser2_log!(
+        parser_log!(
             parser,
             "select_smaller_error symbol:{}, over_symbol:{}",
-            parser2_tree_name(parser, right),
-            parser2_tree_name(parser, left)
+            tree_name(parser, right),
+            tree_name(parser, left)
         );
         return true;
     }
     if ts_subtree_error_cost(left) < ts_subtree_error_cost(right) {
-        parser2_log!(
+        parser_log!(
             parser,
             "select_smaller_error symbol:{}, over_symbol:{}",
-            parser2_tree_name(parser, left),
-            parser2_tree_name(parser, right)
+            tree_name(parser, left),
+            tree_name(parser, right)
         );
         return false;
     }
     if ts_subtree_dynamic_precedence(right) > ts_subtree_dynamic_precedence(left) {
-        parser2_log!(
+        parser_log!(
             parser,
             "select_higher_precedence symbol:{}, prec:{}, over_symbol:{}, other_prec:{}",
-            parser2_tree_name(parser, right),
+            tree_name(parser, right),
             ts_subtree_dynamic_precedence(right),
-            parser2_tree_name(parser, left),
+            tree_name(parser, left),
             ts_subtree_dynamic_precedence(left)
         );
         return true;
     }
     if ts_subtree_dynamic_precedence(left) > ts_subtree_dynamic_precedence(right) {
-        parser2_log!(
+        parser_log!(
             parser,
             "select_higher_precedence symbol:{}, prec:{}, over_symbol:{}, other_prec:{}",
-            parser2_tree_name(parser, left),
+            tree_name(parser, left),
             ts_subtree_dynamic_precedence(left),
-            parser2_tree_name(parser, right),
+            tree_name(parser, right),
             ts_subtree_dynamic_precedence(right)
         );
         return false;
@@ -997,29 +972,29 @@ pub(crate) fn ts_parser__select_tree(parser: &mut Parser, left: &Subtree, right:
     }
     match ts_subtree_compare(left, right, &mut parser.tree_pool) {
         -1 => {
-            parser2_log!(
+            parser_log!(
                 parser,
                 "select_earlier symbol:{}, over_symbol:{}",
-                parser2_tree_name(parser, left),
-                parser2_tree_name(parser, right)
+                tree_name(parser, left),
+                tree_name(parser, right)
             );
             false
         }
         1 => {
-            parser2_log!(
+            parser_log!(
                 parser,
                 "select_earlier symbol:{}, over_symbol:{}",
-                parser2_tree_name(parser, right),
-                parser2_tree_name(parser, left)
+                tree_name(parser, right),
+                tree_name(parser, left)
             );
             true
         }
         _ => {
-            parser2_log!(
+            parser_log!(
                 parser,
                 "select_existing symbol:{}, over_symbol:{}",
-                parser2_tree_name(parser, left),
-                parser2_tree_name(parser, right)
+                tree_name(parser, left),
+                tree_name(parser, right)
             );
             false
         }
@@ -1266,7 +1241,7 @@ fn ts_parser__reduce_general(
             ts_subtree_array_delete(&mut parser.tree_pool, &mut children);
             removed_version_count += 1;
             while let Some(next_slice) = pop.peek() {
-                parser2_log!(parser, "aborting reduce with too many versions");
+                parser_log!(parser, "aborting reduce with too many versions");
                 if next_slice.version != slice.version {
                     break;
                 }
@@ -1651,13 +1626,13 @@ pub(crate) fn ts_parser__recover(
             ) && ts_parser__recover_to_state(parser, version, depth, entry.state)
             {
                 did_recover = true;
-                parser2_log!(
+                parser_log!(
                     parser,
                     "recover_to_previous state:{}, depth:{}",
                     entry.state,
                     depth
                 );
-                parser2_log_stack(parser);
+                parser_log_stack!(parser);
                 break;
             }
         }
@@ -1667,15 +1642,15 @@ pub(crate) fn ts_parser__recover(
     let mut i = previous_version_count;
     while i < ts_stack_version_count(&parser.stack) {
         if !ts_stack_is_active(&parser.stack, i) {
-            parser2_log!(parser, "removed paused version:{}", i);
+            parser_log!(parser, "removed paused version:{}", i);
             ts_stack_remove_version(&mut parser.stack, &mut parser.tree_pool, i);
-            parser2_log_stack(parser);
+            parser_log_stack!(parser);
         } else {
             i += 1;
         }
     }
     if ts_subtree_is_eof(&lookahead) {
-        parser2_log!(parser, "recover_eof");
+        parser_log!(parser, "recover_eof");
         let parent = ts_subtree_new_error_node(Vec::new(), false, &language);
         ts_stack_push(
             &mut parser.stack,
@@ -1725,10 +1700,10 @@ pub(crate) fn ts_parser__recover(
         lookahead = ts_subtree_make_mut(&mut parser.tree_pool, lookahead);
         ts_subtree_set_extra(&mut lookahead, true);
     }
-    parser2_log!(
+    parser_log!(
         parser,
         "skip_token symbol:{}",
-        parser2_tree_name(parser, &lookahead)
+        tree_name(parser, &lookahead)
     );
     let last_external_token = ts_subtree_has_external_tokens(&lookahead)
         .then(|| ts_subtree_last_external_token(&lookahead));
@@ -1843,7 +1818,7 @@ pub(crate) fn ts_parser__handle_error(
                         missing_version,
                         ts_subtree_leaf_symbol(&lookahead),
                     ) {
-                        parser3_log!(
+                        parser_log_args!(
                             parser,
                             format_args!(
                                 "recover_with_missing symbol:{}, state:{}",
@@ -1893,7 +1868,7 @@ pub(crate) fn ts_parser__handle_error(
         ts_parser__breakdown_lookahead(parser, &mut lookahead, crate::error_costs::ERROR_STATE);
     }
     ts_parser__recover(parser, version, lookahead);
-    parser3_log_stack(parser);
+    parser_log_stack!(parser);
 }
 
 pub(crate) fn ts_parser__check_progress(
@@ -1941,10 +1916,10 @@ pub(crate) fn ts_parser__advance<const LOGGING: bool>(
     allow_node_reuse: bool,
 ) -> bool {
     // Match the ordinary lazy macro, but remove the guard on the quiet path.
-    macro_rules! parser3_log {
+    macro_rules! parser_log_args {
         ($parser:expr, $message:expr $(,)?) => {
             if LOGGING && ($parser.logger.is_some() || $parser.dot_graph.is_some()) {
-                parser3_log_message($parser, $message);
+                parser_log_message($parser, $message);
             }
         };
     }
@@ -2012,10 +1987,10 @@ pub(crate) fn ts_parser__advance<const LOGGING: bool>(
                         continue;
                     }
                     let mut next_state = if extra {
-                        parser3_log!(parser, format_args!("shift_extra"));
+                        parser_log_args!(parser, format_args!("shift_extra"));
                         state
                     } else {
-                        parser3_log!(parser, format_args!("shift state:{}", shift_state));
+                        parser_log_args!(parser, format_args!("shift state:{}", shift_state));
                         shift_state
                     };
                     if ts_subtree_child_count(&lookahead) > 0 {
@@ -2038,7 +2013,7 @@ pub(crate) fn ts_parser__advance<const LOGGING: bool>(
                     dynamic_precedence,
                     production_id,
                 } => {
-                    parser3_log!(
+                    parser_log_args!(
                         parser,
                         format_args!(
                             "reduce sym:{}, child_count:{}",
@@ -2063,7 +2038,7 @@ pub(crate) fn ts_parser__advance<const LOGGING: bool>(
                     }
                 }
                 ParseAction::Accept => {
-                    parser3_log!(parser, format_args!("accept"));
+                    parser_log_args!(parser, format_args!("accept"));
                     ts_parser__accept(parser, version, lookahead);
                     return true;
                 }
@@ -2092,7 +2067,7 @@ pub(crate) fn ts_parser__advance<const LOGGING: bool>(
                 version,
             );
             if LOGGING {
-                parser3_log_stack(parser);
+                parser_log_stack!(parser);
             }
             state = ts_stack_state(&parser.stack, version);
             if lookahead.is_null() {
@@ -2123,7 +2098,7 @@ pub(crate) fn ts_parser__advance<const LOGGING: bool>(
                 .parse_table_cache
                 .table_entry(&language, state, word_symbol);
             if !table_entry.actions().is_empty() {
-                parser3_log!(
+                parser_log_args!(
                     parser,
                     format_args!(
                         "switch from_keyword:{}, to_word_token:{}",
@@ -2146,7 +2121,7 @@ pub(crate) fn ts_parser__advance<const LOGGING: bool>(
             needs_lex = true;
             continue;
         }
-        parser3_log!(
+        parser_log_args!(
             parser,
             format_args!(
                 "detect_error lookahead:{}",
@@ -2237,7 +2212,7 @@ fn ts_parser__condense_stack_general(parser: &mut Parser) -> u32 {
     while i < n {
         if ts_stack_is_paused(&parser.stack, i) {
             if !has_unpaused_version && parser.accept_count < MAX_VERSION_COUNT {
-                parser3_log!(parser, format_args!("resume version:{}", i));
+                parser_log_args!(parser, format_args!("resume version:{}", i));
                 min_error_cost = ts_stack_error_cost(&parser.stack, i);
                 let lookahead = ts_stack_resume(&mut parser.stack, i);
                 ts_parser__handle_error(parser, i, lookahead);
@@ -2254,8 +2229,8 @@ fn ts_parser__condense_stack_general(parser: &mut Parser) -> u32 {
         i += 1;
     }
     if made_changes {
-        parser3_log!(parser, format_args!("condense"));
-        parser3_log_stack(parser);
+        parser_log_args!(parser, format_args!("condense"));
+        parser_log_stack!(parser);
     }
     min_error_cost
 }
@@ -2721,9 +2696,9 @@ pub(crate) fn ts_parser_parse_string_encoding(
     ts_parser_parse(parser, old_tree, &mut context)
 }
 
-// Local equivalents of parser.c's LOG / LOG_STACK macros. Formatting is kept
-// out of the hot path when diagnostics are disabled.
-fn parser3_log_message(parser: &mut Parser, message: std::fmt::Arguments<'_>) {
+// parser.c's LOG for `parser_log_args!`. Formatting is kept out of the hot path
+// when diagnostics are disabled.
+fn parser_log_message(parser: &mut Parser, message: std::fmt::Arguments<'_>) {
     if parser.logger.is_some() || parser.dot_graph.is_some() {
         use std::fmt::Write;
         parser.lexer.debug_buffer.clear();
@@ -2736,14 +2711,6 @@ fn parser3_log_message(parser: &mut Parser, message: std::fmt::Arguments<'_>) {
             parser.lexer.debug_buffer.truncate(end);
         }
         ts_parser__log(parser);
-    }
-}
-
-fn parser3_log_stack(parser: &mut Parser) {
-    if let Some(output) = parser.dot_graph.as_mut() {
-        let stack = &mut parser.stack;
-        let _ = ts_stack_print_dot_graph(stack, &parser.language.expect("parser language"), output);
-        let _ = output.write_all(b"\n\n");
     }
 }
 
@@ -2806,11 +2773,10 @@ impl<'tree> BalanceCursor<'tree> {
 }
 
 #[cfg(test)]
-mod parser3_tests {
+mod tests {
     use super::*;
 
-    // A progress/balancing-only fixture, so these tests do not depend on other
-    // translation units' constructors or require a generated grammar.
+    // A progress/balancing-only fixture, so these tests need no generated grammar.
     fn parser() -> Parser {
         Parser {
             lexer: LexerState::default(),
@@ -3758,7 +3724,7 @@ mod parser3_tests {
     fn disabled_diagnostics_do_not_evaluate_arguments() {
         let mut parser = parser();
         let mut evaluations = 0;
-        parser3_log!(
+        parser_log_args!(
             &mut parser,
             format_args!("{}", {
                 evaluations += 1;
@@ -3772,7 +3738,7 @@ mod parser3_tests {
             assert_eq!(kind, LogType::Parse);
             assert_eq!(message, "enabled");
         }));
-        parser3_log!(
+        parser_log_args!(
             &mut parser,
             format_args!("{}", {
                 evaluations += 1;
