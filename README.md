@@ -11,11 +11,11 @@ A pure, safe Rust port of the [tree-sitter](https://github.com/tree-sitter/tree-
   crate's (`tree_sitter_rust::LANGUAGE`), so most code that uses tree-sitter only needs
   its `Cargo.toml` changed.
 - **Same trees as C.** Trees, incremental reparses, query results and progress
-  callbacks were identical to the C library's on more than 600,000 inputs.
+  callbacks were identical to the C library's on more than 700,000 inputs.
 
 It was made by an AI agent swarm. Agents translated the C runtime and the grammars'
 external scanners unit by unit, and a test gate compared every change with the C
-library. <!-- TODO: link the write-up of the run. -->
+library.
 
 ## Languages
 

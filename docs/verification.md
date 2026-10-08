@@ -8,7 +8,7 @@ same grammar versions) on the same inputs and compared four things:
 - query results
 - the calls to the progress callback and the positions they report
 
-They were identical on more than 600,000 inputs across the 54 grammars:
+They were identical on 727,612 inputs across the 54 grammars:
 
 - the gate's sets, used during development: the grammars' test corpora, a development
   corpus per language and fuzzed variants of both
@@ -18,7 +18,17 @@ They were identical on more than 600,000 inputs across the 54 grammars:
 
 The comparison ran on an overflow-checked build and on a normal build.
 
-<!-- TODO: the per-set input counts and the write-up of the run. -->
+| Set | Inputs | Identical |
+|---|---:|---:|
+| Development sets: the gate's sets, real projects per language and the Linux kernel | 267,285 | 267,283 |
+| Repositories never seen during development | 166,254 | 166,254 |
+| Earlier development and safety sets (25 grammars) | 179,033 | 179,033 |
+| Perl and CMake sets, at two incremental seeds | 15,043 | 15,043 |
+| Separate fuzzing run | 100,000 | 99,999 |
+
+The 3 inputs not counted as identical are ones the C library gave no result for, so there
+was nothing to compare. Every set ran on the normal build and, except Perl and CMake, on
+the overflow-checked build too, all at the final commit.
 
 `cargo test --workspace` runs the port's own tests.
 
