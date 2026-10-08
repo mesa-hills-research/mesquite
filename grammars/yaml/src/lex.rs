@@ -16,6 +16,8 @@ const ts_builtin_sym_end: Symbol = 0;
 /// C's `ts_lex`: lexes one token from lex state `state`; returns whether it
 /// accepted one.
 #[rustfmt::skip]
+// Every state of this grammar sets `result` before returning it.
+#[allow(unused_assignments)]
 pub(crate) fn ts_lex(lexer: &mut dyn Lexer, mut state: StateId) -> bool {
     let mut result = false;
     loop {
