@@ -32,21 +32,22 @@ The crates, their upstream versions and their constants are listed in
 
 Parse time relative to C tree-sitter 0.25.10 with the same grammars (below 1 is faster).
 
-<!-- TODO: fill in from the box timings. -->
-
 | Inputs | Port / C |
 |---|---:|
-| All 54 grammars (geometric mean) | _TBD_ |
-| C (Linux kernel) | _TBD_ |
-| C++ | _TBD_ |
-| Rust | _TBD_ |
-| Python | _TBD_ |
-| TypeScript | _TBD_ |
-| JavaScript | _TBD_ |
-| Go | _TBD_ |
-| Java | _TBD_ |
+| All 54 grammars (geometric mean) | 0.74 |
+| Never-seen repositories (25 grammars) | 0.72 |
+| C (Linux kernel) | 0.66 |
+| C++ | 0.66 |
+| Rust | 0.70 |
+| Python | 0.71 |
+| TypeScript | 0.72 |
+| JavaScript | 0.68 |
+| Go | 0.81 |
+| Java | 0.67 |
 
-Every language, the inputs, the machine and the method are in [docs/speed.md](docs/speed.md).
+The port is faster on 49 of the 54 grammars. Each grammar's tables are decoded the first
+time it is used, which takes a median of 24 ms. Every grammar, the inputs, the machine and
+the method are in [docs/speed.md](docs/speed.md).
 
 ## Installation
 
