@@ -28,6 +28,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mesquite_astro"
+version = "0.1.0"
+dependencies = [
+ "mesquite",
+ "mesquite_language",
+]
+
+[[package]]
 name = "mesquite_bash"
 version = "0.1.0"
 dependencies = [
@@ -85,6 +93,14 @@ dependencies = [
 
 [[package]]
 name = "mesquite_dart"
+version = "0.1.0"
+dependencies = [
+ "mesquite",
+ "mesquite_language",
+]
+
+[[package]]
+name = "mesquite_diff"
 version = "0.1.0"
 dependencies = [
  "mesquite",
@@ -164,6 +180,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mesquite_graphql"
+version = "0.1.0"
+dependencies = [
+ "mesquite",
+ "mesquite_language",
+]
+
+[[package]]
 name = "mesquite_haskell"
 version = "0.1.0"
 dependencies = [
@@ -197,6 +221,14 @@ dependencies = [
 
 [[package]]
 name = "mesquite_javascript"
+version = "0.1.0"
+dependencies = [
+ "mesquite",
+ "mesquite_language",
+]
+
+[[package]]
+name = "mesquite_jsdoc"
 version = "0.1.0"
 dependencies = [
  "mesquite",

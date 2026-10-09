@@ -1,0 +1,17 @@
+[package]
+name = "mesquite_graphql"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/mesa-hills-research/mesquite"
+publish = false
+description = "The GraphQL grammar for Mesquite (pure-Rust tree-sitter), from tree-sitter-graphql 0.1.0"
+
+[lib]
+name = "tree_sitter_graphql"
+
+[dependencies]
+mesquite_language = { path = "../../tables" }
+
+[dev-dependencies]
+mesquite = { path = "../../runtime" }

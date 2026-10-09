@@ -1,0 +1,17 @@
+[package]
+name = "mesquite_jsdoc"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/mesa-hills-research/mesquite"
+publish = false
+description = "The JSDoc grammar for Mesquite (pure-Rust tree-sitter), from tree-sitter-jsdoc 0.23.2"
+
+[lib]
+name = "tree_sitter_jsdoc"
+
+[dependencies]
+mesquite_language = { path = "../../tables" }
+
+[dev-dependencies]
+mesquite = { path = "../../runtime" }
