@@ -1,17 +1,18 @@
 [package]
-name = "mhr_tree_sitter_xml"
+name = "mesquite_xml"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+repository = "https://github.com/mesa-hills-research/mesquite"
 publish = false
-description = "The XML grammar for mhr_tree_sitter (pure-Rust tree-sitter), from tree-sitter-xml 0.7.0"
+description = "The XML grammar for Mesquite (pure-Rust tree-sitter), from tree-sitter-xml 0.7.0"
 
 [lib]
 name = "tree_sitter_xml"
 
 [dependencies]
-mhr_tree_sitter_language = { path = "../../tables" }
-mhr_tree_sitter_dtd = { path = "../dtd" }
+mesquite_language = { path = "../../tables" }
+mesquite_dtd = { path = "../dtd" }
 
 [dev-dependencies]
-mhr_tree_sitter = { path = "../../runtime" }
+mesquite = { path = "../../runtime" }

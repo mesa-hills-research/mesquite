@@ -22,7 +22,7 @@ static TABLES: LazyLock<LanguageTables> = LazyLock::new(decode);
 /// tree-sitter-md's `tree_sitter_md::LANGUAGE`.
 pub const LANGUAGE: LanguageFn = LanguageFn::from_fn(language);
 
-/// The Markdown (inline) grammar (crate `mhr_tree_sitter_markdown_inline`), as with
+/// The Markdown (inline) grammar (crate `mesquite_markdown_inline`), as with
 /// tree-sitter-md's `tree_sitter_md::INLINE_LANGUAGE`.
 pub use tree_sitter_markdown_inline::LANGUAGE as INLINE_LANGUAGE;
 

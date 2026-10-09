@@ -1,17 +1,18 @@
 [package]
-name = "mhr_tree_sitter"
+name = "mesquite"
 version = "0.25.10"
 edition = "2024"
 license = "MIT"
+repository = "https://github.com/mesa-hills-research/mesquite"
 description = "A pure, safe Rust port of the tree-sitter 0.25.10 runtime"
 
 [lib]
 name = "tree_sitter"
 
 [dependencies]
-mhr_tree_sitter_language = { path = "../tables" }
+mesquite_language = { path = "../tables" }
 streaming-iterator = "0.1.9"
 regex = "1.11.1"
 
 [dev-dependencies]
-mhr_tree_sitter_cmake = { path = "../grammars/cmake" }
+mesquite_cmake = { path = "../grammars/cmake" }

@@ -19,7 +19,7 @@ static BLOB: &[u8] = include_bytes!("tables.bin");
 static TABLES: LazyLock<LanguageTables> = LazyLock::new(decode);
 
 /// The grammar, for `tree_sitter::Language::new(LANGUAGE)` or `LANGUAGE.into()`.
-/// `mhr_tree_sitter_markdown` re-exports it as `tree_sitter_md::INLINE_LANGUAGE`, as in
+/// `mesquite_markdown` re-exports it as `tree_sitter_md::INLINE_LANGUAGE`, as in
 /// tree-sitter-md.
 pub const LANGUAGE: LanguageFn = LanguageFn::from_fn(language);
 

@@ -20,7 +20,7 @@ static BLOB: &[u8] = include_bytes!("tables.bin");
 static TABLES: LazyLock<LanguageTables> = LazyLock::new(decode);
 
 /// The grammar, for `tree_sitter::Language::new(LANGUAGE)` or `LANGUAGE.into()`.
-/// `mhr_tree_sitter_typescript` re-exports it as `tree_sitter_typescript::LANGUAGE_TSX`, as
+/// `mesquite_typescript` re-exports it as `tree_sitter_typescript::LANGUAGE_TSX`, as
 /// in tree-sitter-typescript.
 pub const LANGUAGE: LanguageFn = LanguageFn::from_fn(language);
 

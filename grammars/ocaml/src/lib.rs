@@ -22,7 +22,7 @@ static TABLES: LazyLock<LanguageTables> = LazyLock::new(decode);
 /// `tree_sitter_ocaml::LANGUAGE_OCAML`.
 pub const LANGUAGE_OCAML: LanguageFn = LanguageFn::from_fn(language);
 
-/// The OCaml (interface) grammar (crate `mhr_tree_sitter_ocaml_interface`), as with
+/// The OCaml (interface) grammar (crate `mesquite_ocaml_interface`), as with
 /// tree-sitter-ocaml's `tree_sitter_ocaml::LANGUAGE_OCAML_INTERFACE`.
 pub use tree_sitter_ocaml_interface::LANGUAGE as LANGUAGE_OCAML_INTERFACE;
 

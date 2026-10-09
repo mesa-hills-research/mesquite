@@ -1,7 +1,7 @@
-# mhr_tree_sitter
+# Mesquite
 
-A pure, safe Rust port of the [tree-sitter](https://github.com/tree-sitter/tree-sitter)
-0.25.10 runtime and 54 tree-sitter grammars.
+Mesquite is a pure, safe Rust port of [tree-sitter](https://github.com/tree-sitter/tree-sitter)
+0.25.10 and 54 grammars.
 
 - **Pure Rust.** No C sources, build scripts or C compiler. The only external
   dependencies are `regex` and `streaming-iterator`.
@@ -28,7 +28,7 @@ The crates, their upstream versions and their constants are listed in
 
 Parse time relative to C tree-sitter 0.25.10 with the same grammars (below 1 is faster).
 
-| Inputs | Port / C |
+| Inputs | Mesquite / C |
 |---|---:|
 | All 54 grammars (geometric mean) | 0.74 |
 | C (Linux kernel) | 0.66 |
@@ -40,7 +40,7 @@ Parse time relative to C tree-sitter 0.25.10 with the same grammars (below 1 is 
 | Go | 0.81 |
 | Java | 0.67 |
 
-The port is faster on 49 of the 54 grammars. Each grammar's tables are decoded the first
+Mesquite is faster on 49 of the 54 grammars. Each grammar's tables are decoded the first
 time it is used, which takes a median of 24 ms. Every grammar, the machine, the method and
 how to compare on your own files are in [docs/speed.md](docs/speed.md).
 
@@ -50,8 +50,8 @@ The crates are on GitHub for now:
 
 ```toml
 [dependencies]
-mhr_tree_sitter = { git = "https://github.com/mesa-hills-research/mhr_tree_sitter" }
-mhr_tree_sitter_rust = { git = "https://github.com/mesa-hills-research/mhr_tree_sitter" }
+mesquite = { git = "https://github.com/mesa-hills-research/mesquite" }
+mesquite_rust = { git = "https://github.com/mesa-hills-research/mesquite" }
 ```
 
 The library names are `tree_sitter` and `tree_sitter_rust`, so `use tree_sitter::...`
@@ -59,8 +59,8 @@ lines stay as they are. To keep upstream's dependency names as well, rename the 
 
 ```toml
 [dependencies]
-tree-sitter = { package = "mhr_tree_sitter", git = "https://github.com/mesa-hills-research/mhr_tree_sitter" }
-tree-sitter-rust = { package = "mhr_tree_sitter_rust", git = "https://github.com/mesa-hills-research/mhr_tree_sitter" }
+tree-sitter = { package = "mesquite", git = "https://github.com/mesa-hills-research/mesquite" }
+tree-sitter-rust = { package = "mesquite_rust", git = "https://github.com/mesa-hills-research/mesquite" }
 ```
 
 The crates use the 2024 edition. They are tested with Rust 1.97 and use no

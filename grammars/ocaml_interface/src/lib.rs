@@ -19,7 +19,7 @@ static BLOB: &[u8] = include_bytes!("tables.bin");
 static TABLES: LazyLock<LanguageTables> = LazyLock::new(decode);
 
 /// The grammar, for `tree_sitter::Language::new(LANGUAGE)` or `LANGUAGE.into()`.
-/// `mhr_tree_sitter_ocaml` re-exports it as `tree_sitter_ocaml::LANGUAGE_OCAML_INTERFACE`,
+/// `mesquite_ocaml` re-exports it as `tree_sitter_ocaml::LANGUAGE_OCAML_INTERFACE`,
 /// as in tree-sitter-ocaml.
 pub const LANGUAGE: LanguageFn = LanguageFn::from_fn(language);
 

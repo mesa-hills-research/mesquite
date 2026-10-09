@@ -1,16 +1,17 @@
 [package]
-name = "mhr_tree_sitter_css"
+name = "mesquite_css"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+repository = "https://github.com/mesa-hills-research/mesquite"
 publish = false
-description = "The CSS grammar for mhr_tree_sitter (pure-Rust tree-sitter), from tree-sitter-css 0.25.0"
+description = "The CSS grammar for Mesquite (pure-Rust tree-sitter), from tree-sitter-css 0.25.0"
 
 [lib]
 name = "tree_sitter_css"
 
 [dependencies]
-mhr_tree_sitter_language = { path = "../../tables" }
+mesquite_language = { path = "../../tables" }
 
 [dev-dependencies]
-mhr_tree_sitter = { path = "../../runtime" }
+mesquite = { path = "../../runtime" }

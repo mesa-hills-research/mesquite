@@ -19,7 +19,7 @@ static BLOB: &[u8] = include_bytes!("tables.bin");
 static TABLES: LazyLock<LanguageTables> = LazyLock::new(decode);
 
 /// The grammar, for `tree_sitter::Language::new(LANGUAGE)` or `LANGUAGE.into()`.
-/// `mhr_tree_sitter_php` re-exports it as `tree_sitter_php::LANGUAGE_PHP_ONLY`, as in
+/// `mesquite_php` re-exports it as `tree_sitter_php::LANGUAGE_PHP_ONLY`, as in
 /// tree-sitter-php.
 pub const LANGUAGE: LanguageFn = LanguageFn::from_fn(language);
 

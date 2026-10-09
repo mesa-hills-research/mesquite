@@ -1,17 +1,18 @@
 [package]
-name = "mhr_tree_sitter_markdown"
+name = "mesquite_markdown"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+repository = "https://github.com/mesa-hills-research/mesquite"
 publish = false
-description = "The Markdown (block) grammar for mhr_tree_sitter (pure-Rust tree-sitter), from tree-sitter-md 0.5.3"
+description = "The Markdown (block) grammar for Mesquite (pure-Rust tree-sitter), from tree-sitter-md 0.5.3"
 
 [lib]
 name = "tree_sitter_md"
 
 [dependencies]
-mhr_tree_sitter_language = { path = "../../tables" }
-mhr_tree_sitter_markdown_inline = { path = "../markdown_inline" }
+mesquite_language = { path = "../../tables" }
+mesquite_markdown_inline = { path = "../markdown_inline" }
 
 [dev-dependencies]
-mhr_tree_sitter = { path = "../../runtime" }
+mesquite = { path = "../../runtime" }

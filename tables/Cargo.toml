@@ -1,10 +1,11 @@
 [package]
-name = "mhr_tree_sitter_language"
+name = "mesquite_language"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+repository = "https://github.com/mesa-hills-research/mesquite"
 publish = false
-description = "The grammar interface of mhr_tree_sitter: the grammar tables and LanguageFn"
+description = "The grammar interface of Mesquite: the grammar tables and LanguageFn"
 
 [lib]
 name = "tree_sitter_language"

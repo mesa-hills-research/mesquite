@@ -22,7 +22,7 @@ static TABLES: LazyLock<LanguageTables> = LazyLock::new(decode);
 /// with tree-sitter-xml's `tree_sitter_xml::LANGUAGE_XML`.
 pub const LANGUAGE_XML: LanguageFn = LanguageFn::from_fn(language);
 
-/// The DTD grammar (crate `mhr_tree_sitter_dtd`), as with tree-sitter-xml's
+/// The DTD grammar (crate `mesquite_dtd`), as with tree-sitter-xml's
 /// `tree_sitter_xml::LANGUAGE_DTD`.
 pub use tree_sitter_dtd::LANGUAGE as LANGUAGE_DTD;
 

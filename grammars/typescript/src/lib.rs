@@ -23,7 +23,7 @@ static TABLES: LazyLock<LanguageTables> = LazyLock::new(decode);
 /// `tree_sitter_typescript::LANGUAGE_TYPESCRIPT`.
 pub const LANGUAGE_TYPESCRIPT: LanguageFn = LanguageFn::from_fn(language);
 
-/// The TSX grammar (crate `mhr_tree_sitter_tsx`), as with tree-sitter-typescript's
+/// The TSX grammar (crate `mesquite_tsx`), as with tree-sitter-typescript's
 /// `tree_sitter_typescript::LANGUAGE_TSX`.
 pub use tree_sitter_tsx::LANGUAGE as LANGUAGE_TSX;
 

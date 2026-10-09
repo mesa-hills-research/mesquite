@@ -1,16 +1,17 @@
 [package]
-name = "mhr_tree_sitter_yaml"
+name = "mesquite_yaml"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+repository = "https://github.com/mesa-hills-research/mesquite"
 publish = false
-description = "The YAML grammar for mhr_tree_sitter (pure-Rust tree-sitter), from tree-sitter-yaml 0.7.2"
+description = "The YAML grammar for Mesquite (pure-Rust tree-sitter), from tree-sitter-yaml 0.7.2"
 
 [lib]
 name = "tree_sitter_yaml"
 
 [dependencies]
-mhr_tree_sitter_language = { path = "../../tables" }
+mesquite_language = { path = "../../tables" }
 
 [dev-dependencies]
-mhr_tree_sitter = { path = "../../runtime" }
+mesquite = { path = "../../runtime" }

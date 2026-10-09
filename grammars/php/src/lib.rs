@@ -21,7 +21,7 @@ static TABLES: LazyLock<LanguageTables> = LazyLock::new(decode);
 /// with tree-sitter-php's `tree_sitter_php::LANGUAGE_PHP`.
 pub const LANGUAGE_PHP: LanguageFn = LanguageFn::from_fn(language);
 
-/// The PHP (without HTML) grammar (crate `mhr_tree_sitter_php_only`), as with
+/// The PHP (without HTML) grammar (crate `mesquite_php_only`), as with
 /// tree-sitter-php's `tree_sitter_php::LANGUAGE_PHP_ONLY`.
 pub use tree_sitter_php_only::LANGUAGE as LANGUAGE_PHP_ONLY;
 

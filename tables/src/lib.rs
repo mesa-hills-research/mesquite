@@ -1,7 +1,7 @@
 //! `tree_sitter_language`: the plain-data tables of a tree-sitter grammar, in the shape the
 //! ported runtime reads them.
 //!
-//! The grammar crates (`mhr_tree_sitter_<key>`) decode their table blobs (`tables.bin`,
+//! The grammar crates (`mesquite_<key>`) decode their table blobs (`tables.bin`,
 //! written by the converter) with it, and export their grammar as a [`LanguageFn`].
 //!
 //! Each item mirrors a part of tree-sitter's `parser.h` (v0.25.10, ABI 15) so runtime C

@@ -1,4 +1,4 @@
-This port is derived from tree-sitter 0.25.10 (https://github.com/tree-sitter/tree-sitter),
+Mesquite is derived from tree-sitter 0.25.10 (https://github.com/tree-sitter/tree-sitter),
 whose license follows. Each grammar crate carries its grammar's license.
 
 The MIT License (MIT)
