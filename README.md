@@ -1,7 +1,7 @@
 # Mesquite
 
 Mesquite is a pure, safe Rust port of [tree-sitter](https://github.com/tree-sitter/tree-sitter)
-0.25.10 and 54 grammars.
+0.25.10 and 58 grammars.
 
 - **Pure Rust.** No C sources, build scripts or C compiler. The only external
   dependencies are `regex` and `streaming-iterator`.
@@ -15,11 +15,11 @@ Mesquite is a pure, safe Rust port of [tree-sitter](https://github.com/tree-sitt
 
 ## Languages
 
-Bash, C, C#, C++, CMake, CSS, CUDA, Dart, Elixir, Elm, Embedded templates (ERB, EJS),
-Erlang, F#, Fortran, GLSL, Go, Haskell, HCL, HTML, Java, JavaScript, JSON, Julia,
-Kotlin, Lua, Make, Markdown, Objective-C, OCaml, Odin, Perl, PHP, PowerShell, Protocol
-Buffers, Python, R, Ruby, Rust, Scala, Solidity, SQL, Svelte, Swift, TOML, TypeScript
-and TSX, Verilog, XML and DTD, YAML, Zig.
+Astro, Bash, C, C#, C++, CMake, CSS, CUDA, Dart, Diff, Elixir, Elm, Embedded templates
+(ERB, EJS), Erlang, F#, Fortran, GLSL, Go, GraphQL, Haskell, HCL, HTML, Java, JavaScript,
+JSDoc, JSON, Julia, Kotlin, Lua, Make, Markdown, Objective-C, OCaml, Odin, Perl, PHP,
+PowerShell, Protocol Buffers, Python, R, Ruby, Rust, Scala, Solidity, SQL, Svelte, Swift,
+TOML, TypeScript and TSX, Verilog, XML and DTD, YAML, Zig.
 
 The crates, their upstream versions and their constants are listed in
 [docs/grammars.md](docs/grammars.md).
@@ -30,7 +30,7 @@ Parse time relative to C tree-sitter 0.25.10 with the same grammars (below 1 is 
 
 | Inputs | Mesquite / C |
 |---|---:|
-| All 54 grammars (geometric mean) | 0.74 |
+| All 58 grammars (geometric mean) | 0.73 |
 | C (Linux kernel) | 0.66 |
 | C++ | 0.66 |
 | Rust | 0.70 |
@@ -40,8 +40,8 @@ Parse time relative to C tree-sitter 0.25.10 with the same grammars (below 1 is 
 | Go | 0.81 |
 | Java | 0.67 |
 
-Mesquite is faster on 49 of the 54 grammars. Each grammar's tables are decoded the first
-time it is used, which takes a median of 24 ms. Every grammar, the machine, the method and
+Mesquite is faster on 53 of the 58 grammars. Each grammar's tables are decoded the first
+time it is used, which takes a median of 19 ms. Every grammar, the machine, the method and
 how to compare on your own files are in [docs/speed.md](docs/speed.md).
 
 ## Installation
@@ -113,6 +113,7 @@ cargo test --workspace
 
 ## License
 
-MIT, like tree-sitter and most of the grammars. Three grammars are Apache-2.0 (Elixir,
-Erlang and HCL). The copyright notices are in [NOTICE](NOTICE), and the license texts in
-[LICENSE](LICENSE), `runtime/LICENSE`, `tables/LICENSE` and `grammars/<key>/LICENSE`.
+MIT, like tree-sitter and most of the grammars. Four grammars are Apache-2.0 (Astro,
+Elixir, Erlang and HCL). The copyright notices are in [NOTICE](NOTICE), and the license
+texts in [LICENSE](LICENSE), `runtime/LICENSE`, `tables/LICENSE` and
+`grammars/<key>/LICENSE`.

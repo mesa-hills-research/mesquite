@@ -69,6 +69,9 @@ results match C's.
 
 - **Runtime:** a lex function or external scanner that keeps advancing at the end of
   the input made C hang. The port ends that parse with no tree (see above).
+- **Astro scanner:** template strings nested inside `${...}` parse to any depth.
+  Upstream's scanner recurses once per level and runs out of stack on deep nesting
+  (about 70,000 levels on a 2 MB thread stack).
 - **CMake scanner:** a new scanner starts zeroed, and a reset also clears the pending
   token. Upstream leaves the state uninitialized and resets only the bracket level, so
   its incremental results can vary from run to run.

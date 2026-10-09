@@ -6,6 +6,7 @@ is the translated external scanner, where the grammar has one.
 
 | Language | Package | Library | Constant | Upstream crate | Version | License |
 |---|---|---|---|---|---|---|
+| Astro | `mesquite_astro` | `tree_sitter_astro_next` | `LANGUAGE` | [`tree-sitter-astro-next`](https://github.com/PRRPCHT/tree-sitter-astro-next/tree/15a3b95bf444b68b698dfb2ae6921d33e464b9f8) | 0.1.1 | Apache-2.0 |
 | Bash | `mesquite_bash` | `tree_sitter_bash` | `LANGUAGE` | [`tree-sitter-bash`](https://github.com/tree-sitter/tree-sitter-bash/tree/v0.25.1) | 0.25.1 | MIT |
 | C | `mesquite_c` | `tree_sitter_c` | `LANGUAGE` | [`tree-sitter-c`](https://github.com/tree-sitter/tree-sitter-c/tree/v0.24.2) | 0.24.2 | MIT |
 | C# | `mesquite_c_sharp` | `tree_sitter_c_sharp` | `LANGUAGE` | [`tree-sitter-c-sharp`](https://github.com/tree-sitter/tree-sitter-c-sharp/tree/v0.23.5) | 0.23.5 | MIT |
@@ -14,6 +15,7 @@ is the translated external scanner, where the grammar has one.
 | CSS | `mesquite_css` | `tree_sitter_css` | `LANGUAGE` | [`tree-sitter-css`](https://github.com/tree-sitter/tree-sitter-css/tree/v0.25.0) | 0.25.0 | MIT |
 | CUDA | `mesquite_cuda` | `tree_sitter_cuda` | `LANGUAGE` | [`tree-sitter-cuda`](https://github.com/tree-sitter-grammars/tree-sitter-cuda/tree/v0.21.2) | 0.21.2 | MIT |
 | Dart | `mesquite_dart` | `tree_sitter_dart` | `LANGUAGE` | [`tree-sitter-dart`](https://github.com/nielsenko/tree-sitter-dart/tree/v0.2.0) | 0.2.0 | MIT |
+| Diff | `mesquite_diff` | `tree_sitter_diff` | `LANGUAGE` | [`tree-sitter-diff`](https://github.com/the-mikedavis/tree-sitter-diff/tree/4867e8470e1b0ad7364c4e3ffab762c361bbb635) | 0.1.0 | MIT |
 | DTD | `mesquite_dtd` | `tree_sitter_dtd` | `LANGUAGE` | [`tree-sitter-xml`](https://github.com/tree-sitter-grammars/tree-sitter-xml/tree/v0.7.0) | 0.7.0 | MIT |
 | Elixir | `mesquite_elixir` | `tree_sitter_elixir` | `LANGUAGE` | [`tree-sitter-elixir`](https://github.com/elixir-lang/tree-sitter-elixir/tree/v0.3.5) | 0.3.5 | Apache-2.0 |
 | Elm | `mesquite_elm` | `tree_sitter_elm` | `LANGUAGE` | [`tree-sitter-elm`](https://github.com/elm-tooling/tree-sitter-elm/tree/v5.9.4) | 5.9.4 | MIT |
@@ -23,11 +25,13 @@ is the translated external scanner, where the grammar has one.
 | F# | `mesquite_fsharp` | `tree_sitter_fsharp` | `LANGUAGE_FSHARP` | [`tree-sitter-fsharp`](https://github.com/ionide/tree-sitter-fsharp/tree/0.3.12) | 0.3.12 | MIT |
 | GLSL | `mesquite_glsl` | `tree_sitter_glsl` | `LANGUAGE_GLSL` | [`tree-sitter-glsl`](https://github.com/tree-sitter-grammars/tree-sitter-glsl/tree/v0.2.0) | 0.2.0 | MIT |
 | Go | `mesquite_go` | `tree_sitter_go` | `LANGUAGE` | [`tree-sitter-go`](https://github.com/tree-sitter/tree-sitter-go/tree/v0.25.0) | 0.25.0 | MIT |
+| GraphQL | `mesquite_graphql` | `tree_sitter_graphql` | `LANGUAGE` | [`tree-sitter-graphql`](https://github.com/joowani/tree-sitter-graphql/tree/v0.1.0) | 0.1.0 | MIT |
 | Haskell | `mesquite_haskell` | `tree_sitter_haskell` | `LANGUAGE` | [`tree-sitter-haskell`](https://github.com/tree-sitter/tree-sitter-haskell/tree/v0.24.1) | 0.24.1 | MIT |
 | HCL | `mesquite_hcl` | `tree_sitter_hcl` | `LANGUAGE` | [`tree-sitter-hcl`](https://github.com/tree-sitter-grammars/tree-sitter-hcl/tree/v1.1.1) | 1.1.0 | Apache-2.0 |
 | HTML | `mesquite_html` | `tree_sitter_html` | `LANGUAGE` | [`tree-sitter-html`](https://github.com/tree-sitter/tree-sitter-html/tree/v0.23.2) | 0.23.2 | MIT |
 | Java | `mesquite_java` | `tree_sitter_java` | `LANGUAGE` | [`tree-sitter-java`](https://github.com/tree-sitter/tree-sitter-java/tree/v0.23.5) | 0.23.5 | MIT |
 | JavaScript | `mesquite_javascript` | `tree_sitter_javascript` | `LANGUAGE` | [`tree-sitter-javascript`](https://github.com/tree-sitter/tree-sitter-javascript/tree/v0.25.0) | 0.25.0 | MIT |
+| JSDoc | `mesquite_jsdoc` | `tree_sitter_jsdoc` | `LANGUAGE` | [`tree-sitter-jsdoc`](https://github.com/tree-sitter/tree-sitter-jsdoc/tree/v0.23.2) | 0.23.2 | MIT |
 | JSON | `mesquite_json` | `tree_sitter_json` | `LANGUAGE` | [`tree-sitter-json`](https://github.com/tree-sitter/tree-sitter-json/tree/v0.24.8) | 0.24.8 | MIT |
 | Julia | `mesquite_julia` | `tree_sitter_julia` | `LANGUAGE` | [`tree-sitter-julia`](https://github.com/tree-sitter/tree-sitter-julia/tree/v0.23.1) | 0.23.1 | MIT |
 | Kotlin | `mesquite_kotlin` | `tree_sitter_kotlin_ng` | `LANGUAGE` | [`tree-sitter-kotlin-ng`](https://github.com/tree-sitter-grammars/tree-sitter-kotlin/tree/v1.1.0) | 1.1.0 | MIT |
@@ -75,12 +79,18 @@ as upstream, and the second crate can also be used alone (`tree_sitter_tsx::LANG
 tree-sitter-fsharp's signature grammar (`LANGUAGE_SIGNATURE`) and tree-sitter-ocaml's
 type grammar (`LANGUAGE_OCAML_TYPE`) aren't included.
 
+## Queries
+
+The Astro, diff and JSDoc crates also hold their upstream crates' queries, under the same
+names: `HIGHLIGHTS_QUERY` in all three and `INJECTIONS_QUERY` in Astro.
+
 ## Library names
 
-Library names follow the upstream crates, suffixes included: `tree_sitter_kotlin_ng`
-(tree-sitter-kotlin-ng), `tree_sitter_toml_ng` (tree-sitter-toml-ng), `tree_sitter_md`
-(tree-sitter-md), `tree_sitter_svelte_ng` (tree-sitter-svelte-ng), `tree_sitter_sequel`
-(tree-sitter-sequel, the SQL grammar) and `ts_parser_perl` (ts-parser-perl).
+Library names follow the upstream crates, suffixes included: `tree_sitter_astro_next`
+(tree-sitter-astro-next), `tree_sitter_kotlin_ng` (tree-sitter-kotlin-ng),
+`tree_sitter_toml_ng` (tree-sitter-toml-ng), `tree_sitter_md` (tree-sitter-md),
+`tree_sitter_svelte_ng` (tree-sitter-svelte-ng), `tree_sitter_sequel` (tree-sitter-sequel,
+the SQL grammar) and `ts_parser_perl` (ts-parser-perl).
 
 ## Repository layout
 
