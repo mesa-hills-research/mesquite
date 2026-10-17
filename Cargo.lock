@@ -22,6 +22,7 @@ name = "mesquite"
 version = "0.25.10"
 dependencies = [
  "mesquite_cmake",
+ "mesquite_json",
  "mesquite_language",
  "regex",
  "streaming-iterator",

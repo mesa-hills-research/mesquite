@@ -16,3 +16,4 @@ regex = "1.11.1"
 
 [dev-dependencies]
 mesquite_cmake = { path = "../grammars/cmake" }
+mesquite_json = { path = "../grammars/json" }
