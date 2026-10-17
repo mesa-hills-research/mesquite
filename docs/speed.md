@@ -95,6 +95,25 @@ Peak memory of a process that parses one small file with each of 54 grammars (al
 Astro, diff, GraphQL and JSDoc) is 224 MB for the port and 45 MB for C. With one grammar
 (JSON) it is 3.5 MB for the port and 4.0 MB for C.
 
+## Reparsing after an append
+
+Text appended at the end of a file, as an editor or a stream adds it, is parsed again
+from the old tree. The time this takes grows with the file for both libraries. Python's
+statements, for example, are reduced while the parser keeps several stack versions,
+which marks the nodes that hold them as unsafe to reuse, so each reparse lexes and
+reduces every statement again.
+
+| Input | C | Port |
+|---|---:|---:|
+| Python, 50 KB | 2.2 ms | 2.6 ms |
+| Python, 200 KB | 10.1 ms | 12.5 ms |
+| JSON, 50 KB | 0.35 ms | 0.49 ms |
+| JSON, 200 KB | 1.5 ms | 2.3 ms |
+
+Each time is the average of 750 reparses after 4-byte appends to generated code (one
+assignment per line, or an array of small objects), on the Intel machine above, pinned
+to one core, with Rust 1.97.
+
 ## Comparing on your own files
 
 Cargo can rename dependencies, so one program can use both libraries:
