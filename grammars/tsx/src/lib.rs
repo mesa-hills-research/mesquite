@@ -3,11 +3,10 @@
 //!
 //! Upstream: tree-sitter-typescript 0.23.2
 //! (<https://github.com/tree-sitter/tree-sitter-typescript>, tag `v0.23.2`). Generated: do
-//! not edit by hand (the scanner is typescript's `scanner.rs`).
+//! not edit by hand (the scanner is a copy of typescript's `scanner.rs`).
 #![forbid(unsafe_code)]
 
 mod lex;
-#[path = "../../typescript/src/scanner.rs"]
 mod scanner;
 
 use std::sync::LazyLock;

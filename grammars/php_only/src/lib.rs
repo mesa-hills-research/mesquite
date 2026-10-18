@@ -2,11 +2,11 @@
 //! `tables.bin`) and lexer (`lex.rs`), converted from the grammar's `src/parser.c`.
 //!
 //! Upstream: tree-sitter-php 0.25.1 (<https://github.com/tree-sitter/tree-sitter-php>, tag
-//! `v0.25.1`). Generated: do not edit by hand (the scanner is php's `scanner.rs`).
+//! `v0.25.1`). Generated: do not edit by hand (the scanner is a copy of php's
+//! `scanner.rs`).
 #![forbid(unsafe_code)]
 
 mod lex;
-#[path = "../../php/src/scanner.rs"]
 mod scanner;
 
 use std::sync::LazyLock;

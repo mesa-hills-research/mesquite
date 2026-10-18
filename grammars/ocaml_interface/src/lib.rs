@@ -2,11 +2,11 @@
 //! `tables.bin`) and lexer (`lex.rs`), converted from the grammar's `src/parser.c`.
 //!
 //! Upstream: tree-sitter-ocaml 0.26.0 (<https://github.com/tree-sitter/tree-sitter-ocaml>,
-//! tag `v0.26.0`). Generated: do not edit by hand (the scanner is ocaml's `scanner.rs`).
+//! tag `v0.26.0`). Generated: do not edit by hand (the scanner is a copy of ocaml's
+//! `scanner.rs`).
 #![forbid(unsafe_code)]
 
 mod lex;
-#[path = "../../ocaml/src/scanner.rs"]
 mod scanner;
 
 use std::sync::LazyLock;
