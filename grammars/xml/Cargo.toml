@@ -2,17 +2,20 @@
 name = "mesquite_xml"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.89"
 license = "MIT"
 repository = "https://github.com/mesa-hills-research/mesquite"
-publish = false
 description = "The XML grammar for Mesquite (pure-Rust tree-sitter), from tree-sitter-xml 0.7.0"
+readme = "../../README.md"
+keywords = ["tree-sitter", "parser", "grammar", "xml"]
+categories = ["parsing", "text-editors"]
 
 [lib]
 name = "tree_sitter_xml"
 
 [dependencies]
-mesquite_language = { path = "../../tables" }
-mesquite_dtd = { path = "../dtd" }
+mesquite_language = { version = "0.1.0", path = "../../tables" }
+mesquite_dtd = { version = "0.1.0", path = "../dtd" }
 
 [dev-dependencies]
 mesquite = { path = "../../runtime" }

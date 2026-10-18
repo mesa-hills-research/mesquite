@@ -2,10 +2,13 @@
 name = "mesquite_language"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.89"
 license = "MIT"
 repository = "https://github.com/mesa-hills-research/mesquite"
-publish = false
-description = "The grammar interface of Mesquite: the grammar tables and LanguageFn"
+description = "The grammar tables and LanguageFn that Mesquite's runtime and grammar crates share"
+readme = "../README.md"
+keywords = ["tree-sitter", "parser", "grammar"]
+categories = ["parsing"]
 
 [lib]
 name = "tree_sitter_language"

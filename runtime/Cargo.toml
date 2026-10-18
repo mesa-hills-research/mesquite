@@ -2,15 +2,21 @@
 name = "mesquite"
 version = "0.25.10"
 edition = "2024"
+rust-version = "1.89"
 license = "MIT"
 repository = "https://github.com/mesa-hills-research/mesquite"
 description = "A pure, safe Rust port of the tree-sitter 0.25.10 runtime"
+readme = "../README.md"
+keywords = ["tree-sitter", "parser", "parsing", "incremental", "syntax"]
+categories = ["parsing", "parser-implementations", "text-editors"]
+# The tests parse with grammar crates of this workspace.
+exclude = ["tests/"]
 
 [lib]
 name = "tree_sitter"
 
 [dependencies]
-mesquite_language = { path = "../tables" }
+mesquite_language = { version = "0.1.0", path = "../tables" }
 streaming-iterator = "0.1.9"
 regex = "1.11.1"
 

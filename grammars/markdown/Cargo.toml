@@ -2,17 +2,20 @@
 name = "mesquite_markdown"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.89"
 license = "MIT"
 repository = "https://github.com/mesa-hills-research/mesquite"
-publish = false
 description = "The Markdown (block) grammar for Mesquite (pure-Rust tree-sitter), from tree-sitter-md 0.5.3"
+readme = "../../README.md"
+keywords = ["tree-sitter", "parser", "grammar", "markdown"]
+categories = ["parsing", "text-editors"]
 
 [lib]
 name = "tree_sitter_md"
 
 [dependencies]
-mesquite_language = { path = "../../tables" }
-mesquite_markdown_inline = { path = "../markdown_inline" }
+mesquite_language = { version = "0.1.0", path = "../../tables" }
+mesquite_markdown_inline = { version = "0.1.0", path = "../markdown_inline" }
 
 [dev-dependencies]
 mesquite = { path = "../../runtime" }

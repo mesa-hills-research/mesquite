@@ -2,17 +2,20 @@
 name = "mesquite_typescript"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.89"
 license = "MIT"
 repository = "https://github.com/mesa-hills-research/mesquite"
-publish = false
 description = "The TypeScript grammar for Mesquite (pure-Rust tree-sitter), from tree-sitter-typescript 0.23.2"
+readme = "../../README.md"
+keywords = ["tree-sitter", "parser", "grammar", "typescript"]
+categories = ["parsing", "text-editors"]
 
 [lib]
 name = "tree_sitter_typescript"
 
 [dependencies]
-mesquite_language = { path = "../../tables" }
-mesquite_tsx = { path = "../tsx" }
+mesquite_language = { version = "0.1.0", path = "../../tables" }
+mesquite_tsx = { version = "0.1.0", path = "../tsx" }
 
 [dev-dependencies]
 mesquite = { path = "../../runtime" }
