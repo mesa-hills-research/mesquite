@@ -214,6 +214,12 @@ pub trait Lexer {
     fn advance(&mut self, skip: bool);
     /// `lexer->mark_end(lexer)`: the token ends at the current position.
     fn mark_end(&mut self);
+    /// The generated lexers' `ACCEPT_TOKEN(symbol)`: [`Lexer::set_result_symbol`], then
+    /// [`Lexer::mark_end`].
+    fn accept_token(&mut self, symbol: Symbol) {
+        self.set_result_symbol(symbol);
+        self.mark_end();
+    }
     /// `lexer->get_column(lexer)`: the column of the current position.
     fn get_column(&mut self) -> u32;
     /// `lexer->is_at_included_range_start(lexer)`.

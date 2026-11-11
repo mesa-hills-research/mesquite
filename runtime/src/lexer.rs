@@ -81,6 +81,10 @@ impl tree_sitter_language::Lexer for Lexer<'_> {
     fn mark_end(&mut self) {
         ts_lexer_mark_end(self.state);
     }
+    fn accept_token(&mut self, symbol: Symbol) {
+        self.state.result_symbol = symbol;
+        ts_lexer_mark_end(self.state);
+    }
     fn get_column(&mut self) -> u32 {
         ts_lexer__get_column(self)
     }
