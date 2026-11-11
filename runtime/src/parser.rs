@@ -266,27 +266,28 @@ pub(crate) fn ts_parser__breakdown_top_of_stack(
 
 pub(crate) fn ts_parser__breakdown_lookahead(
     parser: &mut Parser,
+    reuse: &mut ReuseCursor<'_>,
     lookahead: &mut Subtree,
     state: StateId,
 ) {
     let mut did_descend = false;
     // Borrow the cursor's nodes while descending, and retain only the result.
-    while let Some(entry) = parser.reusable_node.stack.last()
-        && ts_subtree_child_count(&entry.tree) > 0
-        && ts_subtree_parse_state(&entry.tree) != state
+    while let Some(tree) = reusable_node_tree(reuse)
+        && ts_subtree_child_count(tree) > 0
+        && ts_subtree_parse_state(tree) != state
     {
-        let symbol = ts_subtree_symbol(&entry.tree);
+        let symbol = ts_subtree_symbol(tree);
         parser_log!(
             parser,
             "state_mismatch sym:{}",
             ts_language_symbol_name(parser.language.as_ref().expect("parser language"), symbol)
                 .unwrap_or("")
         );
-        reusable_node_descend(&mut parser.reusable_node);
+        reusable_node_descend(reuse);
         did_descend = true;
     }
     if did_descend {
-        let tree = reusable_node_tree(&parser.reusable_node);
+        let tree = reusable_node_tree(reuse).cloned().unwrap_or_default();
         ts_subtree_release(&mut parser.tree_pool, std::mem::replace(lookahead, tree));
     }
 }
@@ -818,27 +819,23 @@ pub(crate) fn ts_parser__has_included_range_difference(
 
 pub(crate) fn ts_parser__reuse_node(
     parser: &mut Parser,
+    reuse: &mut ReuseCursor<'_>,
     version: StackVersion,
     state: &mut StateId,
     position: u32,
     table_entry: &mut TableEntry,
 ) -> Subtree {
-    use crate::reusable_node::*;
-
     let language = parser.language.expect("parser language");
-    // The candidate is borrowed from the cursor, which keeps it alive, and only
-    // the node that is reused gets its own reference. Retaining every candidate
-    // would cost an atomic increment and decrement per node visited.
-    loop {
-        let Some(entry) = parser.reusable_node.stack.last() else {
-            break;
-        };
+    // The candidate is borrowed from the old tree, and only the node that is
+    // reused gets its own reference. Retaining every candidate would cost an
+    // atomic increment and decrement per node visited.
+    while let Some(&entry) = reuse.stack.last() {
         let byte_offset = entry.byte_offset;
-        let symbol = ts_subtree_symbol(&entry.tree);
-        let mut end_byte_offset = byte_offset.wrapping_add(ts_subtree_total_bytes(&entry.tree));
+        let symbol = ts_subtree_symbol(entry.tree);
+        let mut end_byte_offset = byte_offset.wrapping_add(ts_subtree_total_bytes(entry.tree));
 
         // EOF must also account for included-range changes later in the file.
-        if ts_subtree_is_eof(&entry.tree) {
+        if ts_subtree_is_eof(entry.tree) {
             end_byte_offset = u32::MAX;
         }
         if byte_offset > position {
@@ -855,13 +852,13 @@ pub(crate) fn ts_parser__reuse_node(
                 "past_reusable_node symbol:{}",
                 ts_language_symbol_name(&language, symbol).unwrap_or("")
             );
-            if end_byte_offset <= position || !reusable_node_descend(&mut parser.reusable_node) {
-                reusable_node_advance(&mut parser.reusable_node);
+            if end_byte_offset <= position || !reusable_node_descend(reuse) {
+                reusable_node_advance(reuse);
             }
             continue;
         }
         if !ts_subtree_external_scanner_state_eq(
-            &parser.reusable_node.last_external_token,
+            &reuse.last_external_token,
             ts_stack_last_external_token(&parser.stack, version),
         ) {
             parser_log!(
@@ -869,11 +866,11 @@ pub(crate) fn ts_parser__reuse_node(
                 "reusable_node_has_different_external_scanner_state symbol:{}",
                 ts_language_symbol_name(&language, symbol).unwrap_or("")
             );
-            reusable_node_advance(&mut parser.reusable_node);
+            reusable_node_advance(reuse);
             continue;
         }
 
-        let result = &entry.tree;
+        let result = entry.tree;
         let reason = if ts_subtree_has_changes(result) {
             Some("has_changes")
         } else if ts_subtree_is_error(result) {
@@ -894,8 +891,8 @@ pub(crate) fn ts_parser__reuse_node(
                 reason,
                 ts_language_symbol_name(&language, symbol).unwrap_or("")
             );
-            if !reusable_node_descend(&mut parser.reusable_node) {
-                reusable_node_advance(&mut parser.reusable_node);
+            if !reusable_node_descend(reuse) {
+                reusable_node_advance(reuse);
                 ts_parser__breakdown_top_of_stack(parser, version);
                 *state = ts_stack_state(&parser.stack, version);
             }
@@ -913,7 +910,7 @@ pub(crate) fn ts_parser__reuse_node(
                 ts_language_symbol_name(&language, symbol).unwrap_or(""),
                 ts_language_symbol_name(&language, leaf_symbol).unwrap_or("")
             );
-            reusable_node_advance_past_leaf(&mut parser.reusable_node);
+            reusable_node_advance_past_leaf(reuse);
             break;
         }
         let result = result.clone();
@@ -1768,6 +1765,7 @@ pub(crate) fn ts_parser__recover(
 
 pub(crate) fn ts_parser__handle_error(
     parser: &mut Parser,
+    reuse: &mut ReuseCursor<'_>,
     version: StackVersion,
     lookahead: Subtree,
 ) {
@@ -1872,7 +1870,12 @@ pub(crate) fn ts_parser__handle_error(
     // Recover immediately so this lookahead's scanned bytes are accounted for.
     let mut lookahead = lookahead;
     if ts_subtree_child_count(&lookahead) > 0 {
-        ts_parser__breakdown_lookahead(parser, &mut lookahead, crate::error_costs::ERROR_STATE);
+        ts_parser__breakdown_lookahead(
+            parser,
+            reuse,
+            &mut lookahead,
+            crate::error_costs::ERROR_STATE,
+        );
     }
     ts_parser__recover(parser, version, lookahead);
     parser_log_stack!(parser);
@@ -1919,6 +1922,7 @@ pub(crate) fn ts_parser__check_progress(
 pub(crate) fn ts_parser__advance<const LOGGING: bool>(
     parser: &mut Parser,
     context: &mut ParseContext<'_, '_>,
+    reuse: &mut ReuseCursor<'_>,
     version: StackVersion,
     allow_node_reuse: bool,
 ) -> bool {
@@ -1944,8 +1948,15 @@ pub(crate) fn ts_parser__advance<const LOGGING: bool>(
 
     // An exhausted cursor returns Null without changing parser state. Avoid
     // entering the full reuse traversal for every token of a fresh parse.
-    if allow_node_reuse && !parser.reusable_node.stack.is_empty() {
-        lookahead = ts_parser__reuse_node(parser, version, &mut state, position, &mut table_entry);
+    if allow_node_reuse && !reuse.stack.is_empty() {
+        lookahead = ts_parser__reuse_node(
+            parser,
+            reuse,
+            version,
+            &mut state,
+            position,
+            &mut table_entry,
+        );
     }
     if lookahead.is_null() {
         did_reuse = false;
@@ -2001,7 +2012,7 @@ pub(crate) fn ts_parser__advance<const LOGGING: bool>(
                         shift_state
                     };
                     if ts_subtree_child_count(&lookahead) > 0 {
-                        ts_parser__breakdown_lookahead(parser, &mut lookahead, state);
+                        ts_parser__breakdown_lookahead(parser, reuse, &mut lookahead, state);
                         next_state = parser.parse_table_cache.next_state(
                             &language,
                             state,
@@ -2010,7 +2021,7 @@ pub(crate) fn ts_parser__advance<const LOGGING: bool>(
                     }
                     ts_parser__shift(parser, version, next_state, lookahead, extra);
                     if did_reuse {
-                        crate::reusable_node::reusable_node_advance(&mut parser.reusable_node);
+                        reusable_node_advance(reuse);
                     }
                     return true;
                 }
@@ -2071,13 +2082,14 @@ pub(crate) fn ts_parser__advance<const LOGGING: bool>(
                     if ts_subtree_child_count(&lookahead) > 0 {
                         ts_parser__breakdown_lookahead(
                             parser,
+                            reuse,
                             &mut lookahead,
                             crate::error_costs::ERROR_STATE,
                         );
                     }
                     ts_parser__recover(parser, version, lookahead);
                     if did_reuse {
-                        crate::reusable_node::reusable_node_advance(&mut parser.reusable_node);
+                        reusable_node_advance(reuse);
                     }
                     return true;
                 }
@@ -2159,18 +2171,18 @@ pub(crate) fn ts_parser__advance<const LOGGING: bool>(
 }
 
 #[inline]
-pub(crate) fn ts_parser__condense_stack(parser: &mut Parser) -> u32 {
+pub(crate) fn ts_parser__condense_stack(parser: &mut Parser, reuse: &mut ReuseCursor<'_>) -> u32 {
     // An active sole version cannot merge, be pruned, or need resuming. Keep
     // the version-status side effect of lowering the saved error node baseline.
     if let Some(cost) = ts_stack_single_active_error_cost(&mut parser.stack) {
         return cost;
     }
-    ts_parser__condense_stack_general(parser)
+    ts_parser__condense_stack_general(parser, reuse)
 }
 
 // Preserve the small sole-active-head entry separately from GLR/recovery.
 #[inline(never)]
-fn ts_parser__condense_stack_general(parser: &mut Parser) -> u32 {
+fn ts_parser__condense_stack_general(parser: &mut Parser, reuse: &mut ReuseCursor<'_>) -> u32 {
     let mut made_changes = false;
     let mut min_error_cost = u32::MAX;
     let mut i = 0;
@@ -2240,7 +2252,7 @@ fn ts_parser__condense_stack_general(parser: &mut Parser) -> u32 {
                 parser_log_args!(parser, format_args!("resume version:{}", i));
                 min_error_cost = ts_stack_error_cost(&parser.stack, i);
                 let lookahead = ts_stack_resume(&mut parser.stack, i);
-                ts_parser__handle_error(parser, i, lookahead);
+                ts_parser__handle_error(parser, reuse, i, lookahead);
                 has_unpaused_version = true;
             } else {
                 ts_stack_remove_version(&mut parser.stack, &mut parser.tree_pool, i);
@@ -2564,10 +2576,7 @@ fn parse_with_logging<const LOGGING: bool>(
                 &parser.lexer.included_ranges,
                 &mut parser.included_range_differences,
             );
-            crate::reusable_node::reusable_node_reset(
-                &mut parser.reusable_node,
-                old_tree.root.as_ref().clone(),
-            );
+            reusable_node_reset(&mut parser.reusable_node, &parser.old_tree);
             if LOGGING && (parser.logger.is_some() || parser.dot_graph.is_some()) {
                 parser.lexer.debug_buffer = "parse_after_edit".into();
                 ts_parser__log(parser);
@@ -2597,6 +2606,10 @@ fn parse_with_logging<const LOGGING: bool>(
     };
 
     if !resume_balancing {
+        // The cursor borrows the old tree through this handle while the parser
+        // is borrowed mutably. A resumed parse continues on the same tree.
+        let old_root = parser.old_tree.clone();
+        let mut reuse = ReuseCursor::resume(&old_root, &mut parser.reusable_node);
         let mut position = 0;
         let mut last_position = 0;
         loop {
@@ -2624,11 +2637,18 @@ fn parse_with_logging<const LOGGING: bool>(
                         ts_parser__log(parser);
                     }
 
-                    let advanced =
-                        ts_parser__advance::<LOGGING>(parser, context, version, allow_node_reuse);
+                    let advanced = ts_parser__advance::<LOGGING>(
+                        parser,
+                        context,
+                        &mut reuse,
+                        version,
+                        allow_node_reuse,
+                    );
                     if !advanced {
                         if parser.has_scanner_error {
                             ts_parser_reset(parser);
+                        } else {
+                            reuse.save(&mut parser.reusable_node);
                         }
                         // Timeout/progress cancellation preserves the stack and
                         // scanner so the next call can resume this parse.
@@ -2649,7 +2669,7 @@ fn parse_with_logging<const LOGGING: bool>(
                 version += 1;
             };
 
-            let min_error_cost = ts_parser__condense_stack(parser);
+            let min_error_cost = ts_parser__condense_stack(parser, &mut reuse);
             if !parser.finished_tree.is_null()
                 && ts_subtree_error_cost(&parser.finished_tree) < min_error_cost
             {
@@ -3417,10 +3437,13 @@ mod tests {
                             state,
                         );
                         parser.stack.heads[0].node_count_at_last_error = baseline;
+                        let no_old_tree = Subtree::Null;
+                        let mut reuse =
+                            ReuseCursor::resume(&no_old_tree, &mut ReusableNode::default());
                         let cost = if fast {
-                            ts_parser__condense_stack(&mut parser)
+                            ts_parser__condense_stack(&mut parser, &mut reuse)
                         } else {
-                            ts_parser__condense_stack_general(&mut parser)
+                            ts_parser__condense_stack_general(&mut parser, &mut reuse)
                         };
                         snapshots.push((cost, parser.stack.heads[0].node_count_at_last_error));
                         assert_eq!(ts_stack_version_count(&parser.stack), 1);
