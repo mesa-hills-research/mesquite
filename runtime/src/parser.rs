@@ -2028,6 +2028,24 @@ pub(crate) fn ts_parser__advance<const LOGGING: bool>(
                             child_count,
                         ),
                     );
+                    // This loop skips repetition shifts, so a reduction whose
+                    // only alternatives are repetition shifts replaces its
+                    // version just as a lone reduction does. That is the
+                    // usual case inside every repeat, on each new element.
+                    let replace_version = table_entry
+                        .actions()
+                        .iter()
+                        .filter(|action| {
+                            !matches!(
+                                action,
+                                ParseAction::Shift {
+                                    repetition: true,
+                                    ..
+                                }
+                            )
+                        })
+                        .count()
+                        == 1;
                     let reduction_version = ts_parser__reduce(
                         parser,
                         version,
@@ -2037,7 +2055,7 @@ pub(crate) fn ts_parser__advance<const LOGGING: bool>(
                         production_id,
                         table_entry.actions().len() > 1,
                         lookahead.is_null(),
-                        table_entry.actions().len() == 1,
+                        replace_version,
                     );
                     did_reduce = true;
                     if reduction_version != STACK_VERSION_NONE {
