@@ -140,8 +140,8 @@ Cargo can rename dependencies, so one program can use both libraries:
 [dependencies]
 c_tree_sitter = { package = "tree-sitter", version = "=0.25.10" }
 c_rust = { package = "tree-sitter-rust", version = "=0.24.2" }
-port_tree_sitter = { package = "mesquite", version = "0.25.10" }
-port_rust = { package = "mesquite_rust", version = "0.1.0" }
+port_tree_sitter = { package = "mesquite", version = "0.26.0" }
+port_rust = { package = "mesquite_rust", version = "0.2.0" }
 ```
 
 ```rust

@@ -1,6 +1,6 @@
 [package]
 name = "mesquite"
-version = "0.25.10"
+version = "0.26.0"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT"
@@ -16,7 +16,7 @@ exclude = ["tests/"]
 name = "tree_sitter"
 
 [dependencies]
-mesquite_language = { version = "0.1.0", path = "../tables" }
+mesquite_language = { version = "0.2.0", path = "../tables" }
 streaming-iterator = "0.1.9"
 regex = "1.11.1"
 

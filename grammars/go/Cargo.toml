@@ -1,6 +1,6 @@
 [package]
 name = "mesquite_go"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT"
@@ -14,7 +14,7 @@ categories = ["parsing", "text-editors"]
 name = "tree_sitter_go"
 
 [dependencies]
-mesquite_language = { version = "0.1.0", path = "../../tables" }
+mesquite_language = { version = "0.2.0", path = "../../tables" }
 
 [dev-dependencies]
 mesquite = { path = "../../runtime" }

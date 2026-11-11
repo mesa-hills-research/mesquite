@@ -52,8 +52,8 @@ Add the runtime and a grammar crate for each language you parse:
 
 ```toml
 [dependencies]
-mesquite = "0.25.10"
-mesquite_rust = "0.1.0"
+mesquite = "0.26.0"
+mesquite_rust = "0.2.0"
 ```
 
 The library names are `tree_sitter` and `tree_sitter_rust`, so `use tree_sitter::...`
@@ -61,11 +61,13 @@ lines stay as they are. To keep upstream's dependency names as well, rename the 
 
 ```toml
 [dependencies]
-tree-sitter = { package = "mesquite", version = "0.25.10" }
-tree-sitter-rust = { package = "mesquite_rust", version = "0.1.0" }
+tree-sitter = { package = "mesquite", version = "0.26.0" }
+tree-sitter-rust = { package = "mesquite_rust", version = "0.2.0" }
 ```
 
-The crates use the 2024 edition and need Rust 1.89 or later.
+Mesquite 0.26 still follows tree-sitter 0.25.10. Its version moved past 0.25 when the
+grammar crates' tables changed, so it needs the 0.2 grammar crates. The crates use the
+2024 edition and need Rust 1.89 or later.
 
 ## Usage
 
