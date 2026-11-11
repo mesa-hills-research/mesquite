@@ -612,19 +612,24 @@ struct ChildSummary {
 
 #[inline(always)]
 fn summarize_children(data: &mut SubtreeHeapData, language: &Language) {
-    let SubtreePayload::Branch(branch) = &data.payload else {
+    let SubtreePayload::Branch(branch) = &mut data.payload else {
         panic!("child summaries require a branch payload");
     };
+    // Only the inputs are read from the header. The summary sets every output.
     let mut summary = ChildSummary {
-        branch: branch.clone(),
+        branch: BranchData {
+            production_id: branch.production_id,
+            first_leaf: branch.first_leaf,
+            ..BranchData::default()
+        },
         padding: data.padding,
         size: data.size,
-        lookahead_bytes: data.lookahead_bytes,
-        error_cost: data.error_cost,
+        lookahead_bytes: 0,
+        error_cost: 0,
         parse_state: data.parse_state,
-        has_external_tokens: data.has_external_tokens,
-        has_external_scanner_state_change: data.has_external_scanner_state_change,
-        depends_on_column: data.depends_on_column,
+        has_external_tokens: false,
+        has_external_scanner_state_change: false,
+        depends_on_column: false,
         fragile_left: data.fragile_left,
         fragile_right: data.fragile_right,
         symbol: data.symbol,
@@ -632,7 +637,7 @@ fn summarize_children(data: &mut SubtreeHeapData, language: &Language) {
         named: data.named,
     };
     summarize_child_slice(&mut summary, &data.children, language);
-    data.payload = SubtreePayload::Branch(summary.branch);
+    *branch = summary.branch;
     data.padding = summary.padding;
     data.size = summary.size;
     data.lookahead_bytes = summary.lookahead_bytes;
@@ -765,36 +770,38 @@ fn summarize_unary(data: &mut ChildSummary, child: &Subtree) {
     data.branch = summary;
 }
 
-#[inline(always)]
-fn summarize_child_slice_general(
-    data: &mut ChildSummary,
-    children: &[Subtree],
-    language: &Language,
-) {
-    let branch = &mut data.branch;
-    let mut summary = BranchData {
-        production_id: branch.production_id,
-        first_leaf: branch.first_leaf,
-        ..BranchData::default()
-    };
-    // Accumulate separately from the owning header. Child Arc pointers cannot
-    // alias these locals, so writes need not force reloading child data.
-    let mut padding = data.padding;
-    let mut size = data.size;
-    let mut error_cost: u32 = 0;
-    let mut has_external_tokens = false;
-    let mut depends_on_column = false;
-    let mut has_external_scanner_state_change = false;
-    let mut fragile_left = data.fragile_left;
-    let mut fragile_right = data.fragile_right;
-    let mut parse_state = data.parse_state;
+/// The running totals of a summary over a node's children.
+struct ChildTotals<'a> {
+    padding: Length,
+    size: Length,
+    error_cost: u32,
+    visible_child_count: u32,
+    named_child_count: u32,
+    visible_descendant_count: u32,
+    dynamic_precedence: i32,
+    has_external_tokens: bool,
+    depends_on_column: bool,
+    has_external_scanner_state_change: bool,
+    fragile_left: bool,
+    fragile_right: bool,
+    parse_state: StateId,
+    lookahead_end_byte: u32,
+    structural_index: usize,
+    alias_sequence: &'a [Symbol],
+    is_error: bool,
+    // What the summary needs from the first and the last child, read while
+    // those children are decoded instead of decoding them again afterwards.
+    first_leaf: FirstLeaf,
+    first_symbol: Symbol,
+    first_repeat_depth: u32,
+    last_repeat_depth: u32,
+}
 
-    let mut structural_index = 0;
-    let alias_sequence = ts_language_alias_sequence(language, summary.production_id as u32);
-    let mut lookahead_end_byte = 0;
-    let is_error = data.symbol == BUILTIN_SYM_ERROR || data.symbol == BUILTIN_SYM_ERROR_REPEAT;
-
-    for (i, child) in children.iter().enumerate() {
+impl ChildTotals<'_> {
+    /// Add one child. Repetition nodes, which balancing rotates, have two
+    /// children, as do many reductions, so that case passes constant positions.
+    #[inline(always)]
+    fn add(&mut self, child: &Subtree, is_first: bool, is_last: bool, language: &Language) {
         // Decode the representation once. In particular, inline leaves have
         // no branch/scanner summaries, so they need none of the heap-only work.
         let (
@@ -806,61 +813,114 @@ fn summarize_child_slice_general(
             named,
             extra,
             has_children,
-            child_branch,
+            child_visible_child_count,
+            child_named_child_count,
         ) = match child {
             Subtree::Inline(leaf) => {
                 let leaf = leaf.fields();
                 if leaf.flags & MISSING != 0 {
-                    error_cost = error_cost
+                    self.error_cost = self
+                        .error_cost
                         .wrapping_add(ERROR_COST_PER_MISSING_TREE + ERROR_COST_PER_RECOVERY);
                 }
+                let symbol = Symbol::from(leaf.symbol);
+                if is_first {
+                    self.first_leaf = FirstLeaf {
+                        symbol,
+                        parse_state: leaf.parse_state,
+                    };
+                    self.first_symbol = symbol;
+                    self.first_repeat_depth = 0;
+                }
+                if is_last {
+                    self.last_repeat_depth = 0;
+                }
                 (
-                    ts_subtree_padding(child),
-                    ts_subtree_size(child),
-                    (leaf.padding_rows_and_lookahead >> 4) as u32,
-                    leaf.symbol as Symbol,
+                    Length {
+                        bytes: u32::from(leaf.padding_bytes),
+                        extent: Point {
+                            row: u32::from(leaf.padding_rows_and_lookahead & 15),
+                            column: u32::from(leaf.padding_columns),
+                        },
+                    },
+                    Length {
+                        bytes: u32::from(leaf.size_bytes),
+                        extent: Point {
+                            row: 0,
+                            column: u32::from(leaf.size_bytes),
+                        },
+                    },
+                    u32::from(leaf.padding_rows_and_lookahead >> 4),
+                    symbol,
                     leaf.flags & VISIBLE != 0,
                     leaf.flags & NAMED != 0,
                     leaf.flags & EXTRA != 0,
                     false,
-                    None,
+                    0,
+                    0,
                 )
             }
             Subtree::Heap(child) => {
                 // C checks the existing size before replacing it for the
                 // first child, including when re-summarizing a rotation.
-                if size.extent.row == 0 && child.depends_on_column {
-                    depends_on_column = true;
+                if self.size.extent.row == 0 && child.depends_on_column {
+                    self.depends_on_column = true;
                 }
-                has_external_scanner_state_change |= child.has_external_scanner_state_change;
-                has_external_tokens |= child.has_external_tokens;
+                self.has_external_scanner_state_change |= child.has_external_scanner_state_change;
+                self.has_external_tokens |= child.has_external_tokens;
                 if child.symbol != BUILTIN_SYM_ERROR_REPEAT {
-                    error_cost = error_cost.wrapping_add(if child.is_missing {
+                    self.error_cost = self.error_cost.wrapping_add(if child.is_missing {
                         ERROR_COST_PER_MISSING_TREE + ERROR_COST_PER_RECOVERY
                     } else {
                         child.error_cost
                     });
                 }
                 if child.symbol == BUILTIN_SYM_ERROR {
-                    fragile_left = true;
-                    fragile_right = true;
-                    parse_state = TS_TREE_STATE_NONE;
+                    self.fragile_left = true;
+                    self.fragile_right = true;
+                    self.parse_state = TS_TREE_STATE_NONE;
                 }
-                let child_branch = if let SubtreePayload::Branch(child_branch) = &child.payload {
-                    if !child.children.is_empty() {
-                        // Empty reductions have a branch payload, but C
-                        // treats them as leaves for dynamic precedence.
-                        summary.dynamic_precedence = summary
-                            .dynamic_precedence
-                            .wrapping_add(child_branch.dynamic_precedence);
-                    }
-                    summary.visible_descendant_count = summary
-                        .visible_descendant_count
-                        .wrapping_add(child_branch.visible_descendant_count);
-                    Some(child_branch)
-                } else {
-                    None
+                let has_children = !child.children.is_empty();
+                let mut first_leaf = FirstLeaf {
+                    symbol: child.symbol,
+                    parse_state: child.parse_state,
                 };
+                let (child_visible_child_count, child_named_child_count, repeat_depth) =
+                    match &child.payload {
+                        SubtreePayload::Branch(child_branch) => {
+                            if has_children {
+                                // Empty reductions have a branch payload, but C
+                                // treats them as leaves for dynamic precedence.
+                                self.dynamic_precedence = self
+                                    .dynamic_precedence
+                                    .wrapping_add(child_branch.dynamic_precedence);
+                                first_leaf = child_branch.first_leaf;
+                            }
+                            self.visible_descendant_count = self
+                                .visible_descendant_count
+                                .wrapping_add(child_branch.visible_descendant_count);
+                            (
+                                child_branch.visible_child_count,
+                                child_branch.named_child_count,
+                                u32::from(child_branch.repeat_depth),
+                            )
+                        }
+                        // See ts_subtree_repeat_depth for this overlap with C's union.
+                        SubtreePayload::External(ExternalScannerState::Inline { data, .. }) => {
+                            (0, 0, u32::from(u16::from_ne_bytes([data[16], data[17]])))
+                        }
+                        _ => (0, 0, 0),
+                    };
+                if is_first {
+                    self.first_leaf = first_leaf;
+                    self.first_symbol = child.symbol;
+                    self.first_repeat_depth = repeat_depth;
+                    self.fragile_left |= child.fragile_left;
+                }
+                if is_last {
+                    self.last_repeat_depth = repeat_depth;
+                    self.fragile_right |= child.fragile_right;
+                }
                 (
                     child.padding,
                     child.size,
@@ -869,113 +929,167 @@ fn summarize_child_slice_general(
                     child.visible,
                     child.named,
                     child.extra,
-                    !child.children.is_empty(),
-                    child_branch,
+                    has_children,
+                    child_visible_child_count,
+                    child_named_child_count,
                 )
             }
-            Subtree::Null => (
-                length_zero(),
-                length_zero(),
-                0,
-                0,
-                false,
-                false,
-                false,
-                false,
-                None,
-            ),
+            Subtree::Null => {
+                if is_first {
+                    self.first_leaf = FirstLeaf::default();
+                    self.first_symbol = 0;
+                    self.first_repeat_depth = 0;
+                }
+                if is_last {
+                    self.last_repeat_depth = 0;
+                }
+                (
+                    length_zero(),
+                    length_zero(),
+                    0,
+                    0,
+                    false,
+                    false,
+                    false,
+                    false,
+                    0,
+                    0,
+                )
+            }
         };
 
-        if i == 0 {
-            padding = child_padding;
-            size = child_size;
+        if is_first {
+            self.padding = child_padding;
+            self.size = child_size;
         } else {
-            size = length_add(size, length_add(child_padding, child_size));
+            self.size = length_add(self.size, length_add(child_padding, child_size));
         }
-        let child_lookahead_end_byte = padding
+        let child_lookahead_end_byte = self
+            .padding
             .bytes
-            .wrapping_add(size.bytes)
+            .wrapping_add(self.size.bytes)
             .wrapping_add(lookahead);
-        lookahead_end_byte = lookahead_end_byte.max(child_lookahead_end_byte);
+        self.lookahead_end_byte = self.lookahead_end_byte.max(child_lookahead_end_byte);
 
-        if is_error && !extra && !(symbol == BUILTIN_SYM_ERROR && !has_children) {
+        if self.is_error && !extra && !(symbol == BUILTIN_SYM_ERROR && !has_children) {
             if visible {
-                error_cost = error_cost.wrapping_add(ERROR_COST_PER_SKIPPED_TREE);
+                self.error_cost = self.error_cost.wrapping_add(ERROR_COST_PER_SKIPPED_TREE);
             } else if has_children {
-                error_cost = error_cost.wrapping_add(
-                    ERROR_COST_PER_SKIPPED_TREE
-                        .wrapping_mul(child_branch.map_or(0, |b| b.visible_child_count)),
+                self.error_cost = self.error_cost.wrapping_add(
+                    ERROR_COST_PER_SKIPPED_TREE.wrapping_mul(child_visible_child_count),
                 );
             }
         }
 
         if !extra
             && symbol != 0
-            && !alias_sequence.is_empty()
-            && alias_sequence[structural_index] != 0
+            && !self.alias_sequence.is_empty()
+            && self.alias_sequence[self.structural_index] != 0
         {
-            summary.visible_descendant_count = summary.visible_descendant_count.wrapping_add(1);
-            summary.visible_child_count = summary.visible_child_count.wrapping_add(1);
-            if ts_language_symbol_metadata(language, alias_sequence[structural_index]).named {
-                summary.named_child_count = summary.named_child_count.wrapping_add(1);
+            self.visible_descendant_count = self.visible_descendant_count.wrapping_add(1);
+            self.visible_child_count = self.visible_child_count.wrapping_add(1);
+            if ts_language_symbol_metadata(language, self.alias_sequence[self.structural_index])
+                .named
+            {
+                self.named_child_count = self.named_child_count.wrapping_add(1);
             }
         } else if visible {
-            summary.visible_descendant_count = summary.visible_descendant_count.wrapping_add(1);
-            summary.visible_child_count = summary.visible_child_count.wrapping_add(1);
-            summary.named_child_count = summary.named_child_count.wrapping_add(u32::from(named));
-        } else if has_children && let Some(child_branch) = child_branch {
-            summary.visible_child_count = summary
+            self.visible_descendant_count = self.visible_descendant_count.wrapping_add(1);
+            self.visible_child_count = self.visible_child_count.wrapping_add(1);
+            self.named_child_count = self.named_child_count.wrapping_add(u32::from(named));
+        } else if has_children {
+            self.visible_child_count = self
                 .visible_child_count
-                .wrapping_add(child_branch.visible_child_count);
-            summary.named_child_count = summary
-                .named_child_count
-                .wrapping_add(child_branch.named_child_count);
+                .wrapping_add(child_visible_child_count);
+            self.named_child_count = self.named_child_count.wrapping_add(child_named_child_count);
         }
-        structural_index += usize::from(!extra);
+        self.structural_index += usize::from(!extra);
+    }
+}
+
+#[inline(always)]
+fn summarize_child_slice_general(
+    data: &mut ChildSummary,
+    children: &[Subtree],
+    language: &Language,
+) {
+    let production_id = data.branch.production_id;
+    let mut totals = ChildTotals {
+        padding: data.padding,
+        size: data.size,
+        error_cost: 0,
+        visible_child_count: 0,
+        named_child_count: 0,
+        visible_descendant_count: 0,
+        dynamic_precedence: 0,
+        has_external_tokens: false,
+        depends_on_column: false,
+        has_external_scanner_state_change: false,
+        fragile_left: data.fragile_left,
+        fragile_right: data.fragile_right,
+        parse_state: data.parse_state,
+        lookahead_end_byte: 0,
+        structural_index: 0,
+        alias_sequence: ts_language_alias_sequence(language, u32::from(production_id)),
+        is_error: data.symbol == BUILTIN_SYM_ERROR || data.symbol == BUILTIN_SYM_ERROR_REPEAT,
+        first_leaf: data.branch.first_leaf,
+        first_symbol: 0,
+        first_repeat_depth: 0,
+        last_repeat_depth: 0,
+    };
+    if let [first, last] = children {
+        totals.add(first, true, false, language);
+        totals.add(last, false, true, language);
+    } else {
+        let last_index = children.len().wrapping_sub(1);
+        for (i, child) in children.iter().enumerate() {
+            totals.add(child, i == 0, i == last_index, language);
+        }
     }
 
-    let lookahead_bytes = lookahead_end_byte
+    let mut error_cost = totals.error_cost;
+    let (padding, size) = (totals.padding, totals.size);
+    let lookahead_bytes = totals
+        .lookahead_end_byte
         .wrapping_sub(size.bytes)
         .wrapping_sub(padding.bytes);
-    if is_error {
+    if totals.is_error {
         error_cost = error_cost
             .wrapping_add(ERROR_COST_PER_RECOVERY)
             .wrapping_add(ERROR_COST_PER_SKIPPED_CHAR.wrapping_mul(size.bytes))
             .wrapping_add(ERROR_COST_PER_SKIPPED_LINE.wrapping_mul(size.extent.row));
     }
 
-    let ends = children.first().zip(children.last());
-    if let Some((first_child, last_child)) = ends {
-        summary.first_leaf = FirstLeaf {
-            symbol: ts_subtree_leaf_symbol(first_child),
-            parse_state: ts_subtree_leaf_parse_state(first_child),
-        };
-        if ts_subtree_fragile_left(first_child) {
-            fragile_left = true;
-        }
-        if ts_subtree_fragile_right(last_child) {
-            fragile_right = true;
-        }
-        if children.len() >= 2
-            && !data.visible
-            && !data.named
-            && ts_subtree_symbol(first_child) == data.symbol
-        {
-            summary.repeat_depth = ts_subtree_repeat_depth(first_child)
-                .max(ts_subtree_repeat_depth(last_child))
-                .wrapping_add(1) as u16;
-        }
-    }
-    *branch = summary;
+    let repeat_depth = if children.len() >= 2
+        && !data.visible
+        && !data.named
+        && totals.first_symbol == data.symbol
+    {
+        totals
+            .first_repeat_depth
+            .max(totals.last_repeat_depth)
+            .wrapping_add(1) as u16
+    } else {
+        0
+    };
+    data.branch = BranchData {
+        visible_child_count: totals.visible_child_count,
+        named_child_count: totals.named_child_count,
+        visible_descendant_count: totals.visible_descendant_count,
+        dynamic_precedence: totals.dynamic_precedence,
+        repeat_depth,
+        production_id,
+        first_leaf: totals.first_leaf,
+    };
     data.padding = padding;
     data.size = size;
     data.error_cost = error_cost;
-    data.has_external_tokens = has_external_tokens;
-    data.depends_on_column = depends_on_column;
-    data.has_external_scanner_state_change = has_external_scanner_state_change;
-    data.fragile_left = fragile_left;
-    data.fragile_right = fragile_right;
-    data.parse_state = parse_state;
+    data.has_external_tokens = totals.has_external_tokens;
+    data.depends_on_column = totals.depends_on_column;
+    data.has_external_scanner_state_change = totals.has_external_scanner_state_change;
+    data.fragile_left = totals.fragile_left;
+    data.fragile_right = totals.fragile_right;
+    data.parse_state = totals.parse_state;
     data.lookahead_bytes = lookahead_bytes;
 }
 
