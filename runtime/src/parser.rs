@@ -270,22 +270,23 @@ pub(crate) fn ts_parser__breakdown_lookahead(
     state: StateId,
 ) {
     let mut did_descend = false;
-    let mut tree = reusable_node_tree(&parser.reusable_node);
-    while ts_subtree_child_count(&tree) > 0 && ts_subtree_parse_state(&tree) != state {
+    // Borrow the cursor's nodes while descending, and retain only the result.
+    while let Some(entry) = parser.reusable_node.stack.last()
+        && ts_subtree_child_count(&entry.tree) > 0
+        && ts_subtree_parse_state(&entry.tree) != state
+    {
+        let symbol = ts_subtree_symbol(&entry.tree);
         parser_log!(
             parser,
             "state_mismatch sym:{}",
-            ts_language_symbol_name(
-                parser.language.as_ref().expect("parser language"),
-                ts_subtree_symbol(&tree)
-            )
-            .unwrap_or("")
+            ts_language_symbol_name(parser.language.as_ref().expect("parser language"), symbol)
+                .unwrap_or("")
         );
         reusable_node_descend(&mut parser.reusable_node);
-        tree = reusable_node_tree(&parser.reusable_node);
         did_descend = true;
     }
     if did_descend {
+        let tree = reusable_node_tree(&parser.reusable_node);
         ts_subtree_release(&mut parser.tree_pool, std::mem::replace(lookahead, tree));
     }
 }
@@ -824,23 +825,27 @@ pub(crate) fn ts_parser__reuse_node(
 ) -> Subtree {
     use crate::reusable_node::*;
 
+    let language = parser.language.expect("parser language");
+    // The candidate is borrowed from the cursor, which keeps it alive, and only
+    // the node that is reused gets its own reference. Retaining every candidate
+    // would cost an atomic increment and decrement per node visited.
     loop {
-        let result = reusable_node_tree(&parser.reusable_node);
-        if result.is_null() {
+        let Some(entry) = parser.reusable_node.stack.last() else {
             break;
-        }
-        let byte_offset = reusable_node_byte_offset(&parser.reusable_node);
-        let mut end_byte_offset = byte_offset.wrapping_add(ts_subtree_total_bytes(&result));
+        };
+        let byte_offset = entry.byte_offset;
+        let symbol = ts_subtree_symbol(&entry.tree);
+        let mut end_byte_offset = byte_offset.wrapping_add(ts_subtree_total_bytes(&entry.tree));
 
         // EOF must also account for included-range changes later in the file.
-        if ts_subtree_is_eof(&result) {
+        if ts_subtree_is_eof(&entry.tree) {
             end_byte_offset = u32::MAX;
         }
         if byte_offset > position {
             parser_log!(
                 parser,
                 "before_reusable_node symbol:{}",
-                tree_name(parser, &result)
+                ts_language_symbol_name(&language, symbol).unwrap_or("")
             );
             break;
         }
@@ -848,7 +853,7 @@ pub(crate) fn ts_parser__reuse_node(
             parser_log!(
                 parser,
                 "past_reusable_node symbol:{}",
-                tree_name(parser, &result)
+                ts_language_symbol_name(&language, symbol).unwrap_or("")
             );
             if end_byte_offset <= position || !reusable_node_descend(&mut parser.reusable_node) {
                 reusable_node_advance(&mut parser.reusable_node);
@@ -862,19 +867,20 @@ pub(crate) fn ts_parser__reuse_node(
             parser_log!(
                 parser,
                 "reusable_node_has_different_external_scanner_state symbol:{}",
-                tree_name(parser, &result)
+                ts_language_symbol_name(&language, symbol).unwrap_or("")
             );
             reusable_node_advance(&mut parser.reusable_node);
             continue;
         }
 
-        let reason = if ts_subtree_has_changes(&result) {
+        let result = &entry.tree;
+        let reason = if ts_subtree_has_changes(result) {
             Some("has_changes")
-        } else if ts_subtree_is_error(&result) {
+        } else if ts_subtree_is_error(result) {
             Some("is_error")
-        } else if ts_subtree_missing(&result) {
+        } else if ts_subtree_missing(result) {
             Some("is_missing")
-        } else if ts_subtree_is_fragile(&result) {
+        } else if ts_subtree_is_fragile(result) {
             Some("is_fragile")
         } else if ts_parser__has_included_range_difference(parser, byte_offset, end_byte_offset) {
             Some("contains_different_included_range")
@@ -886,7 +892,7 @@ pub(crate) fn ts_parser__reuse_node(
                 parser,
                 "cant_reuse_node_{} tree:{}",
                 reason,
-                tree_name(parser, &result)
+                ts_language_symbol_name(&language, symbol).unwrap_or("")
             );
             if !reusable_node_descend(&mut parser.reusable_node) {
                 reusable_node_advance(&mut parser.reusable_node);
@@ -896,25 +902,26 @@ pub(crate) fn ts_parser__reuse_node(
             continue;
         }
 
-        let leaf_symbol = ts_subtree_leaf_symbol(&result);
-        *table_entry = parser.parse_table_cache.table_entry(
-            parser.language.as_ref().unwrap(),
-            *state,
-            leaf_symbol,
-        );
-        if !ts_parser__can_reuse_first_leaf(parser, *state, &result, table_entry) {
+        let leaf_symbol = ts_subtree_leaf_symbol(result);
+        *table_entry = parser
+            .parse_table_cache
+            .table_entry(&language, *state, leaf_symbol);
+        if !ts_parser__can_reuse_first_leaf(parser, *state, result, table_entry) {
             parser_log!(
                 parser,
                 "cant_reuse_node symbol:{}, first_leaf_symbol:{}",
-                tree_name(parser, &result),
-                ts_language_symbol_name(parser.language.as_ref().unwrap(), leaf_symbol)
-                    .unwrap_or("")
+                ts_language_symbol_name(&language, symbol).unwrap_or(""),
+                ts_language_symbol_name(&language, leaf_symbol).unwrap_or("")
             );
             reusable_node_advance_past_leaf(&mut parser.reusable_node);
             break;
         }
-        parser_log!(parser, "reuse_node symbol:{}", tree_name(parser, &result));
-        // reusable_node_tree already returns a retained handle.
+        let result = result.clone();
+        parser_log!(
+            parser,
+            "reuse_node symbol:{}",
+            ts_language_symbol_name(&language, symbol).unwrap_or("")
+        );
         return result;
     }
     Subtree::Null
