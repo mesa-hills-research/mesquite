@@ -263,6 +263,25 @@ impl From<Vec<Subtree>> for Children {
     }
 }
 
+impl Children {
+    /// Takes the children out of `children`. Up to three are moved into the
+    /// header and leave the Vec empty with its allocation, for reuse. A longer
+    /// list takes the Vec itself.
+    #[inline]
+    pub(crate) fn take_from_vec(children: &mut Vec<Subtree>) -> Self {
+        if children.len() <= INLINE_CHILD_CAPACITY {
+            let mut items = [const { Subtree::Null }; INLINE_CHILD_CAPACITY];
+            let len = children.len() as u8;
+            for (slot, child) in items.iter_mut().zip(children.drain(..)) {
+                *slot = child;
+            }
+            Self::Inline { len, items }
+        } else {
+            Self::Heap(std::mem::take(children))
+        }
+    }
+}
+
 impl From<&[Subtree]> for Children {
     #[inline]
     fn from(children: &[Subtree]) -> Self {

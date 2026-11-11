@@ -1292,8 +1292,13 @@ fn ts_parser__reduce_general(
         };
         // Alternative children are compared using their summarized precedence,
         // before adding this reduction's precedence, just as in C.
+        // A few children move into the parent's header, and the stack keeps
+        // their emptied array for its next pop.
+        let node_children = Children::take_from_vec(&mut children);
+        ts_stack_recycle_subtree_array(&mut parser.stack, children);
         let parent = if pop.peek().is_some_and(|next| next.version == slice.version) {
-            let mut parent = ts_subtree_new_node(symbol, children, production_id as u32, &language);
+            let mut parent =
+                ts_subtree_new_node(symbol, node_children, production_id as u32, &language);
             while pop.peek().is_some_and(|next| next.version == slice.version) {
                 let mut children = std::mem::take(&mut pop.next().unwrap().subtrees);
                 ts_subtree_array_remove_trailing_extras(
@@ -1304,7 +1309,10 @@ fn ts_parser__reduce_general(
                     ts_subtree_array_clear(&mut parser.tree_pool, &mut parser.trailing_extras);
                     ts_subtree_release(&mut parser.tree_pool, parent);
                     std::mem::swap(&mut parser.trailing_extras, &mut parser.trailing_extras2);
-                    parent = ts_subtree_new_node(symbol, children, production_id as u32, &language);
+                    let node_children = Children::take_from_vec(&mut children);
+                    ts_stack_recycle_subtree_array(&mut parser.stack, children);
+                    parent =
+                        ts_subtree_new_node(symbol, node_children, production_id as u32, &language);
                 } else {
                     // C deletes next_slice.subtrees with its original length,
                     // including the extras. Restore that order before releasing.
@@ -1320,7 +1328,7 @@ fn ts_parser__reduce_general(
             // wrapping it in Arc, avoiding copy-on-write synchronization.
             ts_subtree_new_node_with(
                 symbol,
-                children,
+                node_children,
                 production_id as u32,
                 &language,
                 initialize,
@@ -2878,6 +2886,7 @@ mod tests {
                 heads: Vec::new(),
                 slices: Vec::new(),
                 iterators: Vec::new(),
+                spare_subtree_arrays: Vec::new(),
                 arena: StackArena::default(),
                 base_node: StackNodeId(0),
             },

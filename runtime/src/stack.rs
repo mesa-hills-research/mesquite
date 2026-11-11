@@ -112,6 +112,22 @@ pub(crate) struct Stack {
     pub iterators: Vec<StackIterator>,
     pub arena: StackArena,
     pub base_node: StackNodeId,
+    /// Emptied child arrays of earlier pops, for the next pops to fill. Most
+    /// reductions move their few children into the parent's header and give
+    /// the array back, so a pop seldom allocates.
+    pub spare_subtree_arrays: Vec<Vec<Subtree>>,
+}
+
+/// How many emptied child arrays the stack keeps.
+const MAX_SPARE_SUBTREE_ARRAYS: usize = 16;
+
+/// Keeps an emptied child array for a later pop.
+#[inline]
+pub(crate) fn ts_stack_recycle_subtree_array(stack: &mut Stack, subtrees: Vec<Subtree>) {
+    debug_assert!(subtrees.is_empty());
+    if subtrees.capacity() > 0 && stack.spare_subtree_arrays.len() < MAX_SPARE_SUBTREE_ARRAYS {
+        stack.spare_subtree_arrays.push(subtrees);
+    }
 }
 #[derive(Debug)]
 pub(crate) struct StackSlice {
@@ -501,7 +517,7 @@ pub(crate) fn stack__iter(
     stack.slices.clear();
     stack.iterators.clear();
     let include_subtrees = goal_subtree_count >= 0;
-    let mut subtrees = Vec::new();
+    let mut subtrees = stack.spare_subtree_arrays.pop().unwrap_or_default();
     if include_subtrees {
         // C reserves room for children plus a heap header in the same buffer.
         // The Rust header is a separate allocation; only children go here.
@@ -619,6 +635,7 @@ pub(crate) fn ts_stack_new() -> Stack {
         heads,
         slices: Vec::with_capacity(4),
         iterators: Vec::with_capacity(4),
+        spare_subtree_arrays: Vec::new(),
         arena,
         base_node,
     }
@@ -627,6 +644,7 @@ pub(crate) fn ts_stack_new() -> Stack {
 pub(crate) fn ts_stack_delete(stack: &mut Stack, pool: &mut SubtreePool) {
     stack.slices = Vec::new();
     stack.iterators = Vec::new();
+    stack.spare_subtree_arrays = Vec::new();
     stack_node_release(&mut stack.arena, stack.base_node, pool);
     for head in std::mem::take(&mut stack.heads) {
         stack_head_delete(head, &mut stack.arena, pool);
@@ -1610,6 +1628,7 @@ mod version_tests {
             }],
             slices: Vec::new(),
             iterators: Vec::new(),
+            spare_subtree_arrays: Vec::new(),
             arena: StackArena {
                 nodes: vec![base, error, top],
                 free: Vec::new(),
