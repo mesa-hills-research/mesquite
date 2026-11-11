@@ -178,7 +178,7 @@ mod tests {
             bytes,
             ..Length::default()
         };
-        data.children = children;
+        data.children = children.into();
         Subtree::Heap(Arc::new(data))
     }
 

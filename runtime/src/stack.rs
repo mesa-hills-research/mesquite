@@ -819,7 +819,7 @@ pub(crate) fn ts_stack_restore_head_snapshot(
 #[cfg(test)]
 pub(crate) fn ts_stack_reduce_unary(
     stack: &mut Stack,
-    build: impl FnOnce(Vec<Subtree>, StateId) -> (Subtree, StateId),
+    build: impl FnOnce(Children, StateId) -> (Subtree, StateId),
 ) -> Option<StateId> {
     if stack.heads.len() != 1 {
         return None;
@@ -833,7 +833,7 @@ pub(crate) fn ts_stack_reduce_unary(
 pub(crate) fn ts_stack_reduce_unary_for_version(
     stack: &mut Stack,
     version: StackVersion,
-    build: impl FnOnce(Vec<Subtree>, StateId) -> (Subtree, StateId),
+    build: impl FnOnce(Children, StateId) -> (Subtree, StateId),
 ) -> Option<StateId> {
     if stack.heads[version as usize].status != StackStatus::Active {
         return None;
@@ -851,11 +851,10 @@ pub(crate) fn ts_stack_reduce_unary_for_version(
     let state = stack.arena.node(predecessor).state;
     let link = stack.arena.node_mut(top).links.first.as_mut().unwrap();
     let child = std::mem::replace(&mut link.subtree, Subtree::Null);
-    let children = if child.is_null() {
-        Vec::new()
-    } else {
-        vec![child]
-    };
+    let mut children = Children::new();
+    if !child.is_null() {
+        children.push(child);
+    }
     stack.slices.clear();
     stack.iterators.clear();
     let (parent, state) = build(children, state);
@@ -905,7 +904,7 @@ fn stack_node_replace_subtree(
 pub(crate) fn ts_stack_reduce_many(
     stack: &mut Stack,
     count: u32,
-    build: impl FnOnce(Vec<Subtree>, StateId) -> (Subtree, StateId),
+    build: impl FnOnce(Children, StateId) -> (Subtree, StateId),
 ) -> Option<StateId> {
     if stack.heads.len() != 1 {
         return None;
@@ -919,7 +918,7 @@ pub(crate) fn ts_stack_reduce_many_for_version(
     stack: &mut Stack,
     version: StackVersion,
     count: u32,
-    build: impl FnOnce(Vec<Subtree>, StateId) -> (Subtree, StateId),
+    build: impl FnOnce(Children, StateId) -> (Subtree, StateId),
 ) -> Option<StateId> {
     if stack.heads[version as usize].status != StackStatus::Active {
         return None;
@@ -945,7 +944,8 @@ pub(crate) fn ts_stack_reduce_many_for_version(
         slot = predecessor;
         predecessor = link.node;
     }
-    let mut children = Vec::with_capacity(subtree_count);
+    // Up to three children go straight into the parent's header.
+    let mut children = Children::with_capacity(subtree_count);
     if count > 0 {
         let mut node = stack.heads[version as usize].node;
         loop {
@@ -1644,7 +1644,7 @@ mod version_tests {
                             extent: crate::point::Point { row: 2, column: 9 },
                         },
                         error_cost: 4,
-                        children: Vec::new(),
+                        children: Children::new(),
                         payload: SubtreePayload::Branch(BranchData {
                             dynamic_precedence: -5,
                             visible_child_count: 3,
@@ -1662,7 +1662,7 @@ mod version_tests {
                     state: 3,
                 }]);
                 let top = stack.heads[0].node;
-                let build = |children: Vec<Subtree>, state| {
+                let build = |children: Children, state| {
                     assert_eq!(state, 3);
                     assert_eq!(children.len(), usize::from(child_kind != 0));
                     // Deliberately different summaries: the replacement must
@@ -1684,7 +1684,7 @@ mod version_tests {
                                 visible_descendant_count: 5,
                                 ..BranchData::default()
                             }),
-                            children,
+                            children: children.into(),
                             ..SubtreeHeapData::default()
                         })),
                         6,
@@ -1694,7 +1694,7 @@ mod version_tests {
                     assert_eq!(ts_stack_reduce_unary(&mut stack, build), Some(6));
                 } else {
                     let children = ts_stack_pop_count_in_place(&mut stack, 1).unwrap();
-                    let (parent, state) = build(children, ts_stack_state(&stack, 0));
+                    let (parent, state) = build(children.into(), ts_stack_state(&stack, 0));
                     ts_stack_push(&mut stack, &mut pool, 0, parent, false, state);
                 }
                 assert_eq!(stack.heads[0].node, top);
@@ -1731,7 +1731,7 @@ mod version_tests {
                     stack.heads[0].summary = Some(Vec::new());
                     stack.heads[0].node_count_at_last_error = 47;
                     stack.heads[0].last_external_token = leaf(9);
-                    let build = |children: Vec<Subtree>, state| {
+                    let build = |children: Children, state| {
                         assert_eq!(state, 1);
                         (
                             Subtree::Heap(Arc::new(SubtreeHeapData {
@@ -1744,7 +1744,7 @@ mod version_tests {
                                     visible_descendant_count: 7,
                                     ..BranchData::default()
                                 }),
-                                children,
+                                children: children.into(),
                                 ..SubtreeHeapData::default()
                             })),
                             3,
@@ -1754,7 +1754,7 @@ mod version_tests {
                         assert_eq!(ts_stack_reduce_many(&mut stack, count, build), Some(3));
                     } else {
                         let children = ts_stack_pop_count_in_place(&mut stack, count).unwrap();
-                        let (parent, state) = build(children, ts_stack_state(&stack, 0));
+                        let (parent, state) = build(children.into(), ts_stack_state(&stack, 0));
                         ts_stack_push(&mut stack, &mut pool, 0, parent, false, state);
                     }
                     // Vacant slots retain inert scalar values for reuse; only
@@ -1786,7 +1786,7 @@ mod version_tests {
                 assert_eq!(children.len(), 1);
                 (
                     Subtree::Heap(Arc::new(SubtreeHeapData {
-                        children,
+                        children: children.into(),
                         payload: SubtreePayload::Branch(BranchData::default()),
                         ..SubtreeHeapData::default()
                     })),
@@ -2008,7 +2008,7 @@ mod version_tests {
     fn error_callback_pops_only_the_first_error_path() {
         let error = Subtree::Heap(Arc::new(SubtreeHeapData {
             symbol: tree_sitter_language::BUILTIN_SYM_ERROR,
-            children: Vec::new(),
+            children: Children::new(),
             payload: SubtreePayload::Leaf,
             ..SubtreeHeapData::default()
         }));
@@ -2246,7 +2246,7 @@ mod tests {
             },
             error_cost: 13,
             visible: true,
-            children: vec![leaf(3, VISIBLE)],
+            children: vec![leaf(3, VISIBLE)].into(),
             payload: SubtreePayload::Branch(BranchData {
                 visible_descendant_count: 9,
                 dynamic_precedence: 11,
@@ -2308,7 +2308,7 @@ mod tests {
         let heap = |symbol| {
             let data = Arc::new(SubtreeHeapData {
                 symbol,
-                children: Vec::new(),
+                children: Children::new(),
                 payload: SubtreePayload::Leaf,
                 ..SubtreeHeapData::default()
             });
@@ -2404,7 +2404,7 @@ mod tests {
                 extent: Point { row: 2, column: 2 },
             },
             error_cost: 23,
-            children: vec![leaf(2, VISIBLE)],
+            children: vec![leaf(2, VISIBLE)].into(),
             payload: SubtreePayload::Branch(BranchData {
                 visible_descendant_count: 3,
                 dynamic_precedence: -7,
@@ -2472,7 +2472,7 @@ mod tests {
                 extent: Point { row: 2, column: 3 },
             },
             error_cost: 23,
-            children: vec![leaf(2, VISIBLE)],
+            children: vec![leaf(2, VISIBLE)].into(),
             payload: SubtreePayload::Branch(BranchData {
                 visible_descendant_count: 3,
                 dynamic_precedence: -5,
@@ -2500,7 +2500,7 @@ mod tests {
         let error = Subtree::Heap(Arc::new(SubtreeHeapData {
             symbol: 9,
             error_cost: 1,
-            children: Vec::new(),
+            children: Children::new(),
             payload: SubtreePayload::Leaf,
             ..SubtreeHeapData::default()
         }));
@@ -2772,7 +2772,7 @@ mod tests {
         let heap = Subtree::Heap(Arc::new(SubtreeHeapData {
             symbol: 3,
             visible: true,
-            children: Vec::new(),
+            children: Children::new(),
             payload: SubtreePayload::Leaf,
             size: Length {
                 bytes: 3,
@@ -2868,7 +2868,7 @@ mod tests {
         let heap = Subtree::Heap(Arc::new(SubtreeHeapData {
             symbol: 3,
             visible: true,
-            children: Vec::new(),
+            children: Children::new(),
             payload: SubtreePayload::Leaf,
             ..SubtreeHeapData::default()
         }));

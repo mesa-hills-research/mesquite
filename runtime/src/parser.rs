@@ -1010,19 +1010,29 @@ pub(crate) fn ts_parser__select_children(
     left: &Subtree,
     children: &[Subtree],
 ) -> bool {
-    parser.scratch_trees.clear();
-    parser.scratch_trees.extend_from_slice(children);
+    // C builds a non-owning header at the end of its scratch array. Rust owns
+    // these temporary child handles. A few fit in the header itself, and more
+    // go in the scratch Vec, whose allocation is recovered for reuse.
+    let children = if children.len() <= INLINE_CHILD_CAPACITY {
+        Children::from(children)
+    } else {
+        parser.scratch_trees.clear();
+        parser.scratch_trees.extend_from_slice(children);
+        Children::Heap(std::mem::take(&mut parser.scratch_trees))
+    };
     let mut scratch_tree = ts_subtree_new_node(
         ts_subtree_symbol(left),
-        std::mem::take(&mut parser.scratch_trees),
+        children,
         0,
         parser.language.as_ref().unwrap(),
     );
     let result = ts_parser__select_tree(parser, left, &scratch_tree);
-    // C builds a non-owning header at the end of its scratch array. Rust owns
-    // these temporary child handles, then recovers the Vec allocation for reuse.
-    parser.scratch_trees = std::mem::take(&mut scratch_tree.heap_mut().unwrap().children);
-    parser.scratch_trees.clear();
+    if let Children::Heap(mut children) =
+        std::mem::take(&mut scratch_tree.heap_mut().unwrap().children)
+    {
+        children.clear();
+        parser.scratch_trees = children;
+    }
     result
 }
 
@@ -1129,7 +1139,10 @@ pub(crate) fn ts_parser__reduce(
             version,
             count,
             |mut children, state| {
-                ts_subtree_array_remove_trailing_extras(&mut children, &mut parser.trailing_extras);
+                ts_subtree_children_remove_trailing_extras(
+                    &mut children,
+                    &mut parser.trailing_extras,
+                );
                 let next_state = parser
                     .parse_table_cache
                     .next_state(&language, state, symbol);
@@ -2901,7 +2914,7 @@ mod tests {
     fn branch(symbol: Symbol, children: Vec<Subtree>) -> Subtree {
         Subtree::Heap(Arc::new(SubtreeHeapData {
             symbol,
-            children,
+            children: children.into(),
             payload: SubtreePayload::Branch(BranchData::default()),
             ..SubtreeHeapData::default()
         }))
@@ -2928,7 +2941,7 @@ mod tests {
                 symbol,
                 has_external_tokens: true,
                 payload: SubtreePayload::External(ts_external_scanner_state_init(bytes)),
-                children: Vec::new(),
+                children: Children::new(),
                 ..SubtreeHeapData::default()
             }))
         }
@@ -3468,7 +3481,7 @@ mod tests {
             }
             let external = Subtree::Heap(Arc::new(SubtreeHeapData {
                 has_external_tokens: true,
-                children: Vec::new(),
+                children: Children::new(),
                 payload: SubtreePayload::External(ExternalScannerState::default()),
                 ..SubtreeHeapData::default()
             }));

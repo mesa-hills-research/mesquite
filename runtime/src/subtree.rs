@@ -115,8 +115,226 @@ pub(crate) struct SubtreeHeapData {
     pub depends_on_column: bool,
     pub is_missing: bool,
     pub is_keyword: bool,
-    pub children: Vec<Subtree>,
+    pub children: Children,
     pub payload: SubtreePayload,
+}
+
+/// The number of children kept in a node's own allocation. Nine in ten branch
+/// nodes of typical trees have three children or fewer.
+pub(crate) const INLINE_CHILD_CAPACITY: usize = 3;
+
+/// A node's children. Up to three live in the header, so most nodes are one
+/// allocation, as in C, which puts a node's children right before its header.
+/// More children are kept in a Vec.
+#[derive(Clone)]
+pub(crate) enum Children {
+    Inline {
+        len: u8,
+        items: [Subtree; INLINE_CHILD_CAPACITY],
+    },
+    Heap(Vec<Subtree>),
+}
+
+/// Lists the children, the same however they are stored.
+impl std::fmt::Debug for Children {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.as_slice()).finish()
+    }
+}
+
+impl Default for Children {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Children {
+    #[inline]
+    pub(crate) const fn new() -> Self {
+        Self::Inline {
+            len: 0,
+            items: [const { Subtree::Null }; INLINE_CHILD_CAPACITY],
+        }
+    }
+
+    #[inline]
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        if capacity <= INLINE_CHILD_CAPACITY {
+            Self::new()
+        } else {
+            Self::Heap(Vec::with_capacity(capacity))
+        }
+    }
+
+    #[inline]
+    pub(crate) fn as_slice(&self) -> &[Subtree] {
+        match self {
+            Self::Inline { len, items } => &items[..usize::from(*len)],
+            Self::Heap(children) => children,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn as_mut_slice(&mut self) -> &mut [Subtree] {
+        match self {
+            Self::Inline { len, items } => &mut items[..usize::from(*len)],
+            Self::Heap(children) => children,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn push(&mut self, tree: Subtree) {
+        match self {
+            Self::Inline { len, items } if usize::from(*len) < INLINE_CHILD_CAPACITY => {
+                items[usize::from(*len)] = tree;
+                *len += 1;
+            }
+            Self::Inline { items, .. } => {
+                let mut children = Vec::with_capacity(INLINE_CHILD_CAPACITY * 2);
+                children.extend(items.iter_mut().map(std::mem::take));
+                children.push(tree);
+                *self = Self::Heap(children);
+            }
+            Self::Heap(children) => children.push(tree),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn pop(&mut self) -> Option<Subtree> {
+        match self {
+            Self::Inline { len, items } => {
+                if *len == 0 {
+                    return None;
+                }
+                *len -= 1;
+                Some(std::mem::take(&mut items[usize::from(*len)]))
+            }
+            Self::Heap(children) => children.pop(),
+        }
+    }
+
+    /// Moves a spilled list that has shrunk to the inline capacity, such as a
+    /// reduction's children after its trailing extras were removed, back into
+    /// the header.
+    #[inline]
+    pub(crate) fn compact(&mut self) {
+        if let Self::Heap(children) = self
+            && children.len() <= INLINE_CHILD_CAPACITY
+        {
+            *self = Self::from(std::mem::take(children));
+        }
+    }
+
+    /// Moves the children to the end of `out`, leaving this list empty.
+    #[inline]
+    pub(crate) fn append_to(&mut self, out: &mut Vec<Subtree>) {
+        match self {
+            Self::Inline { len, items } => {
+                out.extend(items[..usize::from(*len)].iter_mut().map(std::mem::take));
+                *len = 0;
+            }
+            Self::Heap(children) => out.append(children),
+        }
+    }
+
+    /// The children as a Vec, keeping a spilled list's allocation.
+    pub(crate) fn into_vec(self) -> Vec<Subtree> {
+        match self {
+            Self::Heap(children) => children,
+            inline => inline.into_iter().collect(),
+        }
+    }
+}
+
+impl From<Vec<Subtree>> for Children {
+    #[inline]
+    fn from(mut children: Vec<Subtree>) -> Self {
+        if children.len() <= INLINE_CHILD_CAPACITY {
+            let mut items = [const { Subtree::Null }; INLINE_CHILD_CAPACITY];
+            let len = children.len() as u8;
+            for (slot, child) in items.iter_mut().zip(children.drain(..)) {
+                *slot = child;
+            }
+            Self::Inline { len, items }
+        } else {
+            Self::Heap(children)
+        }
+    }
+}
+
+impl From<&[Subtree]> for Children {
+    #[inline]
+    fn from(children: &[Subtree]) -> Self {
+        if children.len() <= INLINE_CHILD_CAPACITY {
+            let mut items = [const { Subtree::Null }; INLINE_CHILD_CAPACITY];
+            items[..children.len()].clone_from_slice(children);
+            Self::Inline {
+                len: children.len() as u8,
+                items,
+            }
+        } else {
+            Self::Heap(children.to_vec())
+        }
+    }
+}
+
+impl std::ops::Deref for Children {
+    type Target = [Subtree];
+
+    #[inline]
+    fn deref(&self) -> &[Subtree] {
+        self.as_slice()
+    }
+}
+
+impl std::ops::DerefMut for Children {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut [Subtree] {
+        self.as_mut_slice()
+    }
+}
+
+impl<'a> IntoIterator for &'a Children {
+    type Item = &'a Subtree;
+    type IntoIter = std::slice::Iter<'a, Subtree>;
+
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        self.as_slice().iter()
+    }
+}
+
+impl IntoIterator for Children {
+    type Item = Subtree;
+    type IntoIter = ChildrenIntoIter;
+
+    #[inline]
+    fn into_iter(self) -> ChildrenIntoIter {
+        match self {
+            Self::Inline { len, items } => {
+                ChildrenIntoIter::Inline(items.into_iter().take(usize::from(len)))
+            }
+            Self::Heap(children) => ChildrenIntoIter::Heap(children.into_iter()),
+        }
+    }
+}
+
+pub(crate) enum ChildrenIntoIter {
+    Inline(std::iter::Take<std::array::IntoIter<Subtree, INLINE_CHILD_CAPACITY>>),
+    Heap(std::vec::IntoIter<Subtree>),
+}
+
+impl Iterator for ChildrenIntoIter {
+    type Item = Subtree;
+
+    #[inline]
+    fn next(&mut self) -> Option<Subtree> {
+        match self {
+            Self::Inline(children) => children.next(),
+            Self::Heap(children) => children.next(),
+        }
+    }
 }
 #[derive(Clone, Debug, Default)]
 pub(crate) enum SubtreePayload {
@@ -173,21 +391,39 @@ impl Drop for SubtreeHeapData {
     }
 }
 
-fn drop_subtree_children(mut pending: Vec<Subtree>) {
-    while let Some(tree) = pending.pop() {
-        let Subtree::Heap(data) = tree else {
-            continue;
-        };
-        // A child that is still shared, such as a node a newer tree reuses, only
-        // loses this reference. Dropping it costs one atomic decrement, where a
-        // failed try_unwrap costs a compare-exchange and then the same decrement.
-        // If another thread drops its reference meanwhile, this drop frees the
-        // child, and the child's own drop drains its descendants without recursion.
-        if Arc::strong_count(&data) > 1 {
-            drop(data);
-        } else if let Ok(mut data) = Arc::try_unwrap(data) {
-            pending.append(&mut data.children);
+fn drop_subtree_children(mut children: Children) {
+    // Uniquely owned descendants, whose children are released in turn. The
+    // worklist allocates only once a dropped node has a heap child of its own.
+    let mut pending: Vec<Arc<SubtreeHeapData>> = Vec::new();
+    loop {
+        for child in children {
+            let Subtree::Heap(data) = child else {
+                continue;
+            };
+            // A child that is still shared, such as a node a newer tree reuses,
+            // only loses this reference. Dropping it costs one atomic decrement,
+            // where a failed try_unwrap costs a compare-exchange and then the same
+            // decrement. If another thread drops its reference meanwhile, this
+            // drop frees the child, and the child's own drop drains its
+            // descendants without recursion.
+            if Arc::strong_count(&data) > 1 {
+                drop(data);
+            } else {
+                pending.push(data);
+            }
         }
+        let Some(data) = pending.pop() else {
+            break;
+        };
+        children = match Arc::try_unwrap(data) {
+            Ok(mut data) => std::mem::take(&mut data.children),
+            // Only a weak reference upgraded on another thread can share it
+            // again, and then that owner's drop drains it.
+            Err(data) => {
+                drop(data);
+                Children::new()
+            }
+        };
     }
 }
 
@@ -243,6 +479,19 @@ pub(crate) fn ts_subtree_array_delete(pool: &mut SubtreePool, trees: &mut Vec<Su
 #[inline]
 pub(crate) fn ts_subtree_array_remove_trailing_extras(
     trees: &mut Vec<Subtree>,
+    destination: &mut Vec<Subtree>,
+) {
+    destination.clear();
+    while trees.last().is_some_and(ts_subtree_extra) {
+        destination.push(trees.pop().unwrap());
+    }
+    ts_subtree_array_reverse(destination);
+}
+
+/// ts_subtree_array_remove_trailing_extras for a node's child list.
+#[inline]
+pub(crate) fn ts_subtree_children_remove_trailing_extras(
+    trees: &mut Children,
     destination: &mut Vec<Subtree>,
 ) {
     destination.clear();
@@ -409,7 +658,7 @@ fn new_heap_leaf(
         has_external_tokens,
         depends_on_column,
         is_keyword,
-        children: Vec::new(),
+        children: Children::new(),
         payload: if has_external_tokens {
             SubtreePayload::External(ExternalScannerState::default())
         } else {
@@ -1095,7 +1344,7 @@ fn summarize_child_slice_general(
 
 pub(crate) fn ts_subtree_new_node(
     symbol: Symbol,
-    children: Vec<Subtree>,
+    children: impl Into<Children>,
     production_id: u32,
     language: &Language,
 ) -> Subtree {
@@ -1107,11 +1356,13 @@ pub(crate) fn ts_subtree_new_node(
 #[inline]
 pub(crate) fn ts_subtree_new_node_with(
     symbol: Symbol,
-    children: Vec<Subtree>,
+    children: impl Into<Children>,
     production_id: u32,
     language: &Language,
     initialize: impl FnOnce(&mut SubtreeHeapData),
 ) -> Subtree {
+    let mut children = children.into();
+    children.compact();
     let metadata = ts_language_symbol_metadata(language, symbol);
     let fragile = symbol == BUILTIN_SYM_ERROR || symbol == BUILTIN_SYM_ERROR_REPEAT;
     // Finish the non-owning summary first, so the hot loop need not initialize
@@ -1164,7 +1415,7 @@ pub(crate) fn ts_subtree_new_node_with(
 }
 
 pub(crate) fn ts_subtree_new_error_node(
-    children: Vec<Subtree>,
+    children: impl Into<Children>,
     extra: bool,
     language: &Language,
 ) -> Subtree {
@@ -1369,7 +1620,7 @@ pub(crate) fn ts_subtree_edit(
                         extra: data.flags & EXTRA != 0,
                         is_missing: data.flags & MISSING != 0,
                         is_keyword: data.flags & KEYWORD != 0,
-                        children: Vec::new(),
+                        children: Children::new(),
                         payload: SubtreePayload::Leaf,
                         ..SubtreeHeapData::default()
                     };
@@ -2111,7 +2362,7 @@ mod layout_tests {
                 let mut observers = Vec::new();
                 for _ in 0..20_000 {
                     let data = Arc::new(SubtreeHeapData {
-                        children: vec![tree],
+                        children: vec![tree].into(),
                         payload: SubtreePayload::Branch(BranchData::default()),
                         ..SubtreeHeapData::default()
                     });
@@ -2336,7 +2587,7 @@ mod construction_tests {
         let child = Subtree::Heap(Arc::new(SubtreeHeapData {
             has_external_tokens: true,
             payload: SubtreePayload::External(state),
-            children: Vec::new(),
+            children: Children::new(),
             ..SubtreeHeapData::default()
         }));
         let copied_child = ts_subtree_clone(&child);
@@ -2353,7 +2604,7 @@ mod construction_tests {
         );
 
         let parent = Subtree::Heap(Arc::new(SubtreeHeapData {
-            children: vec![child],
+            children: vec![child].into(),
             payload: SubtreePayload::Branch(BranchData::default()),
             ..SubtreeHeapData::default()
         }));
@@ -2381,7 +2632,7 @@ mod construction_tests {
         let tree = Subtree::Heap(Arc::new(SubtreeHeapData {
             symbol: 73,
             parse_state: 12,
-            children: Vec::new(),
+            children: Children::new(),
             payload: SubtreePayload::Branch(BranchData {
                 production_id: 4,
                 dynamic_precedence: 10,
@@ -2416,7 +2667,7 @@ mod operation_tests {
         Subtree::Heap(Arc::new(SubtreeHeapData {
             symbol,
             size,
-            children,
+            children: children.into(),
             visible: true,
             named: true,
             payload: SubtreePayload::Branch(BranchData::default()),
@@ -2550,7 +2801,7 @@ mod operation_tests {
             Subtree::Heap(Arc::new(SubtreeHeapData {
                 has_external_tokens: true,
                 payload: SubtreePayload::External(ts_external_scanner_state_init(bytes)),
-                children: Vec::new(),
+                children: Children::new(),
                 ..SubtreeHeapData::default()
             }))
         };
@@ -2808,7 +3059,7 @@ mod summary_tests {
                         named: metadata.named,
                         fragile_left: fragile,
                         fragile_right: fragile,
-                        children: children[..count].to_vec(),
+                        children: children[..count].to_vec().into(),
                         payload: SubtreePayload::Branch(BranchData {
                             production_id,
                             ..BranchData::default()
@@ -2881,9 +3132,9 @@ mod summary_tests {
                         lookahead_bytes: u32::MAX - 7,
                         error_cost: 97,
                         children: if has_children {
-                            vec![Subtree::inline(InlineLeaf::default())]
+                            vec![Subtree::inline(InlineLeaf::default())].into()
                         } else {
-                            Vec::new()
+                            Vec::new().into()
                         },
                         payload: SubtreePayload::Branch(BranchData {
                             visible_child_count: 3,
@@ -2981,7 +3232,7 @@ mod summary_tests {
             has_external_tokens: true,
             has_external_scanner_state_change: true,
             depends_on_column: true,
-            children: Vec::new(),
+            children: Children::new(),
             payload: SubtreePayload::External(ExternalScannerState::default()),
             ..SubtreeHeapData::default()
         }));
@@ -2997,7 +3248,7 @@ mod summary_tests {
             },
             lookahead_bytes: 1,
             error_cost: 7,
-            children: vec![missing.clone()],
+            children: vec![missing.clone()].into(),
             payload: SubtreePayload::Branch(BranchData {
                 visible_child_count: 2,
                 named_child_count: 1,
@@ -3016,7 +3267,7 @@ mod summary_tests {
                 extent: Point { row: 0, column: 1 },
             },
             error_cost: 11,
-            children: Vec::new(),
+            children: Children::new(),
             payload: SubtreePayload::Error(0),
             ..SubtreeHeapData::default()
         }));
@@ -3065,7 +3316,7 @@ mod summary_tests {
             symbol: 2,
             parse_state: 23,
             depends_on_column: true,
-            children: Vec::new(),
+            children: Children::new(),
             payload: SubtreePayload::Branch(BranchData {
                 dynamic_precedence: 99,
                 ..BranchData::default()
@@ -3082,7 +3333,7 @@ mod summary_tests {
             fragile_left: true,
             has_external_tokens: true,
             has_external_scanner_state_change: true,
-            children: vec![child],
+            children: vec![child].into(),
             payload: SubtreePayload::Branch(BranchData::default()),
             ..SubtreeHeapData::default()
         };
@@ -3126,5 +3377,80 @@ mod summary_tests {
         assert_eq!(summary.visible_child_count, 3);
         assert_eq!(summary.named_child_count, 2);
         assert_eq!(summary.visible_descendant_count, 3);
+    }
+}
+
+#[cfg(test)]
+mod children_tests {
+    use super::*;
+
+    fn leaf(symbol: u8) -> Subtree {
+        Subtree::inline(InlineLeaf {
+            symbol,
+            ..InlineLeaf::default()
+        })
+    }
+
+    fn symbols(children: &[Subtree]) -> Vec<Symbol> {
+        children.iter().map(ts_subtree_symbol).collect()
+    }
+
+    #[test]
+    fn up_to_three_children_live_in_the_header() {
+        for count in 0..=5u8 {
+            let children = Children::from((1..=count).map(leaf).collect::<Vec<_>>());
+            assert_eq!(
+                matches!(children, Children::Inline { .. }),
+                usize::from(count) <= INLINE_CHILD_CAPACITY
+            );
+            assert_eq!(symbols(&children), (1..=Symbol::from(count)).collect::<Vec<_>>());
+            let borrowed = Children::from(&*children);
+            assert_eq!(symbols(&borrowed), symbols(&children));
+        }
+    }
+
+    #[test]
+    fn pushing_past_the_inline_capacity_keeps_order() {
+        let mut children = Children::with_capacity(2);
+        for symbol in 1..=5 {
+            children.push(leaf(symbol));
+        }
+        assert!(matches!(children, Children::Heap(_)));
+        assert_eq!(symbols(&children), [1, 2, 3, 4, 5]);
+        children.as_mut_slice().reverse();
+        assert_eq!(symbols(&children.clone()), [5, 4, 3, 2, 1]);
+        assert_eq!(symbols(&children.into_vec()), [5, 4, 3, 2, 1]);
+    }
+
+    #[test]
+    fn moving_children_out_leaves_the_list_empty() {
+        for count in [2u8, 4] {
+            let mut children = Children::from((1..=count).map(leaf).collect::<Vec<_>>());
+            let mut out = vec![leaf(9)];
+            children.append_to(&mut out);
+            assert!(children.is_empty());
+            assert_eq!(symbols(&out), [9].into_iter().chain(1..=Symbol::from(count)).collect::<Vec<_>>());
+            let owned = Children::from((1..=count).map(leaf).collect::<Vec<_>>());
+            assert_eq!(
+                owned.into_iter().map(|tree| ts_subtree_symbol(&tree)).collect::<Vec<_>>(),
+                (1..=Symbol::from(count)).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn dropping_a_deep_tree_of_inline_children_does_not_recurse() {
+        let mut tree = leaf(1);
+        for _ in 0..200_000 {
+            tree = Subtree::Heap(Arc::new(SubtreeHeapData {
+                children: vec![tree, leaf(2)].into(),
+                payload: SubtreePayload::Branch(BranchData::default()),
+                ..SubtreeHeapData::default()
+            }));
+        }
+        let shared = tree.clone();
+        drop(tree);
+        // The second owner frees the whole chain.
+        drop(shared);
     }
 }

@@ -857,7 +857,7 @@ mod identity_tests {
     fn identity_uses_tree_and_slot_not_subtree_value_or_context() {
         let leaf = Subtree::inline(subtree::InlineLeaf::default());
         let mut data = subtree::SubtreeHeapData::default();
-        data.children = vec![leaf.clone(), leaf];
+        data.children = vec![leaf.clone(), leaf].into();
         let tree = Tree {
             root: Box::new(Subtree::Heap(Arc::new(data))),
             language: language(),
