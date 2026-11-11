@@ -175,9 +175,17 @@ impl Drop for SubtreeHeapData {
 
 fn drop_subtree_children(mut pending: Vec<Subtree>) {
     while let Some(tree) = pending.pop() {
-        if let Subtree::Heap(data) = tree
-            && let Ok(mut data) = Arc::try_unwrap(data)
-        {
+        let Subtree::Heap(data) = tree else {
+            continue;
+        };
+        // A child that is still shared, such as a node a newer tree reuses, only
+        // loses this reference. Dropping it costs one atomic decrement, where a
+        // failed try_unwrap costs a compare-exchange and then the same decrement.
+        // If another thread drops its reference meanwhile, this drop frees the
+        // child, and the child's own drop drains its descendants without recursion.
+        if Arc::strong_count(&data) > 1 {
+            drop(data);
+        } else if let Ok(mut data) = Arc::try_unwrap(data) {
             pending.append(&mut data.children);
         }
     }
