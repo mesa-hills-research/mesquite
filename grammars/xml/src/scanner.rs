@@ -20,6 +20,10 @@ const SELF_CLOSING_TAG_DELIMITER: usize = 10;
 #[derive(Default)]
 pub(crate) struct Scanner {
     tags: Vec<Vec<u8>>,
+    // Name buffers that no tag holds. The runtime restores the tag stack before every
+    // scan, and C allocates each name again there. Reusing the buffers gives the same
+    // names without the allocations.
+    spare: Vec<Vec<u8>>,
 }
 
 fn advance_if_eq(lexer: &mut dyn Lexer, ch: u8) -> bool {
@@ -150,18 +154,21 @@ fn scan_comment(lexer: &mut dyn Lexer) -> bool {
     false
 }
 
-fn scan_tag_name(lexer: &mut dyn Lexer) -> Vec<u8> {
-    let mut name = Vec::new();
+/// Appends the tag name at the lexer to `name` (an empty buffer).
+fn scan_tag_name(lexer: &mut dyn Lexer, name: &mut Vec<u8>) {
     if is_valid_name_start_char(lexer.lookahead()) {
         name.push(lexer.lookahead() as u8);
         lexer.advance(false);
     }
     // C still runs this loop if the first character was not a name-start character.
-    while is_valid_name_char(lexer.lookahead()) {
-        name.push(lexer.lookahead() as u8);
+    loop {
+        let lookahead = lexer.lookahead();
+        if !is_valid_name_char(lookahead) {
+            break;
+        }
+        name.push(lookahead as u8);
         lexer.advance(false);
     }
-    name
 }
 
 fn in_char_data(lexer: &dyn Lexer) -> bool {
@@ -170,8 +177,13 @@ fn in_char_data(lexer: &dyn Lexer) -> bool {
 
 fn scan_char_data(lexer: &mut dyn Lexer) -> bool {
     let mut advanced_once = false;
-    while in_char_data(lexer) {
-        if lexer.lookahead() == i32::from(b']') {
+    // C's `while (in_char_data(lexer))`, with the lookahead read once per character.
+    while !lexer.eof() {
+        let lookahead = lexer.lookahead();
+        if matches!(lookahead, 0x3c | 0x26) {
+            break;
+        }
+        if lookahead == i32::from(b']') {
             lexer.mark_end();
             lexer.advance(false);
             if lexer.lookahead() == i32::from(b']') {
@@ -184,11 +196,16 @@ fn scan_char_data(lexer: &mut dyn Lexer) -> bool {
                     }
                 }
             }
+            advanced_once = true;
+            if in_char_data(lexer) {
+                lexer.advance(false);
+            }
+            continue;
         }
         advanced_once = true;
-        if in_char_data(lexer) {
-            lexer.advance(false);
-        }
+        // C tests in_char_data again before this advance. Nothing has moved since
+        // the test at the top of the loop, so it holds.
+        lexer.advance(false);
     }
 
     if advanced_once {
@@ -220,9 +237,26 @@ fn scan_cdata(lexer: &mut dyn Lexer) -> bool {
 }
 
 impl Scanner {
+    /// An empty name buffer.
+    fn buffer(&mut self) -> Vec<u8> {
+        self.spare.pop().unwrap_or_default()
+    }
+
+    /// Keeps `name`'s buffer for a later name. A name that never allocated (such as
+    /// the empty names of tags a snapshot had no room for) isn't kept, so the spares
+    /// never outnumber the buffers.
+    fn recycle(&mut self, mut name: Vec<u8>) {
+        if name.capacity() > 0 {
+            name.clear();
+            self.spare.push(name);
+        }
+    }
+
     fn scan_start_tag_name(&mut self, lexer: &mut dyn Lexer) -> bool {
-        let name = scan_tag_name(lexer);
+        let mut name = self.buffer();
+        scan_tag_name(lexer, &mut name);
         if name.is_empty() {
+            self.recycle(name);
             return false;
         }
         lexer.set_result_symbol(START_TAG_NAME as u16);
@@ -231,16 +265,20 @@ impl Scanner {
     }
 
     fn scan_end_tag_name(&mut self, lexer: &mut dyn Lexer) -> bool {
-        let name = scan_tag_name(lexer);
+        let mut name = self.buffer();
+        scan_tag_name(lexer, &mut name);
         if name.is_empty() {
+            self.recycle(name);
             return false;
         }
         if self.tags.last() == Some(&name) {
-            self.tags.pop();
+            let tag = self.tags.pop().unwrap();
+            self.recycle(tag);
             lexer.set_result_symbol(END_TAG_NAME as u16);
         } else {
             lexer.set_result_symbol(ERRONEOUS_END_NAME as u16);
         }
+        self.recycle(name);
         lexer.result_symbol() == END_TAG_NAME as u16
     }
 
@@ -249,8 +287,8 @@ impl Scanner {
         if !advance_if_eq(lexer, b'>') {
             return false;
         }
-        if !self.tags.is_empty() {
-            self.tags.pop();
+        if let Some(tag) = self.tags.pop() {
+            self.recycle(tag);
             lexer.set_result_symbol(SELF_CLOSING_TAG_DELIMITER as u16);
         }
         true
@@ -327,7 +365,7 @@ impl ExternalScanner for Scanner {
             size += 1;
             buffer[size..size + name_length].copy_from_slice(&tag[..name_length]);
             // The C serializer deletes every serialized name, but retains its stack slot.
-            *tag = Vec::new();
+            tag.clear();
             size += name_length;
             serialized_tag_count += 1;
         }
@@ -336,7 +374,9 @@ impl ExternalScanner for Scanner {
     }
 
     fn deserialize(&mut self, buffer: &[u8]) {
-        self.tags = Vec::new();
+        while let Some(tag) = self.tags.pop() {
+            self.recycle(tag);
+        }
         if buffer.is_empty() {
             return;
         }
@@ -362,7 +402,9 @@ impl ExternalScanner for Scanner {
                 self.tags.clear();
                 return;
             };
-            self.tags.push(name.to_vec());
+            let mut tag = self.buffer();
+            tag.extend_from_slice(name);
+            self.tags.push(tag);
             size += usize::from(name_length);
         }
         // Unserialized tags remain on the stack as empty names.
@@ -477,6 +519,7 @@ mod tests {
     fn mismatched_end_tag_does_not_pop() {
         let mut scanner = Scanner {
             tags: vec![b"outer".to_vec(), b"inner".to_vec()],
+            spare: Vec::new(),
         };
         let mut lexer = TestLexer::new("outer>");
         assert!(!scanner.scan(&mut lexer, &valid(&[END_TAG_NAME])));
@@ -620,6 +663,7 @@ mod tests {
     fn serialization_uses_native_u32_counts_and_deletes_serialized_names() {
         let mut scanner = Scanner {
             tags: vec![b"root".to_vec(), b"a\xb7".to_vec()],
+            spare: Vec::new(),
         };
         let mut buffer = [0xcc; SERIALIZATION_BUFFER_SIZE];
         let size = scanner.serialize(&mut buffer);
@@ -643,9 +687,52 @@ mod tests {
     }
 
     #[test]
+    fn restoring_reuses_name_buffers() {
+        let mut scanner = Scanner::default();
+        let mut snapshot = Vec::new();
+        snapshot.extend(2u32.to_ne_bytes());
+        snapshot.extend(2u32.to_ne_bytes());
+        snapshot.extend(b"\x04root\x02a\xb7");
+        for _ in 0..3 {
+            scanner.deserialize(&snapshot);
+            assert_eq!(scanner.tags, [b"root".to_vec(), b"a\xb7".to_vec()]);
+        }
+        // The two names' buffers move between the stack and the spares, no more.
+        assert!(scanner.spare.is_empty());
+        scanner.deserialize(&[]);
+        assert!(scanner.tags.is_empty());
+        assert_eq!(scanner.spare.len(), 2);
+        assert!(
+            scanner
+                .spare
+                .iter()
+                .all(|name| name.is_empty() && name.capacity() > 0)
+        );
+    }
+
+    #[test]
+    fn restoring_deep_stacks_keeps_spares_bounded() {
+        // A stack deeper than the snapshot holds: two names, then 9,998 empty ones.
+        let mut scanner = Scanner::default();
+        let mut snapshot = Vec::new();
+        snapshot.extend(2u32.to_ne_bytes());
+        snapshot.extend(10_000u32.to_ne_bytes());
+        snapshot.extend(b"\x04root\x01a");
+        for _ in 0..50 {
+            scanner.deserialize(&snapshot);
+            assert_eq!(scanner.tags.len(), 10_000);
+            assert_eq!(scanner.tags[..2], [b"root".to_vec(), b"a".to_vec()]);
+            assert!(scanner.spare.is_empty());
+        }
+        scanner.deserialize(&[]);
+        assert_eq!(scanner.spare.len(), 2);
+    }
+
+    #[test]
     fn serialization_truncates_names_and_pads_unserialized_tags() {
         let mut scanner = Scanner {
             tags: vec![vec![b'a'; 300]; 4],
+            spare: Vec::new(),
         };
         let mut buffer = [0; SERIALIZATION_BUFFER_SIZE];
         let size = scanner.serialize(&mut buffer);
@@ -670,6 +757,7 @@ mod tests {
                 vec![b'c'; 255],
                 vec![b'd'; 246],
             ],
+            spare: Vec::new(),
         };
         let mut buffer = [0; SERIALIZATION_BUFFER_SIZE];
         // 776 + 2 + 246 == 1024: rejected despite the actual entry fitting.

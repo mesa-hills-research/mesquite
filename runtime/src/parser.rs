@@ -266,26 +266,28 @@ pub(crate) fn ts_parser__breakdown_top_of_stack(
 
 pub(crate) fn ts_parser__breakdown_lookahead(
     parser: &mut Parser,
+    reuse: &mut ReuseCursor<'_>,
     lookahead: &mut Subtree,
     state: StateId,
 ) {
     let mut did_descend = false;
-    let mut tree = reusable_node_tree(&parser.reusable_node);
-    while ts_subtree_child_count(&tree) > 0 && ts_subtree_parse_state(&tree) != state {
+    // Borrow the cursor's nodes while descending, and retain only the result.
+    while let Some(tree) = reusable_node_tree(reuse)
+        && ts_subtree_child_count(tree) > 0
+        && ts_subtree_parse_state(tree) != state
+    {
+        let symbol = ts_subtree_symbol(tree);
         parser_log!(
             parser,
             "state_mismatch sym:{}",
-            ts_language_symbol_name(
-                parser.language.as_ref().expect("parser language"),
-                ts_subtree_symbol(&tree)
-            )
-            .unwrap_or("")
+            ts_language_symbol_name(parser.language.as_ref().expect("parser language"), symbol)
+                .unwrap_or("")
         );
-        reusable_node_descend(&mut parser.reusable_node);
-        tree = reusable_node_tree(&parser.reusable_node);
+        reusable_node_descend(reuse);
         did_descend = true;
     }
     if did_descend {
+        let tree = reusable_node_tree(reuse).cloned().unwrap_or_default();
         ts_subtree_release(&mut parser.tree_pool, std::mem::replace(lookahead, tree));
     }
 }
@@ -817,30 +819,30 @@ pub(crate) fn ts_parser__has_included_range_difference(
 
 pub(crate) fn ts_parser__reuse_node(
     parser: &mut Parser,
+    reuse: &mut ReuseCursor<'_>,
     version: StackVersion,
     state: &mut StateId,
     position: u32,
     table_entry: &mut TableEntry,
 ) -> Subtree {
-    use crate::reusable_node::*;
-
-    loop {
-        let result = reusable_node_tree(&parser.reusable_node);
-        if result.is_null() {
-            break;
-        }
-        let byte_offset = reusable_node_byte_offset(&parser.reusable_node);
-        let mut end_byte_offset = byte_offset.wrapping_add(ts_subtree_total_bytes(&result));
+    let language = parser.language.expect("parser language");
+    // The candidate is borrowed from the old tree, and only the node that is
+    // reused gets its own reference. Retaining every candidate would cost an
+    // atomic increment and decrement per node visited.
+    while let Some(&entry) = reuse.stack.last() {
+        let byte_offset = entry.byte_offset;
+        let symbol = ts_subtree_symbol(entry.tree);
+        let mut end_byte_offset = byte_offset.wrapping_add(ts_subtree_total_bytes(entry.tree));
 
         // EOF must also account for included-range changes later in the file.
-        if ts_subtree_is_eof(&result) {
+        if ts_subtree_is_eof(entry.tree) {
             end_byte_offset = u32::MAX;
         }
         if byte_offset > position {
             parser_log!(
                 parser,
                 "before_reusable_node symbol:{}",
-                tree_name(parser, &result)
+                ts_language_symbol_name(&language, symbol).unwrap_or("")
             );
             break;
         }
@@ -848,33 +850,34 @@ pub(crate) fn ts_parser__reuse_node(
             parser_log!(
                 parser,
                 "past_reusable_node symbol:{}",
-                tree_name(parser, &result)
+                ts_language_symbol_name(&language, symbol).unwrap_or("")
             );
-            if end_byte_offset <= position || !reusable_node_descend(&mut parser.reusable_node) {
-                reusable_node_advance(&mut parser.reusable_node);
+            if end_byte_offset <= position || !reusable_node_descend(reuse) {
+                reusable_node_advance(reuse);
             }
             continue;
         }
         if !ts_subtree_external_scanner_state_eq(
-            &parser.reusable_node.last_external_token,
+            &reuse.last_external_token,
             ts_stack_last_external_token(&parser.stack, version),
         ) {
             parser_log!(
                 parser,
                 "reusable_node_has_different_external_scanner_state symbol:{}",
-                tree_name(parser, &result)
+                ts_language_symbol_name(&language, symbol).unwrap_or("")
             );
-            reusable_node_advance(&mut parser.reusable_node);
+            reusable_node_advance(reuse);
             continue;
         }
 
-        let reason = if ts_subtree_has_changes(&result) {
+        let result = entry.tree;
+        let reason = if ts_subtree_has_changes(result) {
             Some("has_changes")
-        } else if ts_subtree_is_error(&result) {
+        } else if ts_subtree_is_error(result) {
             Some("is_error")
-        } else if ts_subtree_missing(&result) {
+        } else if ts_subtree_missing(result) {
             Some("is_missing")
-        } else if ts_subtree_is_fragile(&result) {
+        } else if ts_subtree_is_fragile(result) {
             Some("is_fragile")
         } else if ts_parser__has_included_range_difference(parser, byte_offset, end_byte_offset) {
             Some("contains_different_included_range")
@@ -886,35 +889,36 @@ pub(crate) fn ts_parser__reuse_node(
                 parser,
                 "cant_reuse_node_{} tree:{}",
                 reason,
-                tree_name(parser, &result)
+                ts_language_symbol_name(&language, symbol).unwrap_or("")
             );
-            if !reusable_node_descend(&mut parser.reusable_node) {
-                reusable_node_advance(&mut parser.reusable_node);
+            if !reusable_node_descend(reuse) {
+                reusable_node_advance(reuse);
                 ts_parser__breakdown_top_of_stack(parser, version);
                 *state = ts_stack_state(&parser.stack, version);
             }
             continue;
         }
 
-        let leaf_symbol = ts_subtree_leaf_symbol(&result);
-        *table_entry = parser.parse_table_cache.table_entry(
-            parser.language.as_ref().unwrap(),
-            *state,
-            leaf_symbol,
-        );
-        if !ts_parser__can_reuse_first_leaf(parser, *state, &result, table_entry) {
+        let leaf_symbol = ts_subtree_leaf_symbol(result);
+        *table_entry = parser
+            .parse_table_cache
+            .table_entry(&language, *state, leaf_symbol);
+        if !ts_parser__can_reuse_first_leaf(parser, *state, result, table_entry) {
             parser_log!(
                 parser,
                 "cant_reuse_node symbol:{}, first_leaf_symbol:{}",
-                tree_name(parser, &result),
-                ts_language_symbol_name(parser.language.as_ref().unwrap(), leaf_symbol)
-                    .unwrap_or("")
+                ts_language_symbol_name(&language, symbol).unwrap_or(""),
+                ts_language_symbol_name(&language, leaf_symbol).unwrap_or("")
             );
-            reusable_node_advance_past_leaf(&mut parser.reusable_node);
+            reusable_node_advance_past_leaf(reuse);
             break;
         }
-        parser_log!(parser, "reuse_node symbol:{}", tree_name(parser, &result));
-        // reusable_node_tree already returns a retained handle.
+        let result = result.clone();
+        parser_log!(
+            parser,
+            "reuse_node symbol:{}",
+            ts_language_symbol_name(&language, symbol).unwrap_or("")
+        );
         return result;
     }
     Subtree::Null
@@ -1006,19 +1010,29 @@ pub(crate) fn ts_parser__select_children(
     left: &Subtree,
     children: &[Subtree],
 ) -> bool {
-    parser.scratch_trees.clear();
-    parser.scratch_trees.extend_from_slice(children);
+    // C builds a non-owning header at the end of its scratch array. Rust owns
+    // these temporary child handles. A few fit in the header itself, and more
+    // go in the scratch Vec, whose allocation is recovered for reuse.
+    let children = if children.len() <= INLINE_CHILD_CAPACITY {
+        Children::from(children)
+    } else {
+        parser.scratch_trees.clear();
+        parser.scratch_trees.extend_from_slice(children);
+        Children::Heap(std::mem::take(&mut parser.scratch_trees))
+    };
     let mut scratch_tree = ts_subtree_new_node(
         ts_subtree_symbol(left),
-        std::mem::take(&mut parser.scratch_trees),
+        children,
         0,
         parser.language.as_ref().unwrap(),
     );
     let result = ts_parser__select_tree(parser, left, &scratch_tree);
-    // C builds a non-owning header at the end of its scratch array. Rust owns
-    // these temporary child handles, then recovers the Vec allocation for reuse.
-    parser.scratch_trees = std::mem::take(&mut scratch_tree.heap_mut().unwrap().children);
-    parser.scratch_trees.clear();
+    if let Children::Heap(mut children) =
+        std::mem::take(&mut scratch_tree.heap_mut().unwrap().children)
+    {
+        children.clear();
+        parser.scratch_trees = children;
+    }
     result
 }
 
@@ -1125,7 +1139,10 @@ pub(crate) fn ts_parser__reduce(
             version,
             count,
             |mut children, state| {
-                ts_subtree_array_remove_trailing_extras(&mut children, &mut parser.trailing_extras);
+                ts_subtree_children_remove_trailing_extras(
+                    &mut children,
+                    &mut parser.trailing_extras,
+                );
                 let next_state = parser
                     .parse_table_cache
                     .next_state(&language, state, symbol);
@@ -1275,8 +1292,13 @@ fn ts_parser__reduce_general(
         };
         // Alternative children are compared using their summarized precedence,
         // before adding this reduction's precedence, just as in C.
+        // A few children move into the parent's header, and the stack keeps
+        // their emptied array for its next pop.
+        let node_children = Children::take_from_vec(&mut children);
+        ts_stack_recycle_subtree_array(&mut parser.stack, children);
         let parent = if pop.peek().is_some_and(|next| next.version == slice.version) {
-            let mut parent = ts_subtree_new_node(symbol, children, production_id as u32, &language);
+            let mut parent =
+                ts_subtree_new_node(symbol, node_children, production_id as u32, &language);
             while pop.peek().is_some_and(|next| next.version == slice.version) {
                 let mut children = std::mem::take(&mut pop.next().unwrap().subtrees);
                 ts_subtree_array_remove_trailing_extras(
@@ -1287,7 +1309,10 @@ fn ts_parser__reduce_general(
                     ts_subtree_array_clear(&mut parser.tree_pool, &mut parser.trailing_extras);
                     ts_subtree_release(&mut parser.tree_pool, parent);
                     std::mem::swap(&mut parser.trailing_extras, &mut parser.trailing_extras2);
-                    parent = ts_subtree_new_node(symbol, children, production_id as u32, &language);
+                    let node_children = Children::take_from_vec(&mut children);
+                    ts_stack_recycle_subtree_array(&mut parser.stack, children);
+                    parent =
+                        ts_subtree_new_node(symbol, node_children, production_id as u32, &language);
                 } else {
                     // C deletes next_slice.subtrees with its original length,
                     // including the extras. Restore that order before releasing.
@@ -1303,7 +1328,7 @@ fn ts_parser__reduce_general(
             // wrapping it in Arc, avoiding copy-on-write synchronization.
             ts_subtree_new_node_with(
                 symbol,
-                children,
+                node_children,
                 production_id as u32,
                 &language,
                 initialize,
@@ -1442,8 +1467,8 @@ pub(crate) fn ts_parser__do_all_potential_reductions(
             let entry = parser
                 .parse_table_cache
                 .table_entry(&language, state, symbol);
-            for action in entry.actions() {
-                match *action.action() {
+            for action in entry.actions().iter() {
+                match action {
                     ParseAction::Shift {
                         extra: false,
                         repetition: false,
@@ -1695,7 +1720,7 @@ pub(crate) fn ts_parser__recover(
         .actions(&language, 1, ts_subtree_symbol(&lookahead));
     if actions
         .last()
-        .is_some_and(|action| matches!(action.action(), ParseAction::Shift { extra: true, .. }))
+        .is_some_and(|action| matches!(action, ParseAction::Shift { extra: true, .. }))
     {
         lookahead = ts_subtree_make_mut(&mut parser.tree_pool, lookahead);
         ts_subtree_set_extra(&mut lookahead, true);
@@ -1761,6 +1786,7 @@ pub(crate) fn ts_parser__recover(
 
 pub(crate) fn ts_parser__handle_error(
     parser: &mut Parser,
+    reuse: &mut ReuseCursor<'_>,
     version: StackVersion,
     lookahead: Subtree,
 ) {
@@ -1865,7 +1891,12 @@ pub(crate) fn ts_parser__handle_error(
     // Recover immediately so this lookahead's scanned bytes are accounted for.
     let mut lookahead = lookahead;
     if ts_subtree_child_count(&lookahead) > 0 {
-        ts_parser__breakdown_lookahead(parser, &mut lookahead, crate::error_costs::ERROR_STATE);
+        ts_parser__breakdown_lookahead(
+            parser,
+            reuse,
+            &mut lookahead,
+            crate::error_costs::ERROR_STATE,
+        );
     }
     ts_parser__recover(parser, version, lookahead);
     parser_log_stack!(parser);
@@ -1912,6 +1943,7 @@ pub(crate) fn ts_parser__check_progress(
 pub(crate) fn ts_parser__advance<const LOGGING: bool>(
     parser: &mut Parser,
     context: &mut ParseContext<'_, '_>,
+    reuse: &mut ReuseCursor<'_>,
     version: StackVersion,
     allow_node_reuse: bool,
 ) -> bool {
@@ -1937,8 +1969,15 @@ pub(crate) fn ts_parser__advance<const LOGGING: bool>(
 
     // An exhausted cursor returns Null without changing parser state. Avoid
     // entering the full reuse traversal for every token of a fresh parse.
-    if allow_node_reuse && !parser.reusable_node.stack.is_empty() {
-        lookahead = ts_parser__reuse_node(parser, version, &mut state, position, &mut table_entry);
+    if allow_node_reuse && !reuse.stack.is_empty() {
+        lookahead = ts_parser__reuse_node(
+            parser,
+            reuse,
+            version,
+            &mut state,
+            position,
+            &mut table_entry,
+        );
     }
     if lookahead.is_null() {
         did_reuse = false;
@@ -1976,8 +2015,8 @@ pub(crate) fn ts_parser__advance<const LOGGING: bool>(
 
         let mut did_reduce = false;
         let mut last_reduction_version = STACK_VERSION_NONE;
-        for entry in table_entry.actions() {
-            match *entry.action() {
+        for action in table_entry.actions().iter() {
+            match action {
                 ParseAction::Shift {
                     state: shift_state,
                     extra,
@@ -1994,7 +2033,7 @@ pub(crate) fn ts_parser__advance<const LOGGING: bool>(
                         shift_state
                     };
                     if ts_subtree_child_count(&lookahead) > 0 {
-                        ts_parser__breakdown_lookahead(parser, &mut lookahead, state);
+                        ts_parser__breakdown_lookahead(parser, reuse, &mut lookahead, state);
                         next_state = parser.parse_table_cache.next_state(
                             &language,
                             state,
@@ -2003,7 +2042,7 @@ pub(crate) fn ts_parser__advance<const LOGGING: bool>(
                     }
                     ts_parser__shift(parser, version, next_state, lookahead, extra);
                     if did_reuse {
-                        crate::reusable_node::reusable_node_advance(&mut parser.reusable_node);
+                        reusable_node_advance(reuse);
                     }
                     return true;
                 }
@@ -2021,6 +2060,24 @@ pub(crate) fn ts_parser__advance<const LOGGING: bool>(
                             child_count,
                         ),
                     );
+                    // This loop skips repetition shifts, so a reduction whose
+                    // only alternatives are repetition shifts replaces its
+                    // version just as a lone reduction does. That is the
+                    // usual case inside every repeat, on each new element.
+                    let replace_version = table_entry
+                        .actions()
+                        .iter()
+                        .filter(|action| {
+                            !matches!(
+                                action,
+                                ParseAction::Shift {
+                                    repetition: true,
+                                    ..
+                                }
+                            )
+                        })
+                        .count()
+                        == 1;
                     let reduction_version = ts_parser__reduce(
                         parser,
                         version,
@@ -2030,7 +2087,7 @@ pub(crate) fn ts_parser__advance<const LOGGING: bool>(
                         production_id,
                         table_entry.actions().len() > 1,
                         lookahead.is_null(),
-                        table_entry.actions().len() == 1,
+                        replace_version,
                     );
                     did_reduce = true;
                     if reduction_version != STACK_VERSION_NONE {
@@ -2046,13 +2103,14 @@ pub(crate) fn ts_parser__advance<const LOGGING: bool>(
                     if ts_subtree_child_count(&lookahead) > 0 {
                         ts_parser__breakdown_lookahead(
                             parser,
+                            reuse,
                             &mut lookahead,
                             crate::error_costs::ERROR_STATE,
                         );
                     }
                     ts_parser__recover(parser, version, lookahead);
                     if did_reuse {
-                        crate::reusable_node::reusable_node_advance(&mut parser.reusable_node);
+                        reusable_node_advance(reuse);
                     }
                     return true;
                 }
@@ -2134,18 +2192,18 @@ pub(crate) fn ts_parser__advance<const LOGGING: bool>(
 }
 
 #[inline]
-pub(crate) fn ts_parser__condense_stack(parser: &mut Parser) -> u32 {
+pub(crate) fn ts_parser__condense_stack(parser: &mut Parser, reuse: &mut ReuseCursor<'_>) -> u32 {
     // An active sole version cannot merge, be pruned, or need resuming. Keep
     // the version-status side effect of lowering the saved error node baseline.
     if let Some(cost) = ts_stack_single_active_error_cost(&mut parser.stack) {
         return cost;
     }
-    ts_parser__condense_stack_general(parser)
+    ts_parser__condense_stack_general(parser, reuse)
 }
 
 // Preserve the small sole-active-head entry separately from GLR/recovery.
 #[inline(never)]
-fn ts_parser__condense_stack_general(parser: &mut Parser) -> u32 {
+fn ts_parser__condense_stack_general(parser: &mut Parser, reuse: &mut ReuseCursor<'_>) -> u32 {
     let mut made_changes = false;
     let mut min_error_cost = u32::MAX;
     let mut i = 0;
@@ -2215,7 +2273,7 @@ fn ts_parser__condense_stack_general(parser: &mut Parser) -> u32 {
                 parser_log_args!(parser, format_args!("resume version:{}", i));
                 min_error_cost = ts_stack_error_cost(&parser.stack, i);
                 let lookahead = ts_stack_resume(&mut parser.stack, i);
-                ts_parser__handle_error(parser, i, lookahead);
+                ts_parser__handle_error(parser, reuse, i, lookahead);
                 has_unpaused_version = true;
             } else {
                 ts_stack_remove_version(&mut parser.stack, &mut parser.tree_pool, i);
@@ -2246,8 +2304,8 @@ pub(crate) fn ts_parser__balance_subtree(
             return true;
         }
     }
-    // Borrow disjoint child slots instead of detaching/re-attaching every
-    // visited node. This preserves Arc uniqueness without reference counting.
+    // The walk holds disjoint mutable child slots, so a node that compresses is at hand
+    // and the walk is one pass over the tree, as C's worklist is.
     let mut finished_tree = std::mem::take(&mut parser.finished_tree);
     let mut cursor =
         BalanceCursor::new(&mut finished_tree, std::mem::take(&mut parser.balance_path));
@@ -2287,6 +2345,7 @@ pub(crate) fn ts_parser__balance_subtree(
             }
         }
         if !completed {
+            // Resuming visits this node again, as C leaves it on its worklist.
             break;
         }
         cursor.push_children(tree);
@@ -2523,10 +2582,7 @@ fn parse_with_logging<const LOGGING: bool>(
                 &parser.lexer.included_ranges,
                 &mut parser.included_range_differences,
             );
-            crate::reusable_node::reusable_node_reset(
-                &mut parser.reusable_node,
-                old_tree.root.as_ref().clone(),
-            );
+            reusable_node_reset(&mut parser.reusable_node, &parser.old_tree);
             if LOGGING && (parser.logger.is_some() || parser.dot_graph.is_some()) {
                 parser.lexer.debug_buffer = "parse_after_edit".into();
                 ts_parser__log(parser);
@@ -2556,6 +2612,10 @@ fn parse_with_logging<const LOGGING: bool>(
     };
 
     if !resume_balancing {
+        // The cursor borrows the old tree through this handle while the parser
+        // is borrowed mutably. A resumed parse continues on the same tree.
+        let old_root = parser.old_tree.clone();
+        let mut reuse = ReuseCursor::resume(&old_root, &mut parser.reusable_node);
         let mut position = 0;
         let mut last_position = 0;
         loop {
@@ -2583,11 +2643,18 @@ fn parse_with_logging<const LOGGING: bool>(
                         ts_parser__log(parser);
                     }
 
-                    let advanced =
-                        ts_parser__advance::<LOGGING>(parser, context, version, allow_node_reuse);
+                    let advanced = ts_parser__advance::<LOGGING>(
+                        parser,
+                        context,
+                        &mut reuse,
+                        version,
+                        allow_node_reuse,
+                    );
                     if !advanced {
                         if parser.has_scanner_error {
                             ts_parser_reset(parser);
+                        } else {
+                            reuse.save(&mut parser.reusable_node);
                         }
                         // Timeout/progress cancellation preserves the stack and
                         // scanner so the next call can resume this parse.
@@ -2608,7 +2675,7 @@ fn parse_with_logging<const LOGGING: bool>(
                 version += 1;
             };
 
-            let min_error_cost = ts_parser__condense_stack(parser);
+            let min_error_cost = ts_parser__condense_stack(parser, &mut reuse);
             if !parser.finished_tree.is_null()
                 && ts_subtree_error_cost(&parser.finished_tree) < min_error_cost
             {
@@ -2714,32 +2781,48 @@ fn parser_log_message(parser: &mut Parser, message: std::fmt::Arguments<'_>) {
     }
 }
 
-/// Disjoint mutable child slots in C's LIFO work order. Borrowing the slots
-/// neither increments reference counts nor moves tree handles. A path to the
-/// current node is enough to reconstruct pending left siblings after cancellation.
+/// Uniquely owned branches in C's LIFO work order, as disjoint mutable child slots, so
+/// a node that compresses needs no walk from the root and balancing stays linear in
+/// the nodes it visits. A node's children are borrowed mutably, which proves its Arc
+/// unique with an atomic operation, only when one of them is a branch the walk
+/// visits. A path to the current node is enough to reconstruct the pending left
+/// siblings after cancellation.
 struct BalanceCursor<'tree> {
     pending: Vec<(&'tree mut Subtree, usize, usize)>,
     path: Vec<usize>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Nodes the balancing cursor has visited, examined or descended into, for tests
+    /// that bound its work.
+    static BALANCE_CURSOR_STEPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 impl<'tree> BalanceCursor<'tree> {
     fn is_unique_branch(tree: &Subtree) -> bool {
+        #[cfg(test)]
+        BALANCE_CURSOR_STEPS.with(|steps| steps.set(steps.get() + 1));
         matches!(tree, Subtree::Heap(data) if !data.children.is_empty() && Arc::strong_count(data) == 1)
     }
 
-    fn children_mut(tree: &mut Subtree) -> &mut Vec<Subtree> {
+    fn children_mut(tree: &mut Subtree) -> &mut [Subtree] {
+        #[cfg(test)]
+        BALANCE_CURSOR_STEPS.with(|steps| steps.set(steps.get() + 1));
         let Subtree::Heap(data) = tree else {
             unreachable!("only heap branches are balanced");
         };
-        &mut Arc::get_mut(data)
+        Arc::get_mut(data)
             .expect("balancing only visits uniquely owned branches")
             .children
+            .as_mut_slice()
     }
 
+    /// The walk resumes at the node at `path`.
     fn new(mut tree: &'tree mut Subtree, path: Vec<usize>) -> Self {
         let mut pending = Vec::new();
         // Ancestors and their right siblings have already been processed. Their
-        // left siblings remain pending, below the canceled node in the worklist.
+        // left siblings remain pending, below the node at the path.
         for (depth, &index) in path.iter().enumerate() {
             let (left, right) = Self::children_mut(tree).split_at_mut(index);
             for (index, child) in left.iter_mut().enumerate() {
@@ -2755,6 +2838,8 @@ impl<'tree> BalanceCursor<'tree> {
 
     fn next(&mut self) -> Option<&'tree mut Subtree> {
         let (tree, depth, index) = self.pending.pop()?;
+        #[cfg(test)]
+        BALANCE_CURSOR_STEPS.with(|steps| steps.set(steps.get() + 1));
         self.path.truncate(depth.saturating_sub(1));
         if depth > 0 {
             self.path.push(index);
@@ -2763,6 +2848,11 @@ impl<'tree> BalanceCursor<'tree> {
     }
 
     fn push_children(&mut self, tree: &'tree mut Subtree) {
+        // Most branches have only leaves or shared nodes below them, and those need
+        // no mutable borrow.
+        if !ts_subtree_children(tree).iter().any(Self::is_unique_branch) {
+            return;
+        }
         let depth = self.path.len() + 1;
         for (index, child) in Self::children_mut(tree).iter_mut().enumerate() {
             if Self::is_unique_branch(child) {
@@ -2784,6 +2874,7 @@ mod tests {
                 heads: Vec::new(),
                 slices: Vec::new(),
                 iterators: Vec::new(),
+                spare_subtree_arrays: Vec::new(),
                 arena: StackArena::default(),
                 base_node: StackNodeId(0),
             },
@@ -2820,7 +2911,7 @@ mod tests {
     fn branch(symbol: Symbol, children: Vec<Subtree>) -> Subtree {
         Subtree::Heap(Arc::new(SubtreeHeapData {
             symbol,
-            children,
+            children: children.into(),
             payload: SubtreePayload::Branch(BranchData::default()),
             ..SubtreeHeapData::default()
         }))
@@ -2847,7 +2938,7 @@ mod tests {
                 symbol,
                 has_external_tokens: true,
                 payload: SubtreePayload::External(ts_external_scanner_state_init(bytes)),
-                children: Vec::new(),
+                children: Children::new(),
                 ..SubtreeHeapData::default()
             }))
         }
@@ -3356,10 +3447,13 @@ mod tests {
                             state,
                         );
                         parser.stack.heads[0].node_count_at_last_error = baseline;
+                        let no_old_tree = Subtree::Null;
+                        let mut reuse =
+                            ReuseCursor::resume(&no_old_tree, &mut ReusableNode::default());
                         let cost = if fast {
-                            ts_parser__condense_stack(&mut parser)
+                            ts_parser__condense_stack(&mut parser, &mut reuse)
                         } else {
-                            ts_parser__condense_stack_general(&mut parser)
+                            ts_parser__condense_stack_general(&mut parser, &mut reuse)
                         };
                         snapshots.push((cost, parser.stack.heads[0].node_count_at_last_error));
                         assert_eq!(ts_stack_version_count(&parser.stack), 1);
@@ -3384,7 +3478,7 @@ mod tests {
             }
             let external = Subtree::Heap(Arc::new(SubtreeHeapData {
                 has_external_tokens: true,
-                children: Vec::new(),
+                children: Children::new(),
                 payload: SubtreePayload::External(ExternalScannerState::default()),
                 ..SubtreeHeapData::default()
             }));
@@ -3790,6 +3884,35 @@ mod tests {
             tree = &ts_subtree_children(tree)[0];
         }
         assert!(matches!(tree, Subtree::Inline(_)));
+    }
+
+    /// The balancing cursor's work for a parse of `source` with JSON.
+    fn json_balance_steps(source: &str) -> u64 {
+        let mut parser = crate::Parser::new();
+        parser
+            .set_language(&tree_sitter_json::LANGUAGE.into())
+            .unwrap();
+        BALANCE_CURSOR_STEPS.with(|steps| steps.set(0));
+        let tree = parser.parse(source, None).unwrap();
+        assert!(!tree.root_node().has_error());
+        BALANCE_CURSOR_STEPS.with(|steps| steps.get())
+    }
+
+    #[test]
+    fn balancing_work_grows_linearly_with_nesting() {
+        // Every level is a repetition that compresses, with the nested array first or
+        // last among its elements. Walking back from the root after each compression
+        // made this work grow with the square of the depth.
+        let nested_first = |depth: usize| "[".repeat(depth) + "0" + &",1,2,3,4,5,6]".repeat(depth);
+        let nested_last = |depth: usize| "[1,2,3,4,5,6,".repeat(depth) + "0" + &"]".repeat(depth);
+        for source in [nested_first, nested_last] {
+            let small = json_balance_steps(&source(400));
+            let large = json_balance_steps(&source(1600));
+            assert!(
+                large < small * 5,
+                "four times the depth took {large} steps against {small}"
+            );
+        }
     }
 
     #[test]

@@ -47,6 +47,7 @@ mod tests {
     #[test]
     fn tables_decode() {
         let language = super::language();
+        language.validate().unwrap();
         assert_eq!(language.abi_version, 15);
         assert_eq!(language.state_count, 1060);
         assert_eq!(language.symbol_count, 201);

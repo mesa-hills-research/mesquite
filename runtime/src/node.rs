@@ -661,7 +661,7 @@ pub(crate) fn ts_node__field_name_from_language(
     );
     for entry in field_map {
         if !entry.inherited && u32::from(entry.child_index) == structural_child_index {
-            return node.tree.language.tables.field_names[usize::from(entry.field_id)].as_deref();
+            return node.tree.language.tables.field_names[usize::from(entry.field_id)];
         }
     }
     None
@@ -857,7 +857,7 @@ mod identity_tests {
     fn identity_uses_tree_and_slot_not_subtree_value_or_context() {
         let leaf = Subtree::inline(subtree::InlineLeaf::default());
         let mut data = subtree::SubtreeHeapData::default();
-        data.children = vec![leaf.clone(), leaf];
+        data.children = vec![leaf.clone(), leaf].into();
         let tree = Tree {
             root: Box::new(Subtree::Heap(Arc::new(data))),
             language: language(),

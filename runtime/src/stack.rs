@@ -26,8 +26,14 @@ pub(crate) struct StackLink {
 #[derive(Debug, Default)]
 pub(crate) struct StackLinks {
     first: Option<StackLink>,
-    rest: Option<Box<[Option<StackLink>; MAX_LINK_COUNT - 1]>>,
+    rest: Option<OverflowLinks>,
 }
+
+/// The links of a node after its first, allocated once paths merge into it.
+type OverflowLinks = Box<[Option<StackLink>; MAX_LINK_COUNT - 1]>;
+
+/// How many emptied overflow link arrays the arena keeps.
+const MAX_SPARE_OVERFLOW_LINKS: usize = 64;
 
 impl StackLinks {
     fn iter(&self) -> impl Iterator<Item = &Option<StackLink>> {
@@ -82,6 +88,21 @@ pub(crate) struct StackArena {
     // inert scalar fields avoids zeroing the whole header during recycling.
     pub nodes: Vec<StackNode>,
     pub free: Vec<StackNodeId>,
+    /// Emptied overflow link arrays of released nodes. C keeps every node's links
+    /// inline. Here a merge that gives a node its second link takes an array from
+    /// these, so ambiguous inputs, which merge versions on most tokens, don't
+    /// allocate and free one each time. Vacant slots still hold none.
+    pub spare_overflow_links: Vec<OverflowLinks>,
+}
+
+impl StackArena {
+    /// Keeps a released node's emptied overflow links for a later merge.
+    fn recycle_overflow_links(&mut self, links: OverflowLinks) {
+        debug_assert!(links.iter().all(Option::is_none));
+        if self.spare_overflow_links.len() < MAX_SPARE_OVERFLOW_LINKS {
+            self.spare_overflow_links.push(links);
+        }
+    }
 }
 #[derive(Clone, Debug)]
 pub(crate) struct StackIterator {
@@ -112,6 +133,22 @@ pub(crate) struct Stack {
     pub iterators: Vec<StackIterator>,
     pub arena: StackArena,
     pub base_node: StackNodeId,
+    /// Emptied child arrays of earlier pops, for the next pops to fill. Most
+    /// reductions move their few children into the parent's header and give
+    /// the array back, so a pop seldom allocates.
+    pub spare_subtree_arrays: Vec<Vec<Subtree>>,
+}
+
+/// How many emptied child arrays the stack keeps.
+const MAX_SPARE_SUBTREE_ARRAYS: usize = 16;
+
+/// Keeps an emptied child array for a later pop.
+#[inline]
+pub(crate) fn ts_stack_recycle_subtree_array(stack: &mut Stack, subtrees: Vec<Subtree>) {
+    debug_assert!(subtrees.is_empty());
+    if subtrees.capacity() > 0 && stack.spare_subtree_arrays.len() < MAX_SPARE_SUBTREE_ARRAYS {
+        stack.spare_subtree_arrays.push(subtrees);
+    }
 }
 #[derive(Debug)]
 pub(crate) struct StackSlice {
@@ -223,7 +260,9 @@ pub(crate) fn stack_node_release(
                     if data.link_count <= 1 {
                         let first = data.links[0].take();
                         data.link_count = 0;
-                        data.links.rest = None;
+                        if let Some(rest) = data.links.rest.take() {
+                            arena.recycle_overflow_links(rest);
+                        }
                         if let Some(first) = first {
                             if !first.subtree.is_null() {
                                 ts_subtree_release(subtree_pool, first.subtree);
@@ -251,6 +290,9 @@ pub(crate) fn stack_node_release(
                             if !link.subtree.is_null() {
                                 pending.push(Release::Subtree(link.subtree));
                             }
+                        }
+                        if let Some(rest) = data.links.rest.take() {
+                            arena.recycle_overflow_links(rest);
                         }
                     }
                 }
@@ -441,7 +483,19 @@ pub(crate) fn stack_node_add_link(
         node_count = node_count.wrapping_add(stack__subtree_node_count(&link.subtree));
         precedence = precedence.wrapping_add(ts_subtree_dynamic_precedence(&link.subtree));
     }
-    let data = arena.node_mut(node);
+    let StackArena {
+        nodes,
+        spare_overflow_links,
+        ..
+    } = arena;
+    let data = &mut nodes[node.0];
+    if data.link_count >= 1 && data.links.rest.is_none() {
+        data.links.rest = Some(
+            spare_overflow_links
+                .pop()
+                .unwrap_or_else(|| Box::new(std::array::from_fn(|_| None))),
+        );
+    }
     data.links[data.link_count as usize] = Some(link);
     data.link_count += 1;
     data.node_count = data.node_count.max(node_count);
@@ -501,7 +555,7 @@ pub(crate) fn stack__iter(
     stack.slices.clear();
     stack.iterators.clear();
     let include_subtrees = goal_subtree_count >= 0;
-    let mut subtrees = Vec::new();
+    let mut subtrees = stack.spare_subtree_arrays.pop().unwrap_or_default();
     if include_subtrees {
         // C reserves room for children plus a heap header in the same buffer.
         // The Rust header is a separate allocation; only children go here.
@@ -601,6 +655,7 @@ pub(crate) fn ts_stack_new() -> Stack {
     let mut arena = StackArena {
         nodes: Vec::new(),
         free: Vec::with_capacity(MAX_NODE_POOL_SIZE),
+        spare_overflow_links: Vec::new(),
     };
     let base_node = stack_node_new(&mut arena, None, Subtree::Null, false, 1);
     // ts_stack_clear on a newly empty stack only retains the base and adds an
@@ -619,6 +674,7 @@ pub(crate) fn ts_stack_new() -> Stack {
         heads,
         slices: Vec::with_capacity(4),
         iterators: Vec::with_capacity(4),
+        spare_subtree_arrays: Vec::new(),
         arena,
         base_node,
     }
@@ -627,6 +683,7 @@ pub(crate) fn ts_stack_new() -> Stack {
 pub(crate) fn ts_stack_delete(stack: &mut Stack, pool: &mut SubtreePool) {
     stack.slices = Vec::new();
     stack.iterators = Vec::new();
+    stack.spare_subtree_arrays = Vec::new();
     stack_node_release(&mut stack.arena, stack.base_node, pool);
     for head in std::mem::take(&mut stack.heads) {
         stack_head_delete(head, &mut stack.arena, pool);
@@ -819,7 +876,7 @@ pub(crate) fn ts_stack_restore_head_snapshot(
 #[cfg(test)]
 pub(crate) fn ts_stack_reduce_unary(
     stack: &mut Stack,
-    build: impl FnOnce(Vec<Subtree>, StateId) -> (Subtree, StateId),
+    build: impl FnOnce(Children, StateId) -> (Subtree, StateId),
 ) -> Option<StateId> {
     if stack.heads.len() != 1 {
         return None;
@@ -833,7 +890,7 @@ pub(crate) fn ts_stack_reduce_unary(
 pub(crate) fn ts_stack_reduce_unary_for_version(
     stack: &mut Stack,
     version: StackVersion,
-    build: impl FnOnce(Vec<Subtree>, StateId) -> (Subtree, StateId),
+    build: impl FnOnce(Children, StateId) -> (Subtree, StateId),
 ) -> Option<StateId> {
     if stack.heads[version as usize].status != StackStatus::Active {
         return None;
@@ -851,11 +908,10 @@ pub(crate) fn ts_stack_reduce_unary_for_version(
     let state = stack.arena.node(predecessor).state;
     let link = stack.arena.node_mut(top).links.first.as_mut().unwrap();
     let child = std::mem::replace(&mut link.subtree, Subtree::Null);
-    let children = if child.is_null() {
-        Vec::new()
-    } else {
-        vec![child]
-    };
+    let mut children = Children::new();
+    if !child.is_null() {
+        children.push(child);
+    }
     stack.slices.clear();
     stack.iterators.clear();
     let (parent, state) = build(children, state);
@@ -905,7 +961,7 @@ fn stack_node_replace_subtree(
 pub(crate) fn ts_stack_reduce_many(
     stack: &mut Stack,
     count: u32,
-    build: impl FnOnce(Vec<Subtree>, StateId) -> (Subtree, StateId),
+    build: impl FnOnce(Children, StateId) -> (Subtree, StateId),
 ) -> Option<StateId> {
     if stack.heads.len() != 1 {
         return None;
@@ -919,7 +975,7 @@ pub(crate) fn ts_stack_reduce_many_for_version(
     stack: &mut Stack,
     version: StackVersion,
     count: u32,
-    build: impl FnOnce(Vec<Subtree>, StateId) -> (Subtree, StateId),
+    build: impl FnOnce(Children, StateId) -> (Subtree, StateId),
 ) -> Option<StateId> {
     if stack.heads[version as usize].status != StackStatus::Active {
         return None;
@@ -945,7 +1001,8 @@ pub(crate) fn ts_stack_reduce_many_for_version(
         slot = predecessor;
         predecessor = link.node;
     }
-    let mut children = Vec::with_capacity(subtree_count);
+    // Up to three children go straight into the parent's header.
+    let mut children = Children::with_capacity(subtree_count);
     if count > 0 {
         let mut node = stack.heads[version as usize].node;
         loop {
@@ -1610,9 +1667,11 @@ mod version_tests {
             }],
             slices: Vec::new(),
             iterators: Vec::new(),
+            spare_subtree_arrays: Vec::new(),
             arena: StackArena {
                 nodes: vec![base, error, top],
                 free: Vec::new(),
+                spare_overflow_links: Vec::new(),
             },
             base_node: StackNodeId(0),
         }
@@ -1644,7 +1703,7 @@ mod version_tests {
                             extent: crate::point::Point { row: 2, column: 9 },
                         },
                         error_cost: 4,
-                        children: Vec::new(),
+                        children: Children::new(),
                         payload: SubtreePayload::Branch(BranchData {
                             dynamic_precedence: -5,
                             visible_child_count: 3,
@@ -1662,7 +1721,7 @@ mod version_tests {
                     state: 3,
                 }]);
                 let top = stack.heads[0].node;
-                let build = |children: Vec<Subtree>, state| {
+                let build = |children: Children, state| {
                     assert_eq!(state, 3);
                     assert_eq!(children.len(), usize::from(child_kind != 0));
                     // Deliberately different summaries: the replacement must
@@ -1694,7 +1753,7 @@ mod version_tests {
                     assert_eq!(ts_stack_reduce_unary(&mut stack, build), Some(6));
                 } else {
                     let children = ts_stack_pop_count_in_place(&mut stack, 1).unwrap();
-                    let (parent, state) = build(children, ts_stack_state(&stack, 0));
+                    let (parent, state) = build(children.into(), ts_stack_state(&stack, 0));
                     ts_stack_push(&mut stack, &mut pool, 0, parent, false, state);
                 }
                 assert_eq!(stack.heads[0].node, top);
@@ -1731,7 +1790,7 @@ mod version_tests {
                     stack.heads[0].summary = Some(Vec::new());
                     stack.heads[0].node_count_at_last_error = 47;
                     stack.heads[0].last_external_token = leaf(9);
-                    let build = |children: Vec<Subtree>, state| {
+                    let build = |children: Children, state| {
                         assert_eq!(state, 1);
                         (
                             Subtree::Heap(Arc::new(SubtreeHeapData {
@@ -1754,7 +1813,7 @@ mod version_tests {
                         assert_eq!(ts_stack_reduce_many(&mut stack, count, build), Some(3));
                     } else {
                         let children = ts_stack_pop_count_in_place(&mut stack, count).unwrap();
-                        let (parent, state) = build(children, ts_stack_state(&stack, 0));
+                        let (parent, state) = build(children.into(), ts_stack_state(&stack, 0));
                         ts_stack_push(&mut stack, &mut pool, 0, parent, false, state);
                     }
                     // Vacant slots retain inert scalar values for reuse; only
@@ -2008,7 +2067,7 @@ mod version_tests {
     fn error_callback_pops_only_the_first_error_path() {
         let error = Subtree::Heap(Arc::new(SubtreeHeapData {
             symbol: tree_sitter_language::BUILTIN_SYM_ERROR,
-            children: Vec::new(),
+            children: Children::new(),
             payload: SubtreePayload::Leaf,
             ..SubtreeHeapData::default()
         }));
@@ -2246,7 +2305,7 @@ mod tests {
             },
             error_cost: 13,
             visible: true,
-            children: vec![leaf(3, VISIBLE)],
+            children: vec![leaf(3, VISIBLE)].into(),
             payload: SubtreePayload::Branch(BranchData {
                 visible_descendant_count: 9,
                 dynamic_precedence: 11,
@@ -2308,7 +2367,7 @@ mod tests {
         let heap = |symbol| {
             let data = Arc::new(SubtreeHeapData {
                 symbol,
-                children: Vec::new(),
+                children: Children::new(),
                 payload: SubtreePayload::Leaf,
                 ..SubtreeHeapData::default()
             });
@@ -2404,7 +2463,7 @@ mod tests {
                 extent: Point { row: 2, column: 2 },
             },
             error_cost: 23,
-            children: vec![leaf(2, VISIBLE)],
+            children: vec![leaf(2, VISIBLE)].into(),
             payload: SubtreePayload::Branch(BranchData {
                 visible_descendant_count: 3,
                 dynamic_precedence: -7,
@@ -2472,7 +2531,7 @@ mod tests {
                 extent: Point { row: 2, column: 3 },
             },
             error_cost: 23,
-            children: vec![leaf(2, VISIBLE)],
+            children: vec![leaf(2, VISIBLE)].into(),
             payload: SubtreePayload::Branch(BranchData {
                 visible_descendant_count: 3,
                 dynamic_precedence: -5,
@@ -2484,7 +2543,13 @@ mod tests {
             for pending in [false, true] {
                 let fresh = construct(tree.clone(), pending, false);
                 let recycled = construct(tree.clone(), pending, true);
-                assert_eq!(format!("{fresh:?}"), format!("{recycled:?}"));
+                assert_eq!(
+                    format!("{:?} {:?}", fresh.nodes, fresh.free),
+                    format!("{:?} {:?}", recycled.nodes, recycled.free)
+                );
+                // The released node's overflow links wait for the next merge.
+                assert!(fresh.spare_overflow_links.is_empty());
+                assert_eq!(recycled.spare_overflow_links.len(), 1);
             }
         }
     }
@@ -2500,7 +2565,7 @@ mod tests {
         let error = Subtree::Heap(Arc::new(SubtreeHeapData {
             symbol: 9,
             error_cost: 1,
-            children: Vec::new(),
+            children: Children::new(),
             payload: SubtreePayload::Leaf,
             ..SubtreeHeapData::default()
         }));
@@ -2581,6 +2646,34 @@ mod tests {
         stack_node_release(&mut arena, right, &mut pool);
         stack_node_release(&mut arena, top, &mut pool);
         assert!(arena.nodes.iter().all(|node| node.ref_count == 0));
+    }
+
+    #[test]
+    fn merges_reuse_released_overflow_links() {
+        let mut arena = StackArena::default();
+        let mut pool = SubtreePool::default();
+        let p = stack_node_new(&mut arena, None, Subtree::Null, false, 1);
+        let q = stack_node_new(&mut arena, None, Subtree::Null, false, 2);
+        // Each new node takes over a reference to its predecessor.
+        stack_node_retain(&mut arena, p);
+        let merged = stack_node_new(&mut arena, Some(p), leaf(1, 0), false, 3);
+        stack_node_add_link(&mut arena, merged, null_link(q), &mut pool);
+        assert_eq!(arena.node(merged).link_count, 2);
+        assert!(arena.node(merged).links.rest.is_some());
+        stack_node_release(&mut arena, merged, &mut pool);
+        // The vacant slot holds no links; its array waits for the next merge.
+        assert!(arena.nodes[merged.0].links.rest.is_none());
+        assert_eq!(arena.spare_overflow_links.len(), 1);
+        stack_node_retain(&mut arena, p);
+        let again = stack_node_new(&mut arena, Some(p), leaf(2, 0), false, 3);
+        stack_node_add_link(&mut arena, again, null_link(q), &mut pool);
+        assert!(arena.spare_overflow_links.is_empty());
+        assert_eq!(arena.node(again).link_count, 2);
+        stack_node_release(&mut arena, again, &mut pool);
+        stack_node_release(&mut arena, p, &mut pool);
+        stack_node_release(&mut arena, q, &mut pool);
+        assert!(arena.nodes.iter().all(|node| node.ref_count == 0));
+        assert_eq!(arena.spare_overflow_links.len(), 1);
     }
 
     #[test]
@@ -2772,7 +2865,7 @@ mod tests {
         let heap = Subtree::Heap(Arc::new(SubtreeHeapData {
             symbol: 3,
             visible: true,
-            children: Vec::new(),
+            children: Children::new(),
             payload: SubtreePayload::Leaf,
             size: Length {
                 bytes: 3,
@@ -2868,7 +2961,7 @@ mod tests {
         let heap = Subtree::Heap(Arc::new(SubtreeHeapData {
             symbol: 3,
             visible: true,
-            children: Vec::new(),
+            children: Children::new(),
             payload: SubtreePayload::Leaf,
             ..SubtreeHeapData::default()
         }));

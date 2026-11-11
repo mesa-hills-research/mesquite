@@ -19,10 +19,10 @@ fn tree(root: Subtree) -> Tree {
         production_id_count: 0,
         field_count: 0,
         max_alias_sequence_length: 0,
-        parse_table: vec![],
-        small_parse_table: vec![],
-        small_parse_table_map: vec![],
-        parse_actions: vec![],
+        parse_table: Default::default(),
+        small_parse_table: tree_sitter_language::Table::default(),
+        small_parse_table_map: tree_sitter_language::Table::default(),
+        parse_actions: tree_sitter_language::Table::default(),
         symbol_names: vec![],
         field_names: vec![],
         field_map_slices: vec![],
@@ -31,12 +31,12 @@ fn tree(root: Subtree) -> Tree {
         public_symbol_map: vec![],
         alias_map: vec![],
         alias_sequences: vec![],
-        lex_modes: vec![],
+        lex_modes: tree_sitter_language::Table::default(),
         lex_fn: |_, _| false,
         keyword_lex_fn: None,
         keyword_capture_token: 0,
         external_scanner: None,
-        primary_state_ids: vec![],
+        primary_state_ids: tree_sitter_language::Table::default(),
         reserved_words: vec![],
         max_reserved_word_set_size: 0,
         supertype_count: 0,
@@ -71,7 +71,7 @@ fn leaf(symbol: u8, size: u8, padding: u8, flags: u8) -> Subtree {
 
 fn branch(children: Vec<Subtree>) -> Subtree {
     Subtree::Heap(Arc::new(SubtreeHeapData {
-        children,
+        children: children.into(),
         payload: SubtreePayload::Branch(BranchData::default()),
         ..SubtreeHeapData::default()
     }))
@@ -117,7 +117,7 @@ fn child_iterator_tracks_padding_extents_and_structural_aliases() {
         padding: length(2, 1, 1),
         size: length(4, 1, 2),
         extra: true,
-        children: vec![],
+        children: vec![].into(),
         payload: SubtreePayload::Leaf,
         ..SubtreeHeapData::default()
     }));
@@ -175,7 +175,7 @@ fn relevance_and_cached_child_counts() {
     }
 
     let tree = tree(Subtree::Heap(Arc::new(SubtreeHeapData {
-        children: vec![leaf(1, 1, 0, VISIBLE)],
+        children: vec![leaf(1, 1, 0, VISIBLE)].into(),
         payload: SubtreePayload::Branch(BranchData {
             visible_child_count: 9,
             named_child_count: 4,

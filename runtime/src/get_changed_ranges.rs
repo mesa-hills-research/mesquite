@@ -568,7 +568,7 @@ fn take_cursor<'tree>(cursor: &mut TreeCursor<'tree>) -> TreeCursor<'tree> {
 mod tests {
     use super::*;
     use std::sync::LazyLock;
-    use tree_sitter_language::LanguageTables;
+    use tree_sitter_language::{LanguageTables, Table};
 
     fn length(bytes: u32) -> Length {
         Length {
@@ -707,13 +707,11 @@ mod tests {
             production_id_count: 3,
             field_count: 0,
             max_alias_sequence_length: 3,
-            parse_table: vec![],
-            small_parse_table: vec![],
-            small_parse_table_map: vec![],
-            parse_actions: vec![],
-            symbol_names: ["end", "a", "b", "root", "alias"]
-                .map(String::from)
-                .to_vec(),
+            parse_table: Default::default(),
+            small_parse_table: Table::default(),
+            small_parse_table_map: Table::default(),
+            parse_actions: Table::default(),
+            symbol_names: vec!["end", "a", "b", "root", "alias"],
             field_names: vec![],
             field_map_slices: vec![],
             field_map_entries: vec![],
@@ -721,12 +719,12 @@ mod tests {
             public_symbol_map: vec![],
             alias_map: vec![],
             alias_sequences: vec![0, 0, 0, 0, 4, 0, 0, 0, 4],
-            lex_modes: vec![],
+            lex_modes: Table::default(),
             lex_fn: |_, _| unreachable!("changed-range tests do not lex"),
             keyword_lex_fn: None,
             keyword_capture_token: 0,
             external_scanner: None,
-            primary_state_ids: vec![],
+            primary_state_ids: Table::default(),
             reserved_words: vec![],
             max_reserved_word_set_size: 0,
             supertype_count: 0,

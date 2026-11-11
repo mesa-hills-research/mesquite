@@ -1,6 +1,6 @@
 use super::*;
 use std::sync::LazyLock;
-use tree_sitter_language::{ExternalScannerTables, FieldMapEntry, MapSlice};
+use tree_sitter_language::{ExternalScannerTables, FieldMapEntry, LargeStates, MapSlice, Table};
 
 fn unused_lex(_: &mut dyn tree_sitter_language::Lexer, _: StateId) -> bool {
     panic!("language table tests do not lex")
@@ -12,6 +12,16 @@ fn unused_scanner() -> Box<dyn tree_sitter_language::ExternalScanner> {
 
 fn leak(tables: LanguageTables) -> Language {
     Language::from(&*Box::leak(Box::new(tables)))
+}
+
+/// `table` with `edit` applied to its values.
+fn edited<T: tree_sitter_language::Record>(
+    table: Table<T>,
+    edit: impl FnOnce(&mut Vec<T>),
+) -> Table<T> {
+    let mut values = table.to_vec();
+    edit(&mut values);
+    Table::leak(values)
 }
 
 static LANGUAGE: LazyLock<Language> = LazyLock::new(|| {
@@ -34,7 +44,7 @@ static LANGUAGE: LazyLock<Language> = LazyLock::new(|| {
     };
     leak(LanguageTables {
         abi_version: 15,
-        name: Some("fixture".into()),
+        name: Some("fixture"),
         metadata: Some(LanguageMetadata {
             major_version: 1,
             minor_version: 2,
@@ -49,11 +59,11 @@ static LANGUAGE: LazyLock<Language> = LazyLock::new(|| {
         production_id_count: 2,
         field_count: 2,
         max_alias_sequence_length: 3,
-        parse_table: vec![1, 3, 6, 8, 1, 1, 0, 10, 12, 0, 2, 2],
+        parse_table: LargeStates::from_dense(&[1, 3, 6, 8, 1, 1, 0, 10, 12, 0, 2, 2], 6),
         // State 2 visits symbols in group order: 2, 3, 1, 4, 5. State 3 is empty.
-        small_parse_table: vec![3, 6, 2, 2, 3, 3, 1, 1, 1, 2, 4, 5, 0],
-        small_parse_table_map: vec![0, 12],
-        parse_actions: vec![
+        small_parse_table: Table::leak(vec![3, 6, 2, 2, 3, 3, 1, 1, 1, 2, 4, 5, 0]),
+        small_parse_table_map: Table::leak(vec![0, 12]),
+        parse_actions: Table::leak(vec![
             Header {
                 count: 0,
                 reusable: false,
@@ -94,8 +104,8 @@ static LANGUAGE: LazyLock<Language> = LazyLock::new(|| {
             },
             Action(shift),
             Action(reduce),
-        ],
-        symbol_names: [
+        ]),
+        symbol_names: vec![
             "end",
             "word",
             ";",
@@ -103,10 +113,8 @@ static LANGUAGE: LazyLock<Language> = LazyLock::new(|| {
             "expr",
             "_expression",
             "alias",
-        ]
-        .map(str::to_owned)
-        .to_vec(),
-        field_names: vec![None, Some("body".into()), Some("type".into())],
+        ],
+        field_names: vec![None, Some("body"), Some("type")],
         field_map_slices: vec![
             MapSlice::default(),
             MapSlice {
@@ -145,7 +153,7 @@ static LANGUAGE: LazyLock<Language> = LazyLock::new(|| {
         public_symbol_map: vec![0, 6, 2, 3, 4, 5, 6],
         alias_map: vec![1, 2, 1, 6, 4, 1, 6, 0],
         alias_sequences: vec![0, 0, 0, 0, 6, 0],
-        lex_modes: vec![
+        lex_modes: Table::leak(vec![
             LexMode::default(),
             LexMode {
                 lex_state: 7,
@@ -158,7 +166,7 @@ static LANGUAGE: LazyLock<Language> = LazyLock::new(|| {
                 reserved_word_set_id: 1,
             },
             LexMode::default(),
-        ],
+        ]),
         lex_fn: unused_lex,
         keyword_lex_fn: None,
         keyword_capture_token: 0,
@@ -167,7 +175,7 @@ static LANGUAGE: LazyLock<Language> = LazyLock::new(|| {
             symbol_map: vec![1, 2],
             create: unused_scanner,
         }),
-        primary_state_ids: vec![0, 1, 1, 3],
+        primary_state_ids: Table::leak(vec![0, 1, 1, 3]),
         reserved_words: vec![0, 0, 0, 2, 0, 1, 1, 2, 3],
         max_reserved_word_set_size: 3,
         supertype_count: 1,
@@ -225,7 +233,7 @@ fn native_language_identity_and_abi_gates() {
     assert!(!ts_language_is_reserved_word(&old, 2, 2));
     assert!(!ts_language_state_is_primary(&old, 2));
     tables.abi_version = 13;
-    tables.primary_state_ids.clear();
+    tables.primary_state_ids = Table::default();
     assert!(ts_language_state_is_primary(&leak(tables), 2));
 }
 
@@ -432,7 +440,7 @@ fn lookahead_order_reset_and_group_reuse() {
 #[test]
 fn dot_names_escape_bytes_and_propagate_write_errors() {
     let mut tables = LANGUAGE.tables.clone();
-    tables.symbol_names[2] = "a\"\\\n\t\ré\0ignored".into();
+    tables.symbol_names[2] = "a\"\\\n\t\ré\0ignored";
     let language = leak(tables);
     let mut output = Vec::new();
     ts_language_write_symbol_as_dot_string(&language, &mut output, 2).unwrap();
@@ -504,14 +512,14 @@ fn all_grammar_states_agree_between_lookup_and_iteration() {
             has_scanner.then_some(unused_scanner),
         ));
         let tables = language.tables;
+        let small_parse_table = tables.small_parse_table.to_vec();
         for state in 0..tables.state_count as StateId {
             let mut expected = vec![0; tables.symbol_count as usize];
             let mut expected_order = Vec::new();
             if u32::from(state) < tables.large_state_count {
-                let start = state as usize * tables.symbol_count as usize;
-                expected.copy_from_slice(
-                    &tables.parse_table[start..start + tables.symbol_count as usize],
-                );
+                for (symbol, value) in expected.iter_mut().enumerate() {
+                    *value = tables.parse_table.get(state as usize, symbol);
+                }
                 expected_order.extend(
                     expected
                         .iter()
@@ -519,10 +527,11 @@ fn all_grammar_states_agree_between_lookup_and_iteration() {
                         .filter_map(|(symbol, &value)| (value != 0).then_some(symbol as Symbol)),
                 );
             } else {
-                let offset = tables.small_parse_table_map
-                    [(u32::from(state) - tables.large_state_count) as usize]
+                let offset = tables
+                    .small_parse_table_map
+                    .get((u32::from(state) - tables.large_state_count) as usize)
                     as usize;
-                let mut data = &tables.small_parse_table[offset..];
+                let mut data = &small_parse_table[offset..];
                 let groups = data[0];
                 data = &data[1..];
                 for _ in 0..groups {
@@ -602,7 +611,7 @@ fn parse_table_cache_clears_on_language_change() {
     let mut cache = ParseTableCache::default();
     assert_eq!(cache.lookup(language, 2, 2), 6);
     let mut changed = language.tables.clone();
-    changed.small_parse_table[1] = 3;
+    changed.small_parse_table = edited(changed.small_parse_table, |values| values[1] = 3);
     let changed = leak(changed);
     cache.clear();
     assert_eq!(cache.lookup(&changed, 2, 2), 3);
@@ -642,7 +651,7 @@ fn parser_setting_language_invalidates_parse_table_cache() {
     assert!(ts_parser_set_language(&mut parser, Some(language)));
     assert_eq!(parser.parse_table_cache.lookup(language, 2, 2), 6);
     let mut changed = language.tables.clone();
-    changed.small_parse_table[1] = 3;
+    changed.small_parse_table = edited(changed.small_parse_table, |values| values[1] = 3);
     let changed = leak(changed);
     assert!(ts_parser_set_language(&mut parser, Some(&changed)));
     assert_eq!(parser.parse_table_cache.lookup(&changed, 2, 2), 3);
@@ -656,9 +665,9 @@ fn lookup_cache_collisions_and_clearing_never_reuse_a_stale_value() {
     let mut tables = LANGUAGE.tables.clone();
     let colliding_state = PARSE_TABLE_CACHE_SIZE as StateId + 2;
     tables.state_count = u32::from(colliding_state) + 1;
-    tables
-        .small_parse_table_map
-        .resize(PARSE_TABLE_CACHE_SIZE + 1, 12);
+    tables.small_parse_table_map = edited(tables.small_parse_table_map, |values| {
+        values.resize(PARSE_TABLE_CACHE_SIZE + 1, 12)
+    });
     let language = leak(tables);
     let mut cache = ParseTableCache::default();
     for _ in 0..2 {
@@ -668,7 +677,8 @@ fn lookup_cache_collisions_and_clearing_never_reuse_a_stale_value() {
     assert_eq!(cache.next_state(&language, 2, 4), 1);
 
     let mut other_tables = language.tables.clone();
-    other_tables.small_parse_table_map[0] = 12;
+    other_tables.small_parse_table_map =
+        edited(other_tables.small_parse_table_map, |values| values[0] = 12);
     let other_language = leak(other_tables);
     cache.clear();
     assert_eq!(cache.next_state(&other_language, 2, 4), 0);
@@ -688,7 +698,7 @@ fn table_entry_borrows_its_header_without_widening_the_handle() {
         let (reusable, actions) = LANGUAGE.tables.action_list(index as usize);
         assert_eq!(entry.actions(), actions);
         assert_eq!(entry.is_reusable(), reusable);
-        assert!(std::ptr::eq(entry.actions(), actions));
+        assert!(std::ptr::eq(entry.actions().records(), actions.records()));
     }
 }
 
@@ -700,11 +710,12 @@ fn parse_table_cache_checks_full_keys_and_caches_zero_values() {
     tables.state_count = u32::from(StateId::MAX) + 1;
     tables.large_state_count = 0;
     tables.symbol_count = u32::from(Symbol::MAX) + 1;
-    tables.parse_table.clear();
-    tables.small_parse_table = vec![1, 7, 1, 0, 1, u16::MAX, 2, 0, u16::MAX];
-    tables.small_parse_table_map = vec![0; tables.state_count as usize];
-    tables.small_parse_table_map[0] = 4;
-    tables.small_parse_table_map[StateId::MAX as usize] = 4;
+    tables.parse_table = LargeStates::default();
+    tables.small_parse_table = Table::leak(vec![1, 7, 1, 0, 1, u16::MAX, 2, 0, u16::MAX]);
+    let mut map = vec![0; tables.state_count as usize];
+    map[0] = 4;
+    map[StateId::MAX as usize] = 4;
+    tables.small_parse_table_map = Table::leak(map);
     let language = leak(tables);
     let mut cache = ParseTableCache::default();
 

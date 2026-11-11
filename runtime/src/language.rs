@@ -2,7 +2,7 @@ use crate::ts_assert::ts_assert;
 use crate::types::*;
 use tree_sitter_language::{
     BUILTIN_SYM_ERROR, LanguageMetadata, LanguageTables, LexMode, ParseAction, ParseActionEntry,
-    SymbolMetadata,
+    Record, SymbolMetadata, Table,
 };
 
 const LANGUAGE_VERSION_WITH_RESERVED_WORDS: u32 = 15;
@@ -38,16 +38,14 @@ impl std::hash::Hash for Language {
 /// that immutable header makes this handle just one slice (two machine words).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TableEntry {
-    entries: &'static [ParseActionEntry],
+    entries: Table<ParseActionEntry>,
 }
 
 impl Default for TableEntry {
     fn default() -> Self {
+        static EMPTY: [[u8; 8]; 1] = [[0; 8]];
         Self {
-            entries: &[ParseActionEntry::Header {
-                count: 0,
-                reusable: false,
-            }],
+            entries: Table::from_records(&EMPTY),
         }
     }
 }
@@ -55,25 +53,25 @@ impl Default for TableEntry {
 impl TableEntry {
     #[inline]
     fn new(language: &Language, index: u16) -> Self {
-        let data = &language.tables.parse_actions;
+        let data = language.tables.parse_actions;
         let index = index as usize;
-        let ParseActionEntry::Header { count, .. } = data[index] else {
+        let ParseActionEntry::Header { count, .. } = data.get(index) else {
             panic!("parse table value is not an action-list header");
         };
         Self {
-            entries: &data[index..index + 1 + count as usize],
+            entries: data.slice(index..index + 1 + count as usize),
         }
     }
 
     #[inline]
-    pub fn actions(self) -> &'static [ParseActionEntry] {
-        &self.entries[1..]
+    pub fn actions(self) -> Table<ParseAction> {
+        Table::from_records(&self.entries.records()[1..])
     }
 
     #[inline]
     pub fn is_reusable(self) -> bool {
         matches!(
-            self.entries[0],
+            ParseActionEntry::read(self.entries.records()[0]),
             ParseActionEntry::Header { reusable: true, .. }
         )
     }
@@ -105,10 +103,12 @@ impl ParseTableCache {
 
     #[inline(always)]
     pub fn lookup(&self, language: &Language, state: StateId, symbol: Symbol) -> u16 {
-        // Dense states are already a single indexed load.
+        // Large states are already a direct lookup.
         if u32::from(state) < language.tables.large_state_count {
-            return language.tables.parse_table
-                [state as usize * language.tables.symbol_count as usize + symbol as usize];
+            return language
+                .tables
+                .parse_table
+                .get(state as usize, symbol as usize);
         }
         // Encode the full 32-bit state/symbol pair as a nonzero 33-bit key.
         // Adding one also distinguishes a cached zero value for (0, 0) from
@@ -155,15 +155,15 @@ impl ParseTableCache {
             0
         } else if u32::from(symbol) < language.tables.token_count {
             match self.table_entry(language, state, symbol).actions().last() {
-                Some(ParseActionEntry::Action(ParseAction::Shift {
+                Some(ParseAction::Shift {
                     state: next_state,
                     extra,
                     ..
-                })) => {
-                    if *extra {
+                }) => {
+                    if extra {
                         state
                     } else {
-                        *next_state
+                        next_state
                     }
                 }
                 _ => 0,
@@ -182,14 +182,14 @@ impl ParseTableCache {
         language: &Language,
         state: StateId,
         symbol: Symbol,
-    ) -> &'static [ParseActionEntry] {
+    ) -> Table<ParseAction> {
         self.table_entry(language, state, symbol).actions()
     }
 
     pub fn has_reduce_action(&self, language: &Language, state: StateId, symbol: Symbol) -> bool {
         matches!(
             self.actions(language, state, symbol).first(),
-            Some(ParseActionEntry::Action(ParseAction::Reduce { .. }))
+            Some(ParseAction::Reduce { .. })
         )
     }
 }
@@ -205,7 +205,7 @@ pub(crate) struct LookaheadIterator {
     pub section_index: u16,
     pub group_count: u16,
     pub is_small_state: bool,
-    pub actions: &'static [ParseActionEntry],
+    pub actions: Table<ParseAction>,
     pub symbol: Symbol,
     pub next_state: StateId,
 }
@@ -264,7 +264,7 @@ pub(crate) fn ts_language_metadata(language: &Language) -> Option<LanguageMetada
 
 pub(crate) fn ts_language_name(language: &Language) -> Option<&'static str> {
     if language.tables.abi_version >= LANGUAGE_VERSION_WITH_RESERVED_WORDS {
-        language.tables.name.as_deref()
+        language.tables.name
     } else {
         None
     }
@@ -289,7 +289,7 @@ pub(crate) fn ts_language_table_entry(
 }
 
 pub(crate) fn ts_language_lex_mode_for_state(language: &Language, state: StateId) -> LexMode {
-    let mut mode = language.tables.lex_modes[state as usize];
+    let mut mode = language.tables.lex_modes.get(state as usize);
     if language.tables.abi_version < LANGUAGE_VERSION_WITH_RESERVED_WORDS {
         mode.reserved_word_set_id = 0;
     }
@@ -349,15 +349,15 @@ pub(crate) fn ts_language_next_state(
         0
     } else if u32::from(symbol) < language.tables.token_count {
         match ts_language_actions(language, state, symbol).last() {
-            Some(ParseActionEntry::Action(ParseAction::Shift {
+            Some(ParseAction::Shift {
                 state: next_state,
                 extra,
                 ..
-            })) => {
-                if *extra {
+            }) => {
+                if extra {
                     state
                 } else {
-                    *next_state
+                    next_state
                 }
             }
             _ => 0,
@@ -372,7 +372,7 @@ pub(crate) fn ts_language_symbol_name(language: &Language, symbol: Symbol) -> Op
         BUILTIN_SYM_ERROR => Some("ERROR"),
         BUILTIN_SYM_ERROR_REPEAT => Some("_ERROR"),
         _ if u32::from(symbol) < ts_language_symbol_count(language) => {
-            Some(language.tables.symbol_names[symbol as usize].as_str())
+            Some(language.tables.symbol_names[symbol as usize])
         }
         _ => None,
     }
@@ -401,7 +401,7 @@ pub(crate) fn ts_language_symbol_for_name(language: &Language, name: &[u8], name
         if (!metadata.visible && !metadata.supertype) || metadata.named != named {
             continue;
         }
-        let symbol_name = &language.tables.symbol_names[symbol as usize];
+        let symbol_name = language.tables.symbol_names[symbol as usize];
         if compare_name_prefix(name, symbol_name) == 0 && symbol_name.len() == name.len() {
             return language.tables.public_symbol_map[symbol as usize];
         }
@@ -428,7 +428,7 @@ pub(crate) fn ts_language_field_name_for_id(
 ) -> Option<&'static str> {
     let count = ts_language_field_count(language);
     if count != 0 && u32::from(field_id) <= count {
-        language.tables.field_names[field_id as usize].as_deref()
+        language.tables.field_names[field_id as usize]
     } else {
         None
     }
@@ -438,7 +438,6 @@ pub(crate) fn ts_language_field_id_for_name(language: &Language, name: &[u8]) ->
     let count = ts_language_field_count(language) as u16;
     for id in 1..=count {
         let field_name = language.tables.field_names[id as usize]
-            .as_deref()
             .expect("field names after index zero are non-null");
         match compare_name_prefix(name, field_name) {
             0 if field_name.len() == name.len() => return id,
@@ -510,7 +509,7 @@ pub(crate) fn ts_language_actions(
     language: &Language,
     state: StateId,
     symbol: Symbol,
-) -> &'static [ParseActionEntry] {
+) -> Table<ParseAction> {
     ts_language_table_entry(language, state, symbol).actions()
 }
 
@@ -523,25 +522,26 @@ pub(crate) fn ts_language_has_reduce_action(
         ts_language_table_entry(language, state, symbol)
             .actions()
             .first(),
-        Some(ParseActionEntry::Action(ParseAction::Reduce { .. }))
+        Some(ParseAction::Reduce { .. })
     )
 }
 
 pub(crate) fn ts_language_lookup(language: &Language, state: StateId, symbol: Symbol) -> u16 {
     let tables = language.tables;
     if u32::from(state) >= tables.large_state_count {
-        let mut index = tables.small_parse_table_map
-            [(u32::from(state) - tables.large_state_count) as usize]
+        let mut index = tables
+            .small_parse_table_map
+            .get((u32::from(state) - tables.large_state_count) as usize)
             as usize;
-        let data = &tables.small_parse_table;
-        let group_count = data[index];
+        let data = tables.small_parse_table;
+        let group_count = data.get(index);
         index += 1;
         for _ in 0..group_count {
-            let value = data[index];
-            let symbol_count = data[index + 1] as usize;
+            let value = data.get(index);
+            let symbol_count = data.get(index + 1) as usize;
             index += 2;
             for _ in 0..symbol_count {
-                let next_symbol = data[index];
+                let next_symbol = data.get(index);
                 index += 1;
                 if next_symbol == symbol {
                     return value;
@@ -550,7 +550,7 @@ pub(crate) fn ts_language_lookup(language: &Language, state: StateId, symbol: Sy
         }
         0
     } else {
-        tables.parse_table[state as usize * tables.symbol_count as usize + symbol as usize]
+        tables.parse_table.get(state as usize, symbol as usize)
     }
 }
 
@@ -562,9 +562,11 @@ pub(crate) fn ts_language_lookaheads(language: &Language, state: StateId) -> Loo
     let tables = language.tables;
     let is_small_state = u32::from(state) >= tables.large_state_count;
     let (data_index, group_end, group_count) = if is_small_state {
-        let index = tables.small_parse_table_map
-            [(u32::from(state) - tables.large_state_count) as usize] as usize;
-        (index as i64, index + 1, tables.small_parse_table[index])
+        let index = tables
+            .small_parse_table_map
+            .get((u32::from(state) - tables.large_state_count) as usize)
+            as usize;
+        (index as i64, index + 1, tables.small_parse_table.get(index))
     } else {
         // An integer cursor represents C's pointer one before the row, including
         // the first row. No out-of-bounds Rust reference is constructed.
@@ -574,12 +576,13 @@ pub(crate) fn ts_language_lookaheads(language: &Language, state: StateId) -> Loo
         language: *language,
         data_index,
         group_end,
-        state: 0,
+        // C leaves it 0 and never reads it; a large state's values are read by state.
+        state,
         table_value: 0,
         section_index: 0,
         group_count,
         is_small_state,
-        actions: &[],
+        actions: Table::default(),
         symbol: Symbol::MAX,
         next_state: 0,
     }
@@ -594,14 +597,14 @@ pub(crate) fn ts_lookahead_iterator__next(iterator: &mut LookaheadIterator) -> b
                 return false;
             }
             iterator.group_count -= 1;
-            iterator.table_value = tables.small_parse_table[iterator.data_index as usize];
+            iterator.table_value = tables.small_parse_table.get(iterator.data_index as usize);
             iterator.data_index += 1;
-            let symbol_count = tables.small_parse_table[iterator.data_index as usize] as usize;
+            let symbol_count = tables.small_parse_table.get(iterator.data_index as usize) as usize;
             iterator.data_index += 1;
             iterator.group_end = iterator.data_index as usize + symbol_count;
-            iterator.symbol = tables.small_parse_table[iterator.data_index as usize];
+            iterator.symbol = tables.small_parse_table.get(iterator.data_index as usize);
         } else {
-            iterator.symbol = tables.small_parse_table[iterator.data_index as usize];
+            iterator.symbol = tables.small_parse_table.get(iterator.data_index as usize);
             return true;
         }
     } else {
@@ -611,7 +614,9 @@ pub(crate) fn ts_lookahead_iterator__next(iterator: &mut LookaheadIterator) -> b
             if u32::from(iterator.symbol) >= tables.symbol_count {
                 return false;
             }
-            iterator.table_value = tables.parse_table[iterator.data_index as usize];
+            iterator.table_value = tables
+                .parse_table
+                .get(iterator.state as usize, iterator.symbol as usize);
             if iterator.table_value != 0 {
                 break;
             }
@@ -623,7 +628,7 @@ pub(crate) fn ts_lookahead_iterator__next(iterator: &mut LookaheadIterator) -> b
         iterator.next_state = 0;
     } else {
         // C leaves the action pointer unchanged but sets its count to zero.
-        iterator.actions = &[];
+        iterator.actions = Table::default();
         iterator.next_state = iterator.table_value;
     }
     true
@@ -692,7 +697,7 @@ pub(crate) fn ts_language_aliases_for_symbol(
 
 pub(crate) fn ts_language_state_is_primary(language: &Language, state: StateId) -> bool {
     if language.tables.abi_version >= LANGUAGE_VERSION_WITH_PRIMARY_STATES {
-        state == language.tables.primary_state_ids[state as usize]
+        state == language.tables.primary_state_ids.get(state as usize)
     } else {
         true
     }

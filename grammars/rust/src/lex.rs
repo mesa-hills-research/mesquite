@@ -5,8 +5,9 @@
 //!
 //! Each C `case` is a `match` arm, run once per character: `ADVANCE(n)` and
 //! `SKIP(n)` set the state, call `lexer.advance(skip)` and start the next round
-//! (C's `goto next_state`), `ACCEPT_TOKEN` sets the result and marks the end, and
-//! `END_STATE()` returns the result.
+//! (C's `goto next_state`), `ACCEPT_TOKEN` is `lexer.accept_token`, and
+//! `END_STATE()` returns the result. C reads `eof` for every character. Here only
+//! the arms that test it call `lexer.eof()`.
 #![allow(non_upper_case_globals, unreachable_code, clippy::all)]
 
 use tree_sitter_language::{CharacterRange, Lexer, StateId, Symbol, set_contains};
@@ -430,9 +431,9 @@ pub(crate) fn ts_lex(lexer: &mut dyn Lexer, mut state: StateId) -> bool {
     loop {
         // C's `start:` label (reached again after each `next_state:` advance).
         let lookahead = lexer.lookahead();
-        let eof = lexer.eof();
         match state {
             0 => {
+                let eof = lexer.eof();
                 if eof { state = 74; lexer.advance(false); continue; }
                 if let Some(next) = advance_map(&[
                     (33, 172), (34, 158), (35, 145), (36, 87), (37, 101), (38, 106), (39, 147), (40, 77),
@@ -911,6 +912,7 @@ pub(crate) fn ts_lex(lexer: &mut dyn Lexer, mut state: StateId) -> bool {
                 return result;
             }
             69 => {
+                let eof = lexer.eof();
                 if eof { state = 74; lexer.advance(false); continue; }
                 if let Some(next) = advance_map(&[
                     (33, 104), (34, 158), (35, 145), (36, 87), (37, 101), (38, 106), (39, 147), (40, 77),
@@ -925,6 +927,7 @@ pub(crate) fn ts_lex(lexer: &mut dyn Lexer, mut state: StateId) -> bool {
                 return result;
             }
             70 => {
+                let eof = lexer.eof();
                 if eof { state = 74; lexer.advance(false); continue; }
                 if let Some(next) = advance_map(&[
                     (33, 104), (34, 158), (35, 144), (36, 67), (37, 101), (38, 106), (39, 147), (40, 77),
@@ -938,6 +941,7 @@ pub(crate) fn ts_lex(lexer: &mut dyn Lexer, mut state: StateId) -> bool {
                 return result;
             }
             71 => {
+                let eof = lexer.eof();
                 if eof { state = 74; lexer.advance(false); continue; }
                 if let Some(next) = advance_map(&[
                     (33, 103), (34, 158), (35, 145), (36, 67), (38, 105), (39, 147), (40, 77), (41, 78),
@@ -951,6 +955,7 @@ pub(crate) fn ts_lex(lexer: &mut dyn Lexer, mut state: StateId) -> bool {
                 return result;
             }
             72 => {
+                let eof = lexer.eof();
                 if eof { state = 74; lexer.advance(false); continue; }
                 if let Some(next) = advance_map(&[
                     (33, 103), (34, 158), (35, 145), (36, 67), (38, 105), (39, 147), (40, 77), (41, 78),
@@ -964,6 +969,7 @@ pub(crate) fn ts_lex(lexer: &mut dyn Lexer, mut state: StateId) -> bool {
                 return result;
             }
             73 => {
+                let eof = lexer.eof();
                 if eof { state = 74; lexer.advance(false); continue; }
                 if let Some(next) = advance_map(&[
                     (33, 103), (34, 158), (35, 144), (36, 67), (38, 105), (39, 147), (40, 77), (42, 93),
@@ -976,353 +982,353 @@ pub(crate) fn ts_lex(lexer: &mut dyn Lexer, mut state: StateId) -> bool {
                 return result;
             }
             74 => {
-                result = true; lexer.set_result_symbol(ts_builtin_sym_end); lexer.mark_end();
+                result = true; lexer.accept_token(ts_builtin_sym_end);
                 return result;
             }
             75 => {
-                result = true; lexer.set_result_symbol(anon_sym_SEMI); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_SEMI);
                 return result;
             }
             76 => {
-                result = true; lexer.set_result_symbol(anon_sym_macro_rules_BANG); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_macro_rules_BANG);
                 return result;
             }
             77 => {
-                result = true; lexer.set_result_symbol(anon_sym_LPAREN); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_LPAREN);
                 return result;
             }
             78 => {
-                result = true; lexer.set_result_symbol(anon_sym_RPAREN); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_RPAREN);
                 return result;
             }
             79 => {
-                result = true; lexer.set_result_symbol(anon_sym_LBRACK); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_LBRACK);
                 return result;
             }
             80 => {
-                result = true; lexer.set_result_symbol(anon_sym_RBRACK); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_RBRACK);
                 return result;
             }
             81 => {
-                result = true; lexer.set_result_symbol(anon_sym_LBRACE); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_LBRACE);
                 return result;
             }
             82 => {
-                result = true; lexer.set_result_symbol(anon_sym_RBRACE); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_RBRACE);
                 return result;
             }
             83 => {
-                result = true; lexer.set_result_symbol(anon_sym_EQ_GT); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_EQ_GT);
                 return result;
             }
             84 => {
-                result = true; lexer.set_result_symbol(anon_sym_COLON); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_COLON);
                 return result;
             }
             85 => {
-                result = true; lexer.set_result_symbol(anon_sym_COLON); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_COLON);
                 if lookahead == 58 { state = 142; lexer.advance(false); continue; }
                 return result;
             }
             86 => {
-                result = true; lexer.set_result_symbol(anon_sym_DOLLAR); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_DOLLAR);
                 return result;
             }
             87 => {
-                result = true; lexer.set_result_symbol(anon_sym_DOLLAR); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_DOLLAR);
                 if 65 <= lookahead && lookahead <= 90 || lookahead == 95 || 97 <= lookahead && lookahead <= 122 { state = 194; lexer.advance(false); continue; }
                 return result;
             }
             88 => {
-                result = true; lexer.set_result_symbol(aux_sym_token_repetition_pattern_token1); lexer.mark_end();
+                result = true; lexer.accept_token(aux_sym_token_repetition_pattern_token1);
                 if lookahead == 42 { state = 175; lexer.advance(false); continue; }
                 if lookahead == 47 { state = 162; lexer.advance(false); continue; }
                 if lookahead != 0 && lookahead != 42 && lookahead != 43 && lookahead != 63 { state = 90; lexer.advance(false); continue; }
                 return result;
             }
             89 => {
-                result = true; lexer.set_result_symbol(aux_sym_token_repetition_pattern_token1); lexer.mark_end();
+                result = true; lexer.accept_token(aux_sym_token_repetition_pattern_token1);
                 if lookahead == 47 { state = 88; lexer.advance(false); continue; }
                 if 9 <= lookahead && lookahead <= 13 || lookahead == 32 { state = 89; lexer.advance(false); continue; }
                 if lookahead != 0 && lookahead != 42 && lookahead != 43 && lookahead != 63 { state = 90; lexer.advance(false); continue; }
                 return result;
             }
             90 => {
-                result = true; lexer.set_result_symbol(aux_sym_token_repetition_pattern_token1); lexer.mark_end();
+                result = true; lexer.accept_token(aux_sym_token_repetition_pattern_token1);
                 if lookahead != 0 && lookahead != 42 && lookahead != 43 && lookahead != 63 { state = 90; lexer.advance(false); continue; }
                 return result;
             }
             91 => {
-                result = true; lexer.set_result_symbol(anon_sym_PLUS); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_PLUS);
                 return result;
             }
             92 => {
-                result = true; lexer.set_result_symbol(anon_sym_PLUS); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_PLUS);
                 if lookahead == 61 { state = 113; lexer.advance(false); continue; }
                 return result;
             }
             93 => {
-                result = true; lexer.set_result_symbol(anon_sym_STAR); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_STAR);
                 return result;
             }
             94 => {
-                result = true; lexer.set_result_symbol(anon_sym_STAR); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_STAR);
                 if lookahead == 61 { state = 115; lexer.advance(false); continue; }
                 return result;
             }
             95 => {
-                result = true; lexer.set_result_symbol(anon_sym_QMARK); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_QMARK);
                 return result;
             }
             96 => {
-                result = true; lexer.set_result_symbol(anon_sym_DASH); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_DASH);
                 return result;
             }
             97 => {
-                result = true; lexer.set_result_symbol(anon_sym_DASH); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_DASH);
                 if lookahead == 61 { state = 114; lexer.advance(false); continue; }
                 return result;
             }
             98 => {
-                result = true; lexer.set_result_symbol(anon_sym_DASH); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_DASH);
                 if lookahead == 61 { state = 114; lexer.advance(false); continue; }
                 if lookahead == 62 { state = 143; lexer.advance(false); continue; }
                 return result;
             }
             99 => {
-                result = true; lexer.set_result_symbol(anon_sym_DASH); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_DASH);
                 if lookahead == 62 { state = 143; lexer.advance(false); continue; }
                 return result;
             }
             100 => {
-                result = true; lexer.set_result_symbol(anon_sym_SLASH); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_SLASH);
                 if lookahead == 42 { state = 175; lexer.advance(false); continue; }
                 if lookahead == 47 { state = 161; lexer.advance(false); continue; }
                 if lookahead == 61 { state = 116; lexer.advance(false); continue; }
                 return result;
             }
             101 => {
-                result = true; lexer.set_result_symbol(anon_sym_PERCENT); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_PERCENT);
                 if lookahead == 61 { state = 117; lexer.advance(false); continue; }
                 return result;
             }
             102 => {
-                result = true; lexer.set_result_symbol(anon_sym_CARET); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_CARET);
                 if lookahead == 61 { state = 118; lexer.advance(false); continue; }
                 return result;
             }
             103 => {
-                result = true; lexer.set_result_symbol(anon_sym_BANG); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_BANG);
                 return result;
             }
             104 => {
-                result = true; lexer.set_result_symbol(anon_sym_BANG); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_BANG);
                 if lookahead == 61 { state = 127; lexer.advance(false); continue; }
                 return result;
             }
             105 => {
-                result = true; lexer.set_result_symbol(anon_sym_AMP); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_AMP);
                 return result;
             }
             106 => {
-                result = true; lexer.set_result_symbol(anon_sym_AMP); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_AMP);
                 if lookahead == 38 { state = 109; lexer.advance(false); continue; }
                 if lookahead == 61 { state = 119; lexer.advance(false); continue; }
                 return result;
             }
             107 => {
-                result = true; lexer.set_result_symbol(anon_sym_PIPE); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_PIPE);
                 return result;
             }
             108 => {
-                result = true; lexer.set_result_symbol(anon_sym_PIPE); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_PIPE);
                 if lookahead == 61 { state = 120; lexer.advance(false); continue; }
                 if lookahead == 124 { state = 110; lexer.advance(false); continue; }
                 return result;
             }
             109 => {
-                result = true; lexer.set_result_symbol(anon_sym_AMP_AMP); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_AMP_AMP);
                 return result;
             }
             110 => {
-                result = true; lexer.set_result_symbol(anon_sym_PIPE_PIPE); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_PIPE_PIPE);
                 return result;
             }
             111 => {
-                result = true; lexer.set_result_symbol(anon_sym_LT_LT); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_LT_LT);
                 if lookahead == 61 { state = 121; lexer.advance(false); continue; }
                 return result;
             }
             112 => {
-                result = true; lexer.set_result_symbol(anon_sym_GT_GT); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_GT_GT);
                 if lookahead == 61 { state = 122; lexer.advance(false); continue; }
                 return result;
             }
             113 => {
-                result = true; lexer.set_result_symbol(anon_sym_PLUS_EQ); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_PLUS_EQ);
                 return result;
             }
             114 => {
-                result = true; lexer.set_result_symbol(anon_sym_DASH_EQ); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_DASH_EQ);
                 return result;
             }
             115 => {
-                result = true; lexer.set_result_symbol(anon_sym_STAR_EQ); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_STAR_EQ);
                 return result;
             }
             116 => {
-                result = true; lexer.set_result_symbol(anon_sym_SLASH_EQ); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_SLASH_EQ);
                 return result;
             }
             117 => {
-                result = true; lexer.set_result_symbol(anon_sym_PERCENT_EQ); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_PERCENT_EQ);
                 return result;
             }
             118 => {
-                result = true; lexer.set_result_symbol(anon_sym_CARET_EQ); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_CARET_EQ);
                 return result;
             }
             119 => {
-                result = true; lexer.set_result_symbol(anon_sym_AMP_EQ); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_AMP_EQ);
                 return result;
             }
             120 => {
-                result = true; lexer.set_result_symbol(anon_sym_PIPE_EQ); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_PIPE_EQ);
                 return result;
             }
             121 => {
-                result = true; lexer.set_result_symbol(anon_sym_LT_LT_EQ); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_LT_LT_EQ);
                 return result;
             }
             122 => {
-                result = true; lexer.set_result_symbol(anon_sym_GT_GT_EQ); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_GT_GT_EQ);
                 return result;
             }
             123 => {
-                result = true; lexer.set_result_symbol(anon_sym_EQ); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_EQ);
                 return result;
             }
             124 => {
-                result = true; lexer.set_result_symbol(anon_sym_EQ); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_EQ);
                 if lookahead == 61 { state = 126; lexer.advance(false); continue; }
                 return result;
             }
             125 => {
-                result = true; lexer.set_result_symbol(anon_sym_EQ); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_EQ);
                 if lookahead == 61 { state = 126; lexer.advance(false); continue; }
                 if lookahead == 62 { state = 83; lexer.advance(false); continue; }
                 return result;
             }
             126 => {
-                result = true; lexer.set_result_symbol(anon_sym_EQ_EQ); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_EQ_EQ);
                 return result;
             }
             127 => {
-                result = true; lexer.set_result_symbol(anon_sym_BANG_EQ); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_BANG_EQ);
                 return result;
             }
             128 => {
-                result = true; lexer.set_result_symbol(anon_sym_GT); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_GT);
                 return result;
             }
             129 => {
-                result = true; lexer.set_result_symbol(anon_sym_GT); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_GT);
                 if lookahead == 61 { state = 132; lexer.advance(false); continue; }
                 if lookahead == 62 { state = 112; lexer.advance(false); continue; }
                 return result;
             }
             130 => {
-                result = true; lexer.set_result_symbol(anon_sym_LT); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_LT);
                 return result;
             }
             131 => {
-                result = true; lexer.set_result_symbol(anon_sym_LT); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_LT);
                 if lookahead == 60 { state = 111; lexer.advance(false); continue; }
                 if lookahead == 61 { state = 133; lexer.advance(false); continue; }
                 return result;
             }
             132 => {
-                result = true; lexer.set_result_symbol(anon_sym_GT_EQ); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_GT_EQ);
                 return result;
             }
             133 => {
-                result = true; lexer.set_result_symbol(anon_sym_LT_EQ); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_LT_EQ);
                 return result;
             }
             134 => {
-                result = true; lexer.set_result_symbol(anon_sym_AT); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_AT);
                 return result;
             }
             135 => {
-                result = true; lexer.set_result_symbol(anon_sym_DOT); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_DOT);
                 if lookahead == 46 { state = 137; lexer.advance(false); continue; }
                 return result;
             }
             136 => {
-                result = true; lexer.set_result_symbol(anon_sym_DOT_DOT); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_DOT_DOT);
                 return result;
             }
             137 => {
-                result = true; lexer.set_result_symbol(anon_sym_DOT_DOT); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_DOT_DOT);
                 if lookahead == 46 { state = 139; lexer.advance(false); continue; }
                 if lookahead == 61 { state = 140; lexer.advance(false); continue; }
                 return result;
             }
             138 => {
-                result = true; lexer.set_result_symbol(anon_sym_DOT_DOT); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_DOT_DOT);
                 if lookahead == 61 { state = 140; lexer.advance(false); continue; }
                 return result;
             }
             139 => {
-                result = true; lexer.set_result_symbol(anon_sym_DOT_DOT_DOT); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_DOT_DOT_DOT);
                 return result;
             }
             140 => {
-                result = true; lexer.set_result_symbol(anon_sym_DOT_DOT_EQ); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_DOT_DOT_EQ);
                 return result;
             }
             141 => {
-                result = true; lexer.set_result_symbol(anon_sym_COMMA); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_COMMA);
                 return result;
             }
             142 => {
-                result = true; lexer.set_result_symbol(anon_sym_COLON_COLON); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_COLON_COLON);
                 return result;
             }
             143 => {
-                result = true; lexer.set_result_symbol(anon_sym_DASH_GT); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_DASH_GT);
                 return result;
             }
             144 => {
-                result = true; lexer.set_result_symbol(anon_sym_POUND); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_POUND);
                 return result;
             }
             145 => {
-                result = true; lexer.set_result_symbol(anon_sym_POUND); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_POUND);
                 if lookahead == 33 { state = 2; lexer.advance(false); continue; }
                 return result;
             }
             146 => {
-                result = true; lexer.set_result_symbol(anon_sym_SQUOTE); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_SQUOTE);
                 return result;
             }
             147 => {
-                result = true; lexer.set_result_symbol(anon_sym_SQUOTE); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_SQUOTE);
                 if lookahead == 39 { state = 159; lexer.advance(false); continue; }
                 if lookahead == 92 { state = 50; lexer.advance(false); continue; }
                 if lookahead != 0 { state = 28; lexer.advance(false); continue; }
                 return result;
             }
             148 => {
-                result = true; lexer.set_result_symbol(anon_sym_LT2); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_LT2);
                 return result;
             }
             149 => {
-                result = true; lexer.set_result_symbol(sym_integer_literal); lexer.mark_end();
+                result = true; lexer.accept_token(sym_integer_literal);
                 return result;
             }
             150 => {
-                result = true; lexer.set_result_symbol(sym_integer_literal); lexer.mark_end();
+                result = true; lexer.accept_token(sym_integer_literal);
                 if lookahead == 50 { state = 157; lexer.advance(false); continue; }
                 if lookahead == 102 { state = 151; lexer.advance(false); continue; }
                 if lookahead == 105 { state = 37; lexer.advance(false); continue; }
@@ -1331,7 +1337,7 @@ pub(crate) fn ts_lex(lexer: &mut dyn Lexer, mut state: StateId) -> bool {
                 return result;
             }
             151 => {
-                result = true; lexer.set_result_symbol(sym_integer_literal); lexer.mark_end();
+                result = true; lexer.accept_token(sym_integer_literal);
                 if lookahead == 51 { state = 150; lexer.advance(false); continue; }
                 if lookahead == 54 { state = 152; lexer.advance(false); continue; }
                 if lookahead == 102 { state = 151; lexer.advance(false); continue; }
@@ -1341,7 +1347,7 @@ pub(crate) fn ts_lex(lexer: &mut dyn Lexer, mut state: StateId) -> bool {
                 return result;
             }
             152 => {
-                result = true; lexer.set_result_symbol(sym_integer_literal); lexer.mark_end();
+                result = true; lexer.accept_token(sym_integer_literal);
                 if lookahead == 52 { state = 157; lexer.advance(false); continue; }
                 if lookahead == 102 { state = 151; lexer.advance(false); continue; }
                 if lookahead == 105 { state = 37; lexer.advance(false); continue; }
@@ -1350,7 +1356,7 @@ pub(crate) fn ts_lex(lexer: &mut dyn Lexer, mut state: StateId) -> bool {
                 return result;
             }
             153 => {
-                result = true; lexer.set_result_symbol(sym_integer_literal); lexer.mark_end();
+                result = true; lexer.accept_token(sym_integer_literal);
                 if lookahead == 98 { state = 56; lexer.advance(false); continue; }
                 if lookahead == 102 { state = 40; lexer.advance(false); continue; }
                 if lookahead == 105 { state = 37; lexer.advance(false); continue; }
@@ -1361,7 +1367,7 @@ pub(crate) fn ts_lex(lexer: &mut dyn Lexer, mut state: StateId) -> bool {
                 return result;
             }
             154 => {
-                result = true; lexer.set_result_symbol(sym_integer_literal); lexer.mark_end();
+                result = true; lexer.accept_token(sym_integer_literal);
                 if lookahead == 102 { state = 40; lexer.advance(false); continue; }
                 if lookahead == 105 { state = 37; lexer.advance(false); continue; }
                 if lookahead == 117 { state = 37; lexer.advance(false); continue; }
@@ -1369,7 +1375,7 @@ pub(crate) fn ts_lex(lexer: &mut dyn Lexer, mut state: StateId) -> bool {
                 return result;
             }
             155 => {
-                result = true; lexer.set_result_symbol(sym_integer_literal); lexer.mark_end();
+                result = true; lexer.accept_token(sym_integer_literal);
                 if lookahead == 102 { state = 40; lexer.advance(false); continue; }
                 if lookahead == 105 { state = 37; lexer.advance(false); continue; }
                 if lookahead == 117 { state = 37; lexer.advance(false); continue; }
@@ -1377,7 +1383,7 @@ pub(crate) fn ts_lex(lexer: &mut dyn Lexer, mut state: StateId) -> bool {
                 return result;
             }
             156 => {
-                result = true; lexer.set_result_symbol(sym_integer_literal); lexer.mark_end();
+                result = true; lexer.accept_token(sym_integer_literal);
                 if lookahead == 102 { state = 40; lexer.advance(false); continue; }
                 if lookahead == 105 { state = 37; lexer.advance(false); continue; }
                 if lookahead == 117 { state = 37; lexer.advance(false); continue; }
@@ -1385,7 +1391,7 @@ pub(crate) fn ts_lex(lexer: &mut dyn Lexer, mut state: StateId) -> bool {
                 return result;
             }
             157 => {
-                result = true; lexer.set_result_symbol(sym_integer_literal); lexer.mark_end();
+                result = true; lexer.accept_token(sym_integer_literal);
                 if lookahead == 102 { state = 151; lexer.advance(false); continue; }
                 if lookahead == 105 { state = 37; lexer.advance(false); continue; }
                 if lookahead == 117 { state = 37; lexer.advance(false); continue; }
@@ -1393,56 +1399,56 @@ pub(crate) fn ts_lex(lexer: &mut dyn Lexer, mut state: StateId) -> bool {
                 return result;
             }
             158 => {
-                result = true; lexer.set_result_symbol(aux_sym_string_literal_token1); lexer.mark_end();
+                result = true; lexer.accept_token(aux_sym_string_literal_token1);
                 return result;
             }
             159 => {
-                result = true; lexer.set_result_symbol(sym_char_literal); lexer.mark_end();
+                result = true; lexer.accept_token(sym_char_literal);
                 return result;
             }
             160 => {
-                result = true; lexer.set_result_symbol(sym_escape_sequence); lexer.mark_end();
+                result = true; lexer.accept_token(sym_escape_sequence);
                 return result;
             }
             161 => {
-                result = true; lexer.set_result_symbol(anon_sym_SLASH_SLASH); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_SLASH_SLASH);
                 return result;
             }
             162 => {
-                result = true; lexer.set_result_symbol(anon_sym_SLASH_SLASH); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_SLASH_SLASH);
                 if lookahead != 0 && lookahead != 42 && lookahead != 43 && lookahead != 63 { state = 90; lexer.advance(false); continue; }
                 return result;
             }
             163 => {
-                result = true; lexer.set_result_symbol(anon_sym_SLASH_SLASH); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_SLASH_SLASH);
                 if lookahead != 0 && lookahead != 10 { state = 167; lexer.advance(false); continue; }
                 return result;
             }
             164 => {
-                result = true; lexer.set_result_symbol(aux_sym_line_comment_token1); lexer.mark_end();
+                result = true; lexer.accept_token(aux_sym_line_comment_token1);
                 return result;
             }
             165 => {
-                result = true; lexer.set_result_symbol(aux_sym_line_comment_token2); lexer.mark_end();
+                result = true; lexer.accept_token(aux_sym_line_comment_token2);
                 if lookahead == 42 { state = 176; lexer.advance(false); continue; }
                 if lookahead == 47 { state = 163; lexer.advance(false); continue; }
                 if lookahead != 0 && lookahead != 10 { state = 167; lexer.advance(false); continue; }
                 return result;
             }
             166 => {
-                result = true; lexer.set_result_symbol(aux_sym_line_comment_token2); lexer.mark_end();
+                result = true; lexer.accept_token(aux_sym_line_comment_token2);
                 if lookahead == 47 { state = 165; lexer.advance(false); continue; }
                 if lookahead == 9 || 11 <= lookahead && lookahead <= 13 || lookahead == 32 { state = 166; lexer.advance(false); continue; }
                 if lookahead != 0 && (lookahead < 9 || 13 < lookahead) { state = 167; lexer.advance(false); continue; }
                 return result;
             }
             167 => {
-                result = true; lexer.set_result_symbol(aux_sym_line_comment_token2); lexer.mark_end();
+                result = true; lexer.accept_token(aux_sym_line_comment_token2);
                 if lookahead != 0 && lookahead != 10 { state = 167; lexer.advance(false); continue; }
                 return result;
             }
             168 => {
-                result = true; lexer.set_result_symbol(aux_sym_line_comment_token3); lexer.mark_end();
+                result = true; lexer.accept_token(aux_sym_line_comment_token3);
                 if lookahead == 33 { state = 172; lexer.advance(false); continue; }
                 if lookahead == 47 { state = 174; lexer.advance(false); continue; }
                 if lookahead == 9 || 11 <= lookahead && lookahead <= 13 || lookahead == 32 { state = 170; lexer.advance(false); continue; }
@@ -1450,146 +1456,146 @@ pub(crate) fn ts_lex(lexer: &mut dyn Lexer, mut state: StateId) -> bool {
                 return result;
             }
             169 => {
-                result = true; lexer.set_result_symbol(aux_sym_line_comment_token3); lexer.mark_end();
+                result = true; lexer.accept_token(aux_sym_line_comment_token3);
                 if lookahead == 42 { state = 171; lexer.advance(false); continue; }
                 if lookahead == 47 { state = 171; lexer.advance(false); continue; }
                 if lookahead != 0 && lookahead != 10 { state = 171; lexer.advance(false); continue; }
                 return result;
             }
             170 => {
-                result = true; lexer.set_result_symbol(aux_sym_line_comment_token3); lexer.mark_end();
+                result = true; lexer.accept_token(aux_sym_line_comment_token3);
                 if lookahead == 47 { state = 169; lexer.advance(false); continue; }
                 if lookahead == 9 || 11 <= lookahead && lookahead <= 13 || lookahead == 32 { state = 170; lexer.advance(false); continue; }
                 if lookahead != 0 && (lookahead < 9 || 13 < lookahead) { state = 171; lexer.advance(false); continue; }
                 return result;
             }
             171 => {
-                result = true; lexer.set_result_symbol(aux_sym_line_comment_token3); lexer.mark_end();
+                result = true; lexer.accept_token(aux_sym_line_comment_token3);
                 if lookahead != 0 && lookahead != 10 { state = 171; lexer.advance(false); continue; }
                 return result;
             }
             172 => {
-                result = true; lexer.set_result_symbol(anon_sym_BANG2); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_BANG2);
                 return result;
             }
             173 => {
-                result = true; lexer.set_result_symbol(anon_sym_SLASH2); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_SLASH2);
                 return result;
             }
             174 => {
-                result = true; lexer.set_result_symbol(anon_sym_SLASH2); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_SLASH2);
                 if lookahead == 47 { state = 164; lexer.advance(false); continue; }
                 return result;
             }
             175 => {
-                result = true; lexer.set_result_symbol(anon_sym_SLASH_STAR); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_SLASH_STAR);
                 return result;
             }
             176 => {
-                result = true; lexer.set_result_symbol(anon_sym_SLASH_STAR); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_SLASH_STAR);
                 if lookahead != 0 && lookahead != 10 { state = 167; lexer.advance(false); continue; }
                 return result;
             }
             177 => {
-                result = true; lexer.set_result_symbol(anon_sym_STAR_SLASH); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_STAR_SLASH);
                 return result;
             }
             178 => {
-                result = true; lexer.set_result_symbol(sym_identifier); lexer.mark_end();
+                result = true; lexer.accept_token(sym_identifier);
                 if lookahead == 33 { state = 76; lexer.advance(false); continue; }
                 if set_contains(&sym_identifier_character_set_3, lookahead) { state = 192; lexer.advance(false); continue; }
                 return result;
             }
             179 => {
-                result = true; lexer.set_result_symbol(sym_identifier); lexer.mark_end();
+                result = true; lexer.accept_token(sym_identifier);
                 if lookahead == 34 { state = 158; lexer.advance(false); continue; }
                 if lookahead == 39 { state = 29; lexer.advance(false); continue; }
                 if set_contains(&sym_identifier_character_set_3, lookahead) { state = 192; lexer.advance(false); continue; }
                 return result;
             }
             180 => {
-                result = true; lexer.set_result_symbol(sym_identifier); lexer.mark_end();
+                result = true; lexer.accept_token(sym_identifier);
                 if lookahead == 34 { state = 158; lexer.advance(false); continue; }
                 if set_contains(&sym_identifier_character_set_3, lookahead) { state = 192; lexer.advance(false); continue; }
                 return result;
             }
             181 => {
-                result = true; lexer.set_result_symbol(sym_identifier); lexer.mark_end();
+                result = true; lexer.accept_token(sym_identifier);
                 if lookahead == 35 { state = 68; lexer.advance(false); continue; }
                 if set_contains(&sym_identifier_character_set_3, lookahead) { state = 192; lexer.advance(false); continue; }
                 return result;
             }
             182 => {
-                result = true; lexer.set_result_symbol(sym_identifier); lexer.mark_end();
+                result = true; lexer.accept_token(sym_identifier);
                 if lookahead == 95 { state = 189; lexer.advance(false); continue; }
                 if set_contains(&sym_identifier_character_set_3, lookahead) { state = 192; lexer.advance(false); continue; }
                 return result;
             }
             183 => {
-                result = true; lexer.set_result_symbol(sym_identifier); lexer.mark_end();
+                result = true; lexer.accept_token(sym_identifier);
                 if lookahead == 97 { state = 184; lexer.advance(false); continue; }
                 if set_contains(&sym_identifier_character_set_3, lookahead) { state = 192; lexer.advance(false); continue; }
                 return result;
             }
             184 => {
-                result = true; lexer.set_result_symbol(sym_identifier); lexer.mark_end();
+                result = true; lexer.accept_token(sym_identifier);
                 if lookahead == 99 { state = 188; lexer.advance(false); continue; }
                 if set_contains(&sym_identifier_character_set_3, lookahead) { state = 192; lexer.advance(false); continue; }
                 return result;
             }
             185 => {
-                result = true; lexer.set_result_symbol(sym_identifier); lexer.mark_end();
+                result = true; lexer.accept_token(sym_identifier);
                 if lookahead == 101 { state = 190; lexer.advance(false); continue; }
                 if set_contains(&sym_identifier_character_set_3, lookahead) { state = 192; lexer.advance(false); continue; }
                 return result;
             }
             186 => {
-                result = true; lexer.set_result_symbol(sym_identifier); lexer.mark_end();
+                result = true; lexer.accept_token(sym_identifier);
                 if lookahead == 108 { state = 185; lexer.advance(false); continue; }
                 if set_contains(&sym_identifier_character_set_3, lookahead) { state = 192; lexer.advance(false); continue; }
                 return result;
             }
             187 => {
-                result = true; lexer.set_result_symbol(sym_identifier); lexer.mark_end();
+                result = true; lexer.accept_token(sym_identifier);
                 if lookahead == 111 { state = 182; lexer.advance(false); continue; }
                 if set_contains(&sym_identifier_character_set_3, lookahead) { state = 192; lexer.advance(false); continue; }
                 return result;
             }
             188 => {
-                result = true; lexer.set_result_symbol(sym_identifier); lexer.mark_end();
+                result = true; lexer.accept_token(sym_identifier);
                 if lookahead == 114 { state = 187; lexer.advance(false); continue; }
                 if set_contains(&sym_identifier_character_set_3, lookahead) { state = 192; lexer.advance(false); continue; }
                 return result;
             }
             189 => {
-                result = true; lexer.set_result_symbol(sym_identifier); lexer.mark_end();
+                result = true; lexer.accept_token(sym_identifier);
                 if lookahead == 114 { state = 191; lexer.advance(false); continue; }
                 if set_contains(&sym_identifier_character_set_3, lookahead) { state = 192; lexer.advance(false); continue; }
                 return result;
             }
             190 => {
-                result = true; lexer.set_result_symbol(sym_identifier); lexer.mark_end();
+                result = true; lexer.accept_token(sym_identifier);
                 if lookahead == 115 { state = 178; lexer.advance(false); continue; }
                 if set_contains(&sym_identifier_character_set_3, lookahead) { state = 192; lexer.advance(false); continue; }
                 return result;
             }
             191 => {
-                result = true; lexer.set_result_symbol(sym_identifier); lexer.mark_end();
+                result = true; lexer.accept_token(sym_identifier);
                 if lookahead == 117 { state = 186; lexer.advance(false); continue; }
                 if set_contains(&sym_identifier_character_set_3, lookahead) { state = 192; lexer.advance(false); continue; }
                 return result;
             }
             192 => {
-                result = true; lexer.set_result_symbol(sym_identifier); lexer.mark_end();
+                result = true; lexer.accept_token(sym_identifier);
                 if set_contains(&sym_identifier_character_set_3, lookahead) { state = 192; lexer.advance(false); continue; }
                 return result;
             }
             193 => {
-                result = true; lexer.set_result_symbol(sym_shebang); lexer.mark_end();
+                result = true; lexer.accept_token(sym_shebang);
                 return result;
             }
             194 => {
-                result = true; lexer.set_result_symbol(sym_metavariable); lexer.mark_end();
+                result = true; lexer.accept_token(sym_metavariable);
                 if 48 <= lookahead && lookahead <= 57 || 65 <= lookahead && lookahead <= 90 || lookahead == 95 || 97 <= lookahead && lookahead <= 122 { state = 194; lexer.advance(false); continue; }
                 return result;
             }
@@ -1606,7 +1612,6 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
     loop {
         // C's `start:` label (reached again after each `next_state:` advance).
         let lookahead = lexer.lookahead();
-        let _eof = lexer.eof();
         match state {
             0 => {
                 if let Some(next) = advance_map(&[
@@ -1618,7 +1623,7 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             1 => {
-                result = true; lexer.set_result_symbol(anon_sym__); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym__);
                 return result;
             }
             2 => {
@@ -1725,7 +1730,7 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             20 => {
-                result = true; lexer.set_result_symbol(anon_sym_as); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_as);
                 if lookahead == 121 { state = 75; lexer.advance(false); continue; }
                 return result;
             }
@@ -1791,7 +1796,7 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             36 => {
-                result = true; lexer.set_result_symbol(anon_sym_fn); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_fn);
                 return result;
             }
             37 => {
@@ -1816,7 +1821,7 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             42 => {
-                result = true; lexer.set_result_symbol(anon_sym_i8); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_i8);
                 return result;
             }
             43 => {
@@ -1824,7 +1829,7 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             44 => {
-                result = true; lexer.set_result_symbol(anon_sym_if); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_if);
                 return result;
             }
             45 => {
@@ -1832,7 +1837,7 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             46 => {
-                result = true; lexer.set_result_symbol(anon_sym_in); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_in);
                 return result;
             }
             47 => {
@@ -1911,11 +1916,11 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             64 => {
-                result = true; lexer.set_result_symbol(anon_sym_tt); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_tt);
                 return result;
             }
             65 => {
-                result = true; lexer.set_result_symbol(anon_sym_ty); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_ty);
                 if lookahead == 112 { state = 124; lexer.advance(false); continue; }
                 return result;
             }
@@ -1933,7 +1938,7 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             69 => {
-                result = true; lexer.set_result_symbol(anon_sym_u8); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_u8);
                 return result;
             }
             70 => {
@@ -1997,7 +2002,7 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             84 => {
-                result = true; lexer.set_result_symbol(anon_sym_dyn); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_dyn);
                 return result;
             }
             85 => {
@@ -2017,11 +2022,11 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             89 => {
-                result = true; lexer.set_result_symbol(anon_sym_f32); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_f32);
                 return result;
             }
             90 => {
-                result = true; lexer.set_result_symbol(anon_sym_f64); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_f64);
                 return result;
             }
             91 => {
@@ -2029,11 +2034,11 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             92 => {
-                result = true; lexer.set_result_symbol(anon_sym_for); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_for);
                 return result;
             }
             93 => {
-                result = true; lexer.set_result_symbol(anon_sym_gen); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_gen);
                 return result;
             }
             94 => {
@@ -2041,15 +2046,15 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             95 => {
-                result = true; lexer.set_result_symbol(anon_sym_i16); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_i16);
                 return result;
             }
             96 => {
-                result = true; lexer.set_result_symbol(anon_sym_i32); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_i32);
                 return result;
             }
             97 => {
-                result = true; lexer.set_result_symbol(anon_sym_i64); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_i64);
                 return result;
             }
             98 => {
@@ -2069,7 +2074,7 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             102 => {
-                result = true; lexer.set_result_symbol(anon_sym_let); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_let);
                 return result;
             }
             103 => {
@@ -2093,7 +2098,7 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             108 => {
-                result = true; lexer.set_result_symbol(anon_sym_mod); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_mod);
                 return result;
             }
             109 => {
@@ -2101,25 +2106,25 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             110 => {
-                result = true; lexer.set_result_symbol(sym_mutable_specifier); lexer.mark_end();
+                result = true; lexer.accept_token(sym_mutable_specifier);
                 return result;
             }
             111 => {
-                result = true; lexer.set_result_symbol(anon_sym_pat); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_pat);
                 if lookahead == 95 { state = 163; lexer.advance(false); continue; }
                 if lookahead == 104 { state = 164; lexer.advance(false); continue; }
                 return result;
             }
             112 => {
-                result = true; lexer.set_result_symbol(anon_sym_pub); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_pub);
                 return result;
             }
             113 => {
-                result = true; lexer.set_result_symbol(anon_sym_raw); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_raw);
                 return result;
             }
             114 => {
-                result = true; lexer.set_result_symbol(anon_sym_ref); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_ref);
                 return result;
             }
             115 => {
@@ -2139,7 +2144,7 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             119 => {
-                result = true; lexer.set_result_symbol(anon_sym_str); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_str);
                 if lookahead == 117 { state = 169; lexer.advance(false); continue; }
                 return result;
             }
@@ -2156,7 +2161,7 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             123 => {
-                result = true; lexer.set_result_symbol(anon_sym_try); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_try);
                 return result;
             }
             124 => {
@@ -2168,15 +2173,15 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             126 => {
-                result = true; lexer.set_result_symbol(anon_sym_u16); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_u16);
                 return result;
             }
             127 => {
-                result = true; lexer.set_result_symbol(anon_sym_u32); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_u32);
                 return result;
             }
             128 => {
-                result = true; lexer.set_result_symbol(anon_sym_u64); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_u64);
                 return result;
             }
             129 => {
@@ -2188,7 +2193,7 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             131 => {
-                result = true; lexer.set_result_symbol(anon_sym_use); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_use);
                 return result;
             }
             132 => {
@@ -2196,7 +2201,7 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             133 => {
-                result = true; lexer.set_result_symbol(anon_sym_vis); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_vis);
                 return result;
             }
             134 => {
@@ -2224,7 +2229,7 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             140 => {
-                result = true; lexer.set_result_symbol(anon_sym_bool); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_bool);
                 return result;
             }
             141 => {
@@ -2232,7 +2237,7 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             142 => {
-                result = true; lexer.set_result_symbol(anon_sym_char); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_char);
                 return result;
             }
             143 => {
@@ -2252,15 +2257,15 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             147 => {
-                result = true; lexer.set_result_symbol(anon_sym_else); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_else);
                 return result;
             }
             148 => {
-                result = true; lexer.set_result_symbol(anon_sym_enum); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_enum);
                 return result;
             }
             149 => {
-                result = true; lexer.set_result_symbol(anon_sym_expr); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_expr);
                 if lookahead == 95 { state = 189; lexer.advance(false); continue; }
                 return result;
             }
@@ -2273,7 +2278,7 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             152 => {
-                result = true; lexer.set_result_symbol(anon_sym_i128); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_i128);
                 return result;
             }
             153 => {
@@ -2281,7 +2286,7 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             154 => {
-                result = true; lexer.set_result_symbol(anon_sym_impl); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_impl);
                 return result;
             }
             155 => {
@@ -2289,7 +2294,7 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             156 => {
-                result = true; lexer.set_result_symbol(anon_sym_item); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_item);
                 return result;
             }
             157 => {
@@ -2301,7 +2306,7 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             159 => {
-                result = true; lexer.set_result_symbol(anon_sym_loop); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_loop);
                 return result;
             }
             160 => {
@@ -2309,11 +2314,11 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             161 => {
-                result = true; lexer.set_result_symbol(anon_sym_meta); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_meta);
                 return result;
             }
             162 => {
-                result = true; lexer.set_result_symbol(anon_sym_move); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_move);
                 return result;
             }
             163 => {
@@ -2321,7 +2326,7 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             164 => {
-                result = true; lexer.set_result_symbol(anon_sym_path); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_path);
                 return result;
             }
             165 => {
@@ -2329,7 +2334,7 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             166 => {
-                result = true; lexer.set_result_symbol(sym_self); lexer.mark_end();
+                result = true; lexer.accept_token(sym_self);
                 return result;
             }
             167 => {
@@ -2337,7 +2342,7 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             168 => {
-                result = true; lexer.set_result_symbol(anon_sym_stmt); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_stmt);
                 return result;
             }
             169 => {
@@ -2353,15 +2358,15 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             172 => {
-                result = true; lexer.set_result_symbol(anon_sym_true); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_true);
                 return result;
             }
             173 => {
-                result = true; lexer.set_result_symbol(anon_sym_type); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_type);
                 return result;
             }
             174 => {
-                result = true; lexer.set_result_symbol(anon_sym_u128); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_u128);
                 return result;
             }
             175 => {
@@ -2389,23 +2394,23 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             181 => {
-                result = true; lexer.set_result_symbol(anon_sym_async); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_async);
                 return result;
             }
             182 => {
-                result = true; lexer.set_result_symbol(anon_sym_await); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_await);
                 return result;
             }
             183 => {
-                result = true; lexer.set_result_symbol(anon_sym_block); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_block);
                 return result;
             }
             184 => {
-                result = true; lexer.set_result_symbol(anon_sym_break); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_break);
                 return result;
             }
             185 => {
-                result = true; lexer.set_result_symbol(anon_sym_const); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_const);
                 return result;
             }
             186 => {
@@ -2413,7 +2418,7 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             187 => {
-                result = true; lexer.set_result_symbol(sym_crate); lexer.mark_end();
+                result = true; lexer.accept_token(sym_crate);
                 return result;
             }
             188 => {
@@ -2429,15 +2434,15 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             191 => {
-                result = true; lexer.set_result_symbol(anon_sym_false); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_false);
                 return result;
             }
             192 => {
-                result = true; lexer.set_result_symbol(anon_sym_ident); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_ident);
                 return result;
             }
             193 => {
-                result = true; lexer.set_result_symbol(anon_sym_isize); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_isize);
                 return result;
             }
             194 => {
@@ -2449,7 +2454,7 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             196 => {
-                result = true; lexer.set_result_symbol(anon_sym_match); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_match);
                 return result;
             }
             197 => {
@@ -2469,15 +2474,15 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             201 => {
-                result = true; lexer.set_result_symbol(sym_super); lexer.mark_end();
+                result = true; lexer.accept_token(sym_super);
                 return result;
             }
             202 => {
-                result = true; lexer.set_result_symbol(anon_sym_trait); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_trait);
                 return result;
             }
             203 => {
-                result = true; lexer.set_result_symbol(anon_sym_union); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_union);
                 return result;
             }
             204 => {
@@ -2485,19 +2490,19 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             205 => {
-                result = true; lexer.set_result_symbol(anon_sym_usize); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_usize);
                 return result;
             }
             206 => {
-                result = true; lexer.set_result_symbol(anon_sym_where); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_where);
                 return result;
             }
             207 => {
-                result = true; lexer.set_result_symbol(anon_sym_while); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_while);
                 return result;
             }
             208 => {
-                result = true; lexer.set_result_symbol(anon_sym_yield); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_yield);
                 return result;
             }
             209 => {
@@ -2513,7 +2518,7 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             212 => {
-                result = true; lexer.set_result_symbol(anon_sym_extern); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_extern);
                 return result;
             }
             213 => {
@@ -2529,19 +2534,19 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             216 => {
-                result = true; lexer.set_result_symbol(anon_sym_return); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_return);
                 return result;
             }
             217 => {
-                result = true; lexer.set_result_symbol(anon_sym_static); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_static);
                 return result;
             }
             218 => {
-                result = true; lexer.set_result_symbol(anon_sym_struct); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_struct);
                 return result;
             }
             219 => {
-                result = true; lexer.set_result_symbol(anon_sym_unsafe); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_unsafe);
                 return result;
             }
             220 => {
@@ -2549,7 +2554,7 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             221 => {
-                result = true; lexer.set_result_symbol(anon_sym_default); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_default);
                 return result;
             }
             222 => {
@@ -2561,7 +2566,7 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             224 => {
-                result = true; lexer.set_result_symbol(anon_sym_literal); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_literal);
                 return result;
             }
             225 => {
@@ -2569,7 +2574,7 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             226 => {
-                result = true; lexer.set_result_symbol(anon_sym_continue); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_continue);
                 return result;
             }
             227 => {
@@ -2577,7 +2582,7 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             228 => {
-                result = true; lexer.set_result_symbol(anon_sym_lifetime); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_lifetime);
                 return result;
             }
             229 => {
@@ -2585,11 +2590,11 @@ pub(crate) fn ts_lex_keywords(lexer: &mut dyn Lexer, mut state: StateId) -> bool
                 return result;
             }
             230 => {
-                result = true; lexer.set_result_symbol(anon_sym_expr_2021); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_expr_2021);
                 return result;
             }
             231 => {
-                result = true; lexer.set_result_symbol(anon_sym_pat_param); lexer.mark_end();
+                result = true; lexer.accept_token(anon_sym_pat_param);
                 return result;
             }
             _ => return false,

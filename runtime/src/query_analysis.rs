@@ -142,7 +142,7 @@ pub(crate) fn ts_query__perform_analysis(
                     ..AnalysisSubgraphNode::default()
                 };
                 if let Some(action) = lookahead.actions.last() {
-                    if let ParseAction::Shift { state, extra, .. } = *action.action() {
+                    if let ParseAction::Shift { state, extra, .. } = action {
                         if !extra {
                             successor.state = state;
                             successor.child_index = (successor.child_index + 1) & 0x7f;
@@ -386,8 +386,8 @@ pub(crate) fn ts_query__analyze_patterns(query: &mut CompiledQuery) -> Result<()
         let mut lookahead = ts_language_lookaheads(&language, state);
         while ts_lookahead_iterator__next(&mut lookahead) {
             if !lookahead.actions.is_empty() {
-                for action in lookahead.actions {
-                    match *action.action() {
+                for action in lookahead.actions.iter() {
+                    match action {
                         ParseAction::Reduce {
                             symbol,
                             child_count,
