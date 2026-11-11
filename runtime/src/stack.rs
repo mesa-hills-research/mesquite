@@ -26,8 +26,14 @@ pub(crate) struct StackLink {
 #[derive(Debug, Default)]
 pub(crate) struct StackLinks {
     first: Option<StackLink>,
-    rest: Option<Box<[Option<StackLink>; MAX_LINK_COUNT - 1]>>,
+    rest: Option<OverflowLinks>,
 }
+
+/// The links of a node after its first, allocated once paths merge into it.
+type OverflowLinks = Box<[Option<StackLink>; MAX_LINK_COUNT - 1]>;
+
+/// How many emptied overflow link arrays the arena keeps.
+const MAX_SPARE_OVERFLOW_LINKS: usize = 64;
 
 impl StackLinks {
     fn iter(&self) -> impl Iterator<Item = &Option<StackLink>> {
@@ -82,6 +88,21 @@ pub(crate) struct StackArena {
     // inert scalar fields avoids zeroing the whole header during recycling.
     pub nodes: Vec<StackNode>,
     pub free: Vec<StackNodeId>,
+    /// Emptied overflow link arrays of released nodes. C keeps every node's links
+    /// inline. Here a merge that gives a node its second link takes an array from
+    /// these, so ambiguous inputs, which merge versions on most tokens, don't
+    /// allocate and free one each time. Vacant slots still hold none.
+    pub spare_overflow_links: Vec<OverflowLinks>,
+}
+
+impl StackArena {
+    /// Keeps a released node's emptied overflow links for a later merge.
+    fn recycle_overflow_links(&mut self, links: OverflowLinks) {
+        debug_assert!(links.iter().all(Option::is_none));
+        if self.spare_overflow_links.len() < MAX_SPARE_OVERFLOW_LINKS {
+            self.spare_overflow_links.push(links);
+        }
+    }
 }
 #[derive(Clone, Debug)]
 pub(crate) struct StackIterator {
@@ -239,7 +260,9 @@ pub(crate) fn stack_node_release(
                     if data.link_count <= 1 {
                         let first = data.links[0].take();
                         data.link_count = 0;
-                        data.links.rest = None;
+                        if let Some(rest) = data.links.rest.take() {
+                            arena.recycle_overflow_links(rest);
+                        }
                         if let Some(first) = first {
                             if !first.subtree.is_null() {
                                 ts_subtree_release(subtree_pool, first.subtree);
@@ -267,6 +290,9 @@ pub(crate) fn stack_node_release(
                             if !link.subtree.is_null() {
                                 pending.push(Release::Subtree(link.subtree));
                             }
+                        }
+                        if let Some(rest) = data.links.rest.take() {
+                            arena.recycle_overflow_links(rest);
                         }
                     }
                 }
@@ -457,7 +483,19 @@ pub(crate) fn stack_node_add_link(
         node_count = node_count.wrapping_add(stack__subtree_node_count(&link.subtree));
         precedence = precedence.wrapping_add(ts_subtree_dynamic_precedence(&link.subtree));
     }
-    let data = arena.node_mut(node);
+    let StackArena {
+        nodes,
+        spare_overflow_links,
+        ..
+    } = arena;
+    let data = &mut nodes[node.0];
+    if data.link_count >= 1 && data.links.rest.is_none() {
+        data.links.rest = Some(
+            spare_overflow_links
+                .pop()
+                .unwrap_or_else(|| Box::new(std::array::from_fn(|_| None))),
+        );
+    }
     data.links[data.link_count as usize] = Some(link);
     data.link_count += 1;
     data.node_count = data.node_count.max(node_count);
@@ -617,6 +655,7 @@ pub(crate) fn ts_stack_new() -> Stack {
     let mut arena = StackArena {
         nodes: Vec::new(),
         free: Vec::with_capacity(MAX_NODE_POOL_SIZE),
+        spare_overflow_links: Vec::new(),
     };
     let base_node = stack_node_new(&mut arena, None, Subtree::Null, false, 1);
     // ts_stack_clear on a newly empty stack only retains the base and adds an
@@ -1632,6 +1671,7 @@ mod version_tests {
             arena: StackArena {
                 nodes: vec![base, error, top],
                 free: Vec::new(),
+                spare_overflow_links: Vec::new(),
             },
             base_node: StackNodeId(0),
         }
@@ -2503,7 +2543,13 @@ mod tests {
             for pending in [false, true] {
                 let fresh = construct(tree.clone(), pending, false);
                 let recycled = construct(tree.clone(), pending, true);
-                assert_eq!(format!("{fresh:?}"), format!("{recycled:?}"));
+                assert_eq!(
+                    format!("{:?} {:?}", fresh.nodes, fresh.free),
+                    format!("{:?} {:?}", recycled.nodes, recycled.free)
+                );
+                // The released node's overflow links wait for the next merge.
+                assert!(fresh.spare_overflow_links.is_empty());
+                assert_eq!(recycled.spare_overflow_links.len(), 1);
             }
         }
     }
@@ -2600,6 +2646,34 @@ mod tests {
         stack_node_release(&mut arena, right, &mut pool);
         stack_node_release(&mut arena, top, &mut pool);
         assert!(arena.nodes.iter().all(|node| node.ref_count == 0));
+    }
+
+    #[test]
+    fn merges_reuse_released_overflow_links() {
+        let mut arena = StackArena::default();
+        let mut pool = SubtreePool::default();
+        let p = stack_node_new(&mut arena, None, Subtree::Null, false, 1);
+        let q = stack_node_new(&mut arena, None, Subtree::Null, false, 2);
+        // Each new node takes over a reference to its predecessor.
+        stack_node_retain(&mut arena, p);
+        let merged = stack_node_new(&mut arena, Some(p), leaf(1, 0), false, 3);
+        stack_node_add_link(&mut arena, merged, null_link(q), &mut pool);
+        assert_eq!(arena.node(merged).link_count, 2);
+        assert!(arena.node(merged).links.rest.is_some());
+        stack_node_release(&mut arena, merged, &mut pool);
+        // The vacant slot holds no links; its array waits for the next merge.
+        assert!(arena.nodes[merged.0].links.rest.is_none());
+        assert_eq!(arena.spare_overflow_links.len(), 1);
+        stack_node_retain(&mut arena, p);
+        let again = stack_node_new(&mut arena, Some(p), leaf(2, 0), false, 3);
+        stack_node_add_link(&mut arena, again, null_link(q), &mut pool);
+        assert!(arena.spare_overflow_links.is_empty());
+        assert_eq!(arena.node(again).link_count, 2);
+        stack_node_release(&mut arena, again, &mut pool);
+        stack_node_release(&mut arena, p, &mut pool);
+        stack_node_release(&mut arena, q, &mut pool);
+        assert!(arena.nodes.iter().all(|node| node.ref_count == 0));
+        assert_eq!(arena.spare_overflow_links.len(), 1);
     }
 
     #[test]
