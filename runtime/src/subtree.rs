@@ -542,10 +542,16 @@ pub(crate) fn ts_subtree_compress(
             break;
         }
 
-        let mut child = std::mem::take(&mut current.heap_mut().unwrap().children[0]);
-        let mut grandchild = std::mem::take(&mut child.heap_mut().unwrap().children[0]);
-        let last = grandchild.heap_mut().unwrap().children.last_mut().unwrap();
-        child.heap_mut().unwrap().children[0] = std::mem::take(last);
+        // Each mutable access proves an Arc unique with an atomic operation, so
+        // every node is accessed once on the way down and once on the way up.
+        let mut child = std::mem::take(&mut unique_heap_mut(&mut current).children[0]);
+        let child_data = unique_heap_mut(&mut child);
+        let mut grandchild = std::mem::take(&mut child_data.children[0]);
+        let last = unique_heap_mut(&mut grandchild)
+            .children
+            .last_mut()
+            .unwrap();
+        child_data.children[0] = std::mem::take(last);
         *last = child;
         // The stack owns the detached ancestors. Their first-child slots are
         // restored on the way back up, avoiding both aliases and recursion.
@@ -555,15 +561,26 @@ pub(crate) fn ts_subtree_compress(
 
     while stack.len() > initial_stack_size {
         let mut parent = stack.pop().unwrap();
-        let child = &mut parent.heap_mut().unwrap().children[0];
+        let parent_data = unique_heap_mut(&mut parent);
+        let child = &mut parent_data.children[0];
         *child = current;
-        let grandchild = child.heap_mut().unwrap().children.last_mut().unwrap();
-        ts_subtree_summarize_children(grandchild, language);
-        ts_subtree_summarize_children(child, language);
-        ts_subtree_summarize_children(&mut parent, language);
+        let child_data = unique_heap_mut(child);
+        let grandchild = unique_heap_mut(child_data.children.last_mut().unwrap());
+        summarize_children(grandchild, language);
+        summarize_children(child_data, language);
+        summarize_children(parent_data, language);
         current = parent;
     }
     *tree = current;
+}
+
+/// The header of a heap subtree that has no other owner.
+#[inline]
+fn unique_heap_mut(tree: &mut Subtree) -> &mut SubtreeHeapData {
+    let Subtree::Heap(data) = tree else {
+        unreachable!("only heap branches are rotated");
+    };
+    Arc::get_mut(data).expect("rotated subtrees are uniquely owned")
 }
 
 pub(crate) fn ts_subtree_summarize_children(tree: &mut Subtree, language: &Language) {
