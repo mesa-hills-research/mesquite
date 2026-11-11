@@ -2246,52 +2246,68 @@ pub(crate) fn ts_parser__balance_subtree(
             return true;
         }
     }
-    // Borrow disjoint child slots instead of detaching/re-attaching every
-    // visited node. This preserves Arc uniqueness without reference counting.
+    // The walk only reads. Most visited nodes need no rotation, and proving an
+    // Arc unique for mutable access costs an atomic operation per node. Only a
+    // node that compresses is reached mutably, along its path from the root.
     let mut finished_tree = std::mem::take(&mut parser.finished_tree);
-    let mut cursor =
-        BalanceCursor::new(&mut finished_tree, std::mem::take(&mut parser.balance_path));
-    let mut completed = true;
-    while let Some(tree) = cursor.next() {
-        if !ts_parser__check_progress(parser, context, None, None, 1) {
-            completed = false;
-            break;
-        }
-        if ts_subtree_repeat_depth(tree) > 0 {
-            let children = ts_subtree_children(tree);
-            let repeat_delta = i64::from(ts_subtree_repeat_depth(&children[0]))
-                - i64::from(ts_subtree_repeat_depth(children.last().unwrap()));
-            if repeat_delta > 0 {
-                let mut i = repeat_delta as u32 / 2;
-                while i > 0 {
-                    ts_subtree_compress(
-                        tree,
-                        i,
-                        &parser.language.expect("parser language"),
-                        &mut parser.tree_pool.tree_stack,
-                    );
-                    // C narrows this to uint8_t, including wrapping to zero.
-                    let operations = (i >> 4).max(1) as u8;
-                    if !ts_parser__check_progress(
-                        parser,
-                        context,
-                        None,
-                        None,
-                        u32::from(operations),
-                    ) {
-                        completed = false;
-                        break;
-                    }
-                    i /= 2;
+    let mut path = std::mem::take(&mut parser.balance_path);
+    let mut below_path = false;
+    let completed = loop {
+        let mut cursor = if below_path {
+            let mut cursor = BalanceCursor::below(&finished_tree, path);
+            cursor.push_children(BalanceCursor::node(&finished_tree, &cursor.path));
+            cursor
+        } else {
+            BalanceCursor::new(&finished_tree, path)
+        };
+        let mut compression = None;
+        let mut completed = true;
+        while let Some(tree) = cursor.next() {
+            if !ts_parser__check_progress(parser, context, None, None, 1) {
+                completed = false;
+                break;
+            }
+            if ts_subtree_repeat_depth(tree) > 0 {
+                let children = ts_subtree_children(tree);
+                let repeat_delta = i64::from(ts_subtree_repeat_depth(&children[0]))
+                    - i64::from(ts_subtree_repeat_depth(children.last().unwrap()));
+                if repeat_delta > 0 && repeat_delta as u32 / 2 > 0 {
+                    compression = Some(repeat_delta as u32 / 2);
+                    break;
                 }
             }
+            cursor.push_children(tree);
+        }
+        path = cursor.path;
+        if !completed {
+            break false;
+        }
+        let Some(mut i) = compression else {
+            break true;
+        };
+        let tree = BalanceCursor::node_mut(&mut finished_tree, &path);
+        while i > 0 {
+            ts_subtree_compress(
+                tree,
+                i,
+                &parser.language.expect("parser language"),
+                &mut parser.tree_pool.tree_stack,
+            );
+            // C narrows this to uint8_t, including wrapping to zero.
+            let operations = (i >> 4).max(1) as u8;
+            if !ts_parser__check_progress(parser, context, None, None, u32::from(operations)) {
+                completed = false;
+                break;
+            }
+            i /= 2;
         }
         if !completed {
-            break;
+            // Resuming visits this node again, as C leaves it on its worklist.
+            break false;
         }
-        cursor.push_children(tree);
-    }
-    parser.balance_path = cursor.path;
+        below_path = true;
+    };
+    parser.balance_path = path;
     if completed {
         parser.balance_path.clear();
     }
@@ -2714,11 +2730,11 @@ fn parser_log_message(parser: &mut Parser, message: std::fmt::Arguments<'_>) {
     }
 }
 
-/// Disjoint mutable child slots in C's LIFO work order. Borrowing the slots
-/// neither increments reference counts nor moves tree handles. A path to the
-/// current node is enough to reconstruct pending left siblings after cancellation.
+/// Uniquely owned branches in C's LIFO work order, borrowed without reference
+/// counting. A path to the current node is enough to reconstruct the pending
+/// left siblings, after cancellation or after the node at the path compressed.
 struct BalanceCursor<'tree> {
-    pending: Vec<(&'tree mut Subtree, usize, usize)>,
+    pending: Vec<(&'tree Subtree, usize, usize)>,
     path: Vec<usize>,
 }
 
@@ -2727,33 +2743,53 @@ impl<'tree> BalanceCursor<'tree> {
         matches!(tree, Subtree::Heap(data) if !data.children.is_empty() && Arc::strong_count(data) == 1)
     }
 
-    fn children_mut(tree: &mut Subtree) -> &mut Vec<Subtree> {
-        let Subtree::Heap(data) = tree else {
-            unreachable!("only heap branches are balanced");
-        };
-        &mut Arc::get_mut(data)
-            .expect("balancing only visits uniquely owned branches")
-            .children
+    /// The walk resumes at the node at `path`.
+    fn new(tree: &'tree Subtree, path: Vec<usize>) -> Self {
+        let mut cursor = Self::below(tree, path);
+        let node = Self::node(tree, &cursor.path);
+        let depth = cursor.path.len();
+        let index = cursor.path.last().copied().unwrap_or(0);
+        cursor.pending.push((node, depth, index));
+        cursor
     }
 
-    fn new(mut tree: &'tree mut Subtree, path: Vec<usize>) -> Self {
+    /// The walk resumes after the node at `path`, which the caller has visited.
+    fn below(mut tree: &'tree Subtree, path: Vec<usize>) -> Self {
         let mut pending = Vec::new();
         // Ancestors and their right siblings have already been processed. Their
-        // left siblings remain pending, below the canceled node in the worklist.
+        // left siblings remain pending, below the node at the path.
         for (depth, &index) in path.iter().enumerate() {
-            let (left, right) = Self::children_mut(tree).split_at_mut(index);
-            for (index, child) in left.iter_mut().enumerate() {
+            let children = ts_subtree_children(tree);
+            for (index, child) in children[..index].iter().enumerate() {
                 if Self::is_unique_branch(child) {
                     pending.push((child, depth + 1, index));
                 }
             }
-            tree = &mut right[0];
+            tree = &children[index];
         }
-        pending.push((tree, path.len(), path.last().copied().unwrap_or(0)));
         Self { pending, path }
     }
 
-    fn next(&mut self) -> Option<&'tree mut Subtree> {
+    fn node<'a>(mut tree: &'a Subtree, path: &[usize]) -> &'a Subtree {
+        for &index in path {
+            tree = &ts_subtree_children(tree)[index];
+        }
+        tree
+    }
+
+    fn node_mut<'a>(mut tree: &'a mut Subtree, path: &[usize]) -> &'a mut Subtree {
+        for &index in path {
+            let Subtree::Heap(data) = tree else {
+                unreachable!("only heap branches are balanced");
+            };
+            tree = &mut Arc::get_mut(data)
+                .expect("balancing only visits uniquely owned branches")
+                .children[index];
+        }
+        tree
+    }
+
+    fn next(&mut self) -> Option<&'tree Subtree> {
         let (tree, depth, index) = self.pending.pop()?;
         self.path.truncate(depth.saturating_sub(1));
         if depth > 0 {
@@ -2762,9 +2798,9 @@ impl<'tree> BalanceCursor<'tree> {
         Some(tree)
     }
 
-    fn push_children(&mut self, tree: &'tree mut Subtree) {
+    fn push_children(&mut self, tree: &'tree Subtree) {
         let depth = self.path.len() + 1;
-        for (index, child) in Self::children_mut(tree).iter_mut().enumerate() {
+        for (index, child) in ts_subtree_children(tree).iter().enumerate() {
             if Self::is_unique_branch(child) {
                 self.pending.push((child, depth, index));
             }
@@ -3611,7 +3647,7 @@ mod tests {
     #[test]
     fn balancing_cursor_preserves_ownership_and_lifo_order() {
         let shared = branch(7, vec![Subtree::inline(InlineLeaf::default())]);
-        let mut tree = branch(
+        let tree = branch(
             1,
             vec![
                 branch(2, vec![Subtree::inline(InlineLeaf::default())]),
@@ -3626,7 +3662,7 @@ mod tests {
             Subtree::Heap(data) => data,
             _ => unreachable!(),
         });
-        let mut cursor = BalanceCursor::new(&mut tree, Vec::new());
+        let mut cursor = BalanceCursor::new(&tree, Vec::new());
         let mut symbols = Vec::new();
         while let Some(tree) = cursor.next() {
             assert!(BalanceCursor::is_unique_branch(tree));
@@ -3648,7 +3684,7 @@ mod tests {
     fn balancing_resume_rebuilds_pending_left_siblings_at_every_boundary() {
         let shared = branch(7, vec![Subtree::inline(InlineLeaf::default())]);
         let leaf = || Subtree::inline(InlineLeaf::default());
-        let mut tree = branch(
+        let tree = branch(
             1,
             vec![
                 branch(2, vec![branch(5, vec![leaf()]), branch(6, vec![leaf()])]),
@@ -3658,7 +3694,7 @@ mod tests {
         );
         let expected = [1, 3, 4, 2, 6, 5];
         for boundary in 0..expected.len() {
-            let mut cursor = BalanceCursor::new(&mut tree, Vec::new());
+            let mut cursor = BalanceCursor::new(&tree, Vec::new());
             for &symbol in &expected[..boundary] {
                 let node = cursor.next().unwrap();
                 assert_eq!(ts_subtree_symbol(node), symbol);
@@ -3672,7 +3708,7 @@ mod tests {
             // No root or child slot is left detached while parsing is canceled.
             assert_eq!(ts_subtree_symbol(&tree), 1);
             assert!(ts_subtree_children(&tree)[1].ptr_eq(&shared));
-            let mut resumed = BalanceCursor::new(&mut tree, path);
+            let mut resumed = BalanceCursor::new(&tree, path);
             let mut symbols = Vec::new();
             while let Some(node) = resumed.next() {
                 symbols.push(ts_subtree_symbol(node));
@@ -3688,7 +3724,7 @@ mod tests {
         let expected = [1, 5, 7, 6, 4, 2, 3];
         for stop in 0..expected.len() {
             let leaf = || Subtree::inline(InlineLeaf::default());
-            let mut tree = branch(
+            let tree = branch(
                 1,
                 vec![
                     leaf(),
@@ -3698,7 +3734,7 @@ mod tests {
                     branch(5, vec![branch(6, vec![leaf()]), branch(7, vec![leaf()])]),
                 ],
             );
-            let mut cursor = BalanceCursor::new(&mut tree, Vec::new());
+            let mut cursor = BalanceCursor::new(&tree, Vec::new());
             let mut visited = Vec::new();
             for _ in 0..stop {
                 let node = cursor.next().unwrap();
@@ -3711,7 +3747,7 @@ mod tests {
 
             // No restoration step or extra Arc owner is needed on cancellation.
             assert_eq!(ts_subtree_symbol(&tree), 1);
-            let mut resumed = BalanceCursor::new(&mut tree, path);
+            let mut resumed = BalanceCursor::new(&tree, path);
             while let Some(node) = resumed.next() {
                 visited.push(ts_subtree_symbol(node));
                 resumed.push_children(node);
