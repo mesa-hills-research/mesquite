@@ -1743,7 +1743,7 @@ mod version_tests {
                                 visible_descendant_count: 5,
                                 ..BranchData::default()
                             }),
-                            children: children.into(),
+                            children,
                             ..SubtreeHeapData::default()
                         })),
                         6,
@@ -1803,7 +1803,7 @@ mod version_tests {
                                     visible_descendant_count: 7,
                                     ..BranchData::default()
                                 }),
-                                children: children.into(),
+                                children,
                                 ..SubtreeHeapData::default()
                             })),
                             3,
@@ -1845,7 +1845,7 @@ mod version_tests {
                 assert_eq!(children.len(), 1);
                 (
                     Subtree::Heap(Arc::new(SubtreeHeapData {
-                        children: children.into(),
+                        children,
                         payload: SubtreePayload::Branch(BranchData::default()),
                         ..SubtreeHeapData::default()
                     })),

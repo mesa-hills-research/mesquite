@@ -2967,14 +2967,14 @@ mod summary_tests {
         let leaf = |next: &mut dyn FnMut() -> u32| {
             // Rows are rare, so that sizes on one line, where a summary's
             // column dependence turns on its previous size, are common.
-            let rows = u32::from(next() % 12 == 0);
+            let rows = u32::from(next().is_multiple_of(12));
             let bytes = 1 + next() % 300;
             Subtree::Heap(Arc::new(SubtreeHeapData {
                 symbol: 1,
                 padding: Length {
                     bytes: next() % 4,
                     extent: Point {
-                        row: u32::from(next() % 12 == 0),
+                        row: u32::from(next().is_multiple_of(12)),
                         column: next() % 4,
                     },
                 },
@@ -2985,9 +2985,9 @@ mod summary_tests {
                         column: bytes,
                     },
                 },
-                depends_on_column: next() % 3 == 0,
-                fragile_left: next() % 7 == 0,
-                fragile_right: next() % 7 == 0,
+                depends_on_column: next().is_multiple_of(3),
+                fragile_left: next().is_multiple_of(7),
+                fragile_right: next().is_multiple_of(7),
                 children: Children::new(),
                 payload: SubtreePayload::Leaf,
                 ..SubtreeHeapData::default()
