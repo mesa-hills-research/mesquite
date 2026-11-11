@@ -41,10 +41,10 @@ with C built by GCC 13.4 or Clang 21.1.
 | Go | 0.66 | 0.80 |
 | Java | 0.66 | 0.79 |
 
-Mesquite is faster on 57 of the 58 grammars. Its grammar tables are read in place from
-the binary, as C reads its static arrays, so a grammar's first use takes at most 0.1 ms.
-Every grammar, memory, binary size, reparsing, the machine, the method and how to compare
-on your own files are in [docs/speed.md](docs/speed.md).
+Mesquite is faster on 57 of the 58 grammars. Its large grammar tables are read in place
+from the binary, as C reads its static arrays, so a grammar's first use takes at most 0.1
+ms. Every grammar, memory, binary size, reparsing, the machine, the method and how to
+compare on your own files are in [docs/speed.md](docs/speed.md).
 
 ## Installation
 

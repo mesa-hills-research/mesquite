@@ -177,9 +177,9 @@ pub enum ParseActionEntry {
 }
 
 impl ParseActionEntry {
-    /// The action of an [`ParseActionEntry::Action`] entry. The decoder checks that the
-    /// `count` entries after every header are actions, so this only panics when called
-    /// on a header.
+    /// The action of an [`ParseActionEntry::Action`] entry. Panics when called on a
+    /// header. [`LanguageTables::validate`] checks that the `count` entries after every
+    /// header are actions.
     pub fn action(&self) -> &ParseAction {
         match self {
             ParseActionEntry::Action(action) => action,

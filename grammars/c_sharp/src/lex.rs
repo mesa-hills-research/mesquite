@@ -6,7 +6,7 @@
 //! Each C `case` is a `match` arm, run once per character: `ADVANCE(n)` and
 //! `SKIP(n)` set the state, call `lexer.advance(skip)` and start the next round
 //! (C's `goto next_state`), `ACCEPT_TOKEN` is `lexer.accept_token`, and
-//! `END_STATE()` returns the result. C reads `eof` for every character; here only
+//! `END_STATE()` returns the result. C reads `eof` for every character. Here only
 //! the arms that test it call `lexer.eof()`.
 #![allow(non_upper_case_globals, unreachable_code, clippy::all)]
 

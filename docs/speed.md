@@ -72,29 +72,31 @@ grammar it takes 1.09 times as long as C built with GCC 13.4, and 1.06 times Cla
 
 ## Method
 
-- **Machine:** AMD Ryzen 7 9800X3D (8 cores, 96 MB of L3 cache) with Ubuntu 26.04 and
-  Linux 7.0, running nothing else. Each process is pinned to its own core.
-- **Builds:** Cargo's release profile (`opt-level = 3`, no LTO) for both, with Rust 1.97.1.
-  The C library and grammars are compiled as their crates compile them (`-O3`,
-  assertions on) by GCC 15.2 (Ubuntu's default), GCC 13.4 or Clang 21.1. With
-  `-DNDEBUG`, GCC 15.2's build takes 0.98 times as long.
-- **Inputs:** up to 300 files per grammar, picked by a hash of the path, from the
-  grammars' test corpora and from real projects in each language at fixed commits, and
-  300 files of the Linux 6.17 sources for the kernel row. The JSDoc inputs are doc
-  comments from JavaScript and TypeScript files.
-- **Timing:** parsing alone, with a fresh parser per file. Each round parses every file
-  five times with each library, in a random order of the libraries, from a fresh copy of
-  each binary. A grammar's ratio is the median over 20 rounds of Mesquite's time over C's,
-  each file counting its mean parse time. The overall figure is the median over rounds of
-  the geometric mean of the 58 ratios, without the kernel row. Its 95% interval is within
-  0.003 of it, and C timed against a copy of itself gives 1.00.
+The machine is an AMD Ryzen 7 9800X3D (8 cores, 96 MB of L3 cache) with Ubuntu 26.04 and
+Linux 7.0, running nothing else, with each process pinned to its own core. Both libraries
+are built with Cargo's release profile (`opt-level = 3`, no LTO) and Rust 1.97.1. The C
+library and grammars are compiled the way their crates compile them, at `-O3` with
+assertions on, by GCC 15.2 (Ubuntu's default), GCC 13.4 or Clang 21.1. With `-DNDEBUG`,
+GCC 15.2's build takes 0.98 times as long.
+
+Each grammar has up to 300 files, picked by a hash of the path, from its test corpus and
+from real projects in its language at fixed commits. The kernel row takes 300 files of the
+Linux 6.17 sources, and the JSDoc inputs are doc comments from JavaScript and TypeScript
+files.
+
+Only parsing is timed, with a fresh parser per file. Each round parses every file five
+times with each library, in a random order of the libraries, from a fresh copy of each
+binary. A grammar's ratio is the median over 20 rounds of Mesquite's time over C's, each
+file counting its mean parse time. The overall figure is the median over rounds of the
+geometric mean of the 58 ratios, without the kernel row. Its 95% interval is within 0.003
+of it, and C timed against a copy of itself gives 1.00.
 
 ## Memory and startup
 
-The grammar tables are read in place from the binary, as C reads its static arrays, so
-using a grammar for the first time costs no decoding. The extra time of a grammar's first
-parse over its second is at most 0.10 ms for every grammar, with a median of 0.04 ms. In
-C it is at most 0.06 ms, with a median of 0.03 ms.
+The large grammar tables are read in place from the binary, as C reads its static arrays,
+so using a grammar for the first time decodes only its small tables. The extra time of a
+grammar's first parse over its second is at most 0.10 ms for every grammar, with a median
+of 0.04 ms. In C it is at most 0.06 ms, with a median of 0.03 ms.
 
 A process that parses one small file with each of the 58 grammars peaks at 55 MB with
 Mesquite and at 48 to 66 MB with C, depending on its compiler. Nearly all of it is the
