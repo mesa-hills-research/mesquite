@@ -3568,7 +3568,10 @@ mod children_tests {
                 matches!(children, Children::Inline { .. }),
                 usize::from(count) <= INLINE_CHILD_CAPACITY
             );
-            assert_eq!(symbols(&children), (1..=Symbol::from(count)).collect::<Vec<_>>());
+            assert_eq!(
+                symbols(&children),
+                (1..=Symbol::from(count)).collect::<Vec<_>>()
+            );
             let borrowed = Children::from(&*children);
             assert_eq!(symbols(&borrowed), symbols(&children));
         }
@@ -3594,10 +3597,18 @@ mod children_tests {
             let mut out = vec![leaf(9)];
             children.append_to(&mut out);
             assert!(children.is_empty());
-            assert_eq!(symbols(&out), [9].into_iter().chain(1..=Symbol::from(count)).collect::<Vec<_>>());
+            assert_eq!(
+                symbols(&out),
+                [9].into_iter()
+                    .chain(1..=Symbol::from(count))
+                    .collect::<Vec<_>>()
+            );
             let owned = Children::from((1..=count).map(leaf).collect::<Vec<_>>());
             assert_eq!(
-                owned.into_iter().map(|tree| ts_subtree_symbol(&tree)).collect::<Vec<_>>(),
+                owned
+                    .into_iter()
+                    .map(|tree| ts_subtree_symbol(&tree))
+                    .collect::<Vec<_>>(),
                 (1..=Symbol::from(count)).collect::<Vec<_>>()
             );
         }
