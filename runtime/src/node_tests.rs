@@ -19,7 +19,7 @@ fn tree(root: Subtree) -> Tree {
         production_id_count: 0,
         field_count: 0,
         max_alias_sequence_length: 0,
-        parse_table: tree_sitter_language::Table::default(),
+        parse_table: Default::default(),
         small_parse_table: tree_sitter_language::Table::default(),
         small_parse_table_map: tree_sitter_language::Table::default(),
         parse_actions: tree_sitter_language::Table::default(),

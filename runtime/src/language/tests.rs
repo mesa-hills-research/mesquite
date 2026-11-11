@@ -1,6 +1,6 @@
 use super::*;
 use std::sync::LazyLock;
-use tree_sitter_language::{ExternalScannerTables, FieldMapEntry, MapSlice, Table};
+use tree_sitter_language::{ExternalScannerTables, FieldMapEntry, LargeStates, MapSlice, Table};
 
 fn unused_lex(_: &mut dyn tree_sitter_language::Lexer, _: StateId) -> bool {
     panic!("language table tests do not lex")
@@ -59,7 +59,7 @@ static LANGUAGE: LazyLock<Language> = LazyLock::new(|| {
         production_id_count: 2,
         field_count: 2,
         max_alias_sequence_length: 3,
-        parse_table: Table::leak(vec![1, 3, 6, 8, 1, 1, 0, 10, 12, 0, 2, 2]),
+        parse_table: LargeStates::from_dense(&[1, 3, 6, 8, 1, 1, 0, 10, 12, 0, 2, 2], 6),
         // State 2 visits symbols in group order: 2, 3, 1, 4, 5. State 3 is empty.
         small_parse_table: Table::leak(vec![3, 6, 2, 2, 3, 3, 1, 1, 1, 2, 4, 5, 0]),
         small_parse_table_map: Table::leak(vec![0, 12]),
@@ -517,13 +517,9 @@ fn all_grammar_states_agree_between_lookup_and_iteration() {
             let mut expected = vec![0; tables.symbol_count as usize];
             let mut expected_order = Vec::new();
             if u32::from(state) < tables.large_state_count {
-                let start = state as usize * tables.symbol_count as usize;
-                expected.copy_from_slice(
-                    &tables
-                        .parse_table
-                        .slice(start..start + tables.symbol_count as usize)
-                        .to_vec(),
-                );
+                for (symbol, value) in expected.iter_mut().enumerate() {
+                    *value = tables.parse_table.get(state as usize, symbol);
+                }
                 expected_order.extend(
                     expected
                         .iter()
@@ -714,7 +710,7 @@ fn parse_table_cache_checks_full_keys_and_caches_zero_values() {
     tables.state_count = u32::from(StateId::MAX) + 1;
     tables.large_state_count = 0;
     tables.symbol_count = u32::from(Symbol::MAX) + 1;
-    tables.parse_table = Table::default();
+    tables.parse_table = LargeStates::default();
     tables.small_parse_table = Table::leak(vec![1, 7, 1, 0, 1, u16::MAX, 2, 0, u16::MAX]);
     let mut map = vec![0; tables.state_count as usize];
     map[0] = 4;

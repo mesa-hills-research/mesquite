@@ -103,12 +103,12 @@ impl ParseTableCache {
 
     #[inline(always)]
     pub fn lookup(&self, language: &Language, state: StateId, symbol: Symbol) -> u16 {
-        // Dense states are already a single indexed load.
+        // Large states are already a direct lookup.
         if u32::from(state) < language.tables.large_state_count {
             return language
                 .tables
                 .parse_table
-                .get(state as usize * language.tables.symbol_count as usize + symbol as usize);
+                .get(state as usize, symbol as usize);
         }
         // Encode the full 32-bit state/symbol pair as a nonzero 33-bit key.
         // Adding one also distinguishes a cached zero value for (0, 0) from
@@ -550,9 +550,7 @@ pub(crate) fn ts_language_lookup(language: &Language, state: StateId, symbol: Sy
         }
         0
     } else {
-        tables
-            .parse_table
-            .get(state as usize * tables.symbol_count as usize + symbol as usize)
+        tables.parse_table.get(state as usize, symbol as usize)
     }
 }
 
@@ -578,7 +576,8 @@ pub(crate) fn ts_language_lookaheads(language: &Language, state: StateId) -> Loo
         language: *language,
         data_index,
         group_end,
-        state: 0,
+        // C leaves it 0 and never reads it; a large state's values are read by state.
+        state,
         table_value: 0,
         section_index: 0,
         group_count,
@@ -615,7 +614,9 @@ pub(crate) fn ts_lookahead_iterator__next(iterator: &mut LookaheadIterator) -> b
             if u32::from(iterator.symbol) >= tables.symbol_count {
                 return false;
             }
-            iterator.table_value = tables.parse_table.get(iterator.data_index as usize);
+            iterator.table_value = tables
+                .parse_table
+                .get(iterator.state as usize, iterator.symbol as usize);
             if iterator.table_value != 0 {
                 break;
             }

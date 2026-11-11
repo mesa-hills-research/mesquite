@@ -707,7 +707,7 @@ mod tests {
             production_id_count: 3,
             field_count: 0,
             max_alias_sequence_length: 3,
-            parse_table: Table::default(),
+            parse_table: Default::default(),
             small_parse_table: Table::default(),
             small_parse_table_map: Table::default(),
             parse_actions: Table::default(),

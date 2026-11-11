@@ -172,6 +172,91 @@ impl Record for ParseAction {
     }
 }
 
+/// 64 symbols of a large state's row in [`LargeStates`]: a bit per symbol with a
+/// value, and how many values the table holds before this word's first one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LargeStateWord {
+    pub bits: u64,
+    pub rank: u32,
+}
+
+/// Twelve bytes: `bits` (`u64`), then `rank` (`u32`).
+impl Record for LargeStateWord {
+    type Bytes = [u8; 12];
+
+    #[inline(always)]
+    fn read(b: [u8; 12]) -> Self {
+        let [b0, b1, b2, b3, b4, b5, b6, b7, r0, r1, r2, r3] = b;
+        LargeStateWord {
+            bits: u64::from_le_bytes([b0, b1, b2, b3, b4, b5, b6, b7]),
+            rank: u32::from_le_bytes([r0, r1, r2, r3]),
+        }
+    }
+
+    fn write(self) -> [u8; 12] {
+        let [b0, b1, b2, b3, b4, b5, b6, b7] = self.bits.to_le_bytes();
+        let [r0, r1, r2, r3] = self.rank.to_le_bytes();
+        [b0, b1, b2, b3, b4, b5, b6, b7, r0, r1, r2, r3]
+    }
+
+    fn records(bytes: &[u8]) -> &[[u8; 12]] {
+        bytes.as_chunks().0
+    }
+}
+
+/// The parse table of the large states (C's `parse_table`, a dense
+/// `large_state_count` by `symbol_count` array), without its zeros: each state's row
+/// is `words_per_state` [`LargeStateWord`]s marking the symbols that have a value,
+/// and `values` holds those values, row by row in symbol order. Most of a row is
+/// zero, so this takes about a third of C's space.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LargeStates {
+    pub words: Table<LargeStateWord>,
+    pub values: Table<u16>,
+    /// `symbol_count.div_ceil(64)`.
+    pub words_per_state: usize,
+}
+
+impl LargeStates {
+    /// The value of `symbol` in large state `state`, 0 if it has none.
+    #[inline(always)]
+    pub fn get(self, state: usize, symbol: usize) -> u16 {
+        let word = self.words.get(state * self.words_per_state + symbol / 64);
+        let bit = 1u64 << (symbol % 64);
+        if word.bits & bit == 0 {
+            0
+        } else {
+            let before = (word.bits & (bit - 1)).count_ones();
+            self.values.get(word.rank as usize + before as usize)
+        }
+    }
+
+    /// The large states of the dense `table`, `symbol_count` values per state.
+    pub fn from_dense(table: &[u16], symbol_count: usize) -> Self {
+        let words_per_state = symbol_count.div_ceil(64);
+        let mut words = Vec::new();
+        let mut values = Vec::new();
+        for row in table.chunks(symbol_count.max(1)) {
+            for chunk in row.chunks(64) {
+                let mut bits = 0;
+                let rank = values.len() as u32;
+                for (i, &value) in chunk.iter().enumerate() {
+                    if value != 0 {
+                        bits |= 1 << i;
+                        values.push(value);
+                    }
+                }
+                words.push(LargeStateWord { bits, rank });
+            }
+        }
+        Self {
+            words: Table::leak(words),
+            values: Table::leak(values),
+            words_per_state,
+        }
+    }
+}
+
 #[cold]
 #[inline(never)]
 fn invalid_action_kind(kind: u8) -> ! {
@@ -326,6 +411,28 @@ mod tests {
         assert_eq!(table.slice(1..).to_vec(), [2, 0x1234]);
         assert_eq!((table.first(), table.last()), (Some(1), Some(0x1234)));
         assert_eq!(Table::<u32>::from_bytes(&[1, 0, 0, 0, 9]).to_vec(), [1]);
+    }
+
+    #[test]
+    fn large_states_hold_the_dense_values() {
+        for symbols in [1, 63, 64, 65, 130] {
+            let dense: Vec<u16> = (0..3 * symbols)
+                .map(|i| {
+                    if i % 3 == 0 || i % 7 == 1 {
+                        i as u16 + 1
+                    } else {
+                        0
+                    }
+                })
+                .collect();
+            let states = LargeStates::from_dense(&dense, symbols);
+            assert_eq!(states.words.len(), 3 * symbols.div_ceil(64));
+            for state in 0..3 {
+                for symbol in 0..symbols {
+                    assert_eq!(states.get(state, symbol), dense[state * symbols + symbol]);
+                }
+            }
+        }
     }
 
     #[test]

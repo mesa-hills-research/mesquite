@@ -44,7 +44,7 @@ use std::fmt;
 mod language_fn;
 mod table;
 pub use language_fn::LanguageFn;
-pub use table::{Record, Table};
+pub use table::{LargeStateWord, LargeStates, Record, Table};
 
 /// A grammar symbol (`TSSymbol`).
 pub type Symbol = u16;
@@ -63,9 +63,10 @@ pub const SERIALIZATION_BUFFER_SIZE: usize = 1024;
 
 /// The magic bytes that start a table blob.
 pub const BLOB_MAGIC: &[u8; 8] = b"TSPORTTB";
-/// The blob format version this crate decodes. The host bumps it whenever the layout
-/// changes, so an old blob fails with a clear message instead of decoding garbage.
-pub const BLOB_FORMAT_VERSION: u32 = 1;
+/// The blob format version this crate decodes. It changes whenever the layout does,
+/// so an old blob fails with a clear message instead of decoding garbage. Version 2
+/// stores the large states' parse table without its zeros ([`LargeStates`]).
+pub const BLOB_FORMAT_VERSION: u32 = 2;
 
 /// `TSSymbolMetadata`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -278,9 +279,9 @@ pub struct LanguageTables {
     pub production_id_count: u32,
     pub field_count: u32,
     pub max_alias_sequence_length: u16,
-    /// `parse_table`: `large_state_count * symbol_count` values, row-major
-    /// (`parse_table[state * symbol_count + symbol]`).
-    pub parse_table: Table<u16>,
+    /// `parse_table`, C's `large_state_count * symbol_count` values, stored without
+    /// its zeros (`parse_table.get(state, symbol)`).
+    pub parse_table: LargeStates,
     /// `small_parse_table`: for each small state, a group count, then per group a value,
     /// a symbol count and that many symbols.
     pub small_parse_table: Table<u16>,
@@ -457,7 +458,11 @@ impl LanguageTables {
         };
 
         r.tag(b"PTBL")?;
-        let parse_table = r.table()?;
+        let parse_table = LargeStates {
+            words: r.table()?,
+            values: r.table()?,
+            words_per_state: symbol_count.div_ceil(64) as usize,
+        };
         r.tag(b"SPTB")?;
         let small_parse_table = r.table()?;
         r.tag(b"SPTM")?;
@@ -648,7 +653,15 @@ impl LanguageTables {
                 format!("{name} has {actual} entries, expected {expected}"),
             )
         };
-        len("parse_table", self.parse_table.len(), large * symbols)?;
+        len(
+            "parse_table.words",
+            self.parse_table.words.len(),
+            large * self.parse_table.words_per_state,
+        )?;
+        check(
+            self.parse_table.words_per_state == symbols.div_ceil(64),
+            "parse_table.words_per_state does not match symbol_count".into(),
+        )?;
         len(
             "small_parse_table_map",
             self.small_parse_table_map.len(),
@@ -901,9 +914,26 @@ impl LanguageTables {
                 )
             }
         };
+        let mut values = 0usize;
+        for (i, word) in self.parse_table.words.iter().enumerate() {
+            let first_symbol = i % self.parse_table.words_per_state * 64;
+            check(
+                word.rank as usize == values
+                    && (first_symbol + 64 <= symbols || word.bits >> (symbols - first_symbol) == 0),
+                format!("parse_table word {i} has a wrong rank or a symbol past the end"),
+            )?;
+            values += word.bits.count_ones() as usize;
+        }
+        check(
+            values == self.parse_table.values.len(),
+            format!(
+                "parse_table marks {values} values but holds {}",
+                self.parse_table.values.len()
+            ),
+        )?;
         for state in 0..large {
             for symbol in 0..symbols {
-                let value = self.parse_table.get(state * symbols + symbol);
+                let value = self.parse_table.get(state, symbol);
                 check_value(state, symbol as u16, value)?;
             }
         }
