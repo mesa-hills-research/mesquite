@@ -1442,8 +1442,8 @@ pub(crate) fn ts_parser__do_all_potential_reductions(
             let entry = parser
                 .parse_table_cache
                 .table_entry(&language, state, symbol);
-            for action in entry.actions() {
-                match *action.action() {
+            for action in entry.actions().iter() {
+                match action {
                     ParseAction::Shift {
                         extra: false,
                         repetition: false,
@@ -1695,7 +1695,7 @@ pub(crate) fn ts_parser__recover(
         .actions(&language, 1, ts_subtree_symbol(&lookahead));
     if actions
         .last()
-        .is_some_and(|action| matches!(action.action(), ParseAction::Shift { extra: true, .. }))
+        .is_some_and(|action| matches!(action, ParseAction::Shift { extra: true, .. }))
     {
         lookahead = ts_subtree_make_mut(&mut parser.tree_pool, lookahead);
         ts_subtree_set_extra(&mut lookahead, true);
@@ -1976,8 +1976,8 @@ pub(crate) fn ts_parser__advance<const LOGGING: bool>(
 
         let mut did_reduce = false;
         let mut last_reduction_version = STACK_VERSION_NONE;
-        for entry in table_entry.actions() {
-            match *entry.action() {
+        for action in table_entry.actions().iter() {
+            match action {
                 ParseAction::Shift {
                     state: shift_state,
                     extra,

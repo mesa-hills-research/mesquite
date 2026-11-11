@@ -23,22 +23,28 @@
 //!
 //! Differences from C, all deliberate:
 //!
-//! - Arrays are owned `Vec`s with their exact lengths, so out-of-range reads panic
-//!   instead of reading other memory. `parse_actions` keeps C's layout: a header entry
-//!   followed by its actions, at the same offsets the parse tables refer to.
-//! - Strings are `String`s; `field_names[0]` (NULL in C) is `None`.
+//! - The grammar crates embed their tables as a binary blob (see
+//!   [`LanguageTables::decode`]) instead of huge array literals. The large arrays, the
+//!   parse tables, parse actions, lex modes and primary states, are [`Table`]s read in
+//!   place from the blob, as C reads its static arrays, so a grammar costs no memory
+//!   or time for the parts of its tables a parse doesn't touch. The small ones are
+//!   copied into `Vec`s the first time the grammar is used.
+//! - Arrays have their exact lengths, so out-of-range reads panic instead of reading
+//!   other memory. `parse_actions` keeps C's layout: a header entry followed by its
+//!   actions, at the same offsets the parse tables refer to.
+//! - Strings are `&str`s; `field_names[0]` (NULL in C) is `None`.
 //! - The external scanner is a trait object made by [`ExternalScannerTables::create`]:
 //!   `create` returns the scanner and `Drop` replaces C's `destroy`. `serialize` takes
 //!   `&mut self` like C's `void *payload`.
 //! - `lex_fn`/`keyword_lex_fn` are Rust functions over `&mut dyn Lexer`.
-//! - The grammar crates decode their tables from a binary blob (see
-//!   [`LanguageTables::decode`]) instead of embedding huge array literals.
 #![forbid(unsafe_code)]
 
 use std::fmt;
 
 mod language_fn;
+mod table;
 pub use language_fn::LanguageFn;
+pub use table::{Record, Table};
 
 /// A grammar symbol (`TSSymbol`).
 pub type Symbol = u16;
@@ -260,7 +266,7 @@ pub struct LanguageTables {
     /// `abi_version` (`version` in ABI 14): 14 or 15.
     pub abi_version: u32,
     /// `name` (ABI 15; `None` for ABI 14).
-    pub name: Option<String>,
+    pub name: Option<&'static str>,
     /// `metadata` (ABI 15; `None` for ABI 14).
     pub metadata: Option<LanguageMetadata>,
     pub symbol_count: u32,
@@ -274,22 +280,22 @@ pub struct LanguageTables {
     pub max_alias_sequence_length: u16,
     /// `parse_table`: `large_state_count * symbol_count` values, row-major
     /// (`parse_table[state * symbol_count + symbol]`).
-    pub parse_table: Vec<u16>,
+    pub parse_table: Table<u16>,
     /// `small_parse_table`: for each small state, a group count, then per group a value,
     /// a symbol count and that many symbols.
-    pub small_parse_table: Vec<u16>,
+    pub small_parse_table: Table<u16>,
     /// `small_parse_table_map`: the offset in `small_parse_table` of each small state
     /// (`state - large_state_count`).
-    pub small_parse_table_map: Vec<u32>,
+    pub small_parse_table_map: Table<u32>,
     /// `parse_actions`, at C's offsets: a terminal's value in the parse tables is the
     /// index of a [`ParseActionEntry::Header`] followed by `count` actions. See
     /// [`LanguageTables::action_list`].
-    pub parse_actions: Vec<ParseActionEntry>,
+    pub parse_actions: Table<ParseActionEntry>,
     /// `symbol_names`: `symbol_count + alias_count` names.
-    pub symbol_names: Vec<String>,
+    pub symbol_names: Vec<&'static str>,
     /// `field_names`: `field_count + 1` names, `field_names[0]` is `None` (empty when
     /// `field_count` is 0).
-    pub field_names: Vec<Option<String>>,
+    pub field_names: Vec<Option<&'static str>>,
     /// `field_map_slices`: one per production id (empty when `field_count` is 0).
     pub field_map_slices: Vec<MapSlice>,
     pub field_map_entries: Vec<FieldMapEntry>,
@@ -302,7 +308,7 @@ pub struct LanguageTables {
     /// `alias_sequences`: `production_id_count * max_alias_sequence_length` symbols.
     pub alias_sequences: Vec<Symbol>,
     /// `lex_modes`: one per state.
-    pub lex_modes: Vec<LexMode>,
+    pub lex_modes: Table<LexMode>,
     /// `lex_fn`.
     pub lex_fn: LexFn,
     /// `keyword_lex_fn` (`None` when C has NULL). The runtime calls it with state 0.
@@ -311,7 +317,7 @@ pub struct LanguageTables {
     /// `external_scanner` (`None` when the grammar has no external tokens).
     pub external_scanner: Option<ExternalScannerTables>,
     /// `primary_state_ids`: one per state.
-    pub primary_state_ids: Vec<StateId>,
+    pub primary_state_ids: Table<StateId>,
     /// `reserved_words` (ABI 15): sets of `max_reserved_word_set_size` symbols each,
     /// indexed by `LexMode::reserved_word_set_id`, 0-terminated when shorter. Empty
     /// when `max_reserved_word_set_size` is 0.
@@ -359,17 +365,18 @@ fn fail<T>(message: impl Into<String>) -> Result<T, DecodeError> {
 
 impl LanguageTables {
     /// The action list whose header is at `index` in `parse_actions` (the value the
-    /// parse tables hold for a terminal): `(reusable, actions)`, where each of the
-    /// `count` entries of `actions` is a [`ParseActionEntry::Action`]
-    /// ([`ParseActionEntry::action`]). C reads `parse_actions[index].entry` and then
+    /// parse tables hold for a terminal): `(reusable, actions)`, the `count` actions
+    /// after the header. C reads `parse_actions[index].entry` and then
     /// `(const TSParseAction *)(entry + 1)`.
     ///
     /// Panics if `index` is not a header's index.
-    pub fn action_list(&self, index: usize) -> (bool, &[ParseActionEntry]) {
-        match self.parse_actions[index] {
+    pub fn action_list(&self, index: usize) -> (bool, Table<ParseAction>) {
+        match self.parse_actions.get(index) {
             ParseActionEntry::Header { count, reusable } => (
                 reusable,
-                &self.parse_actions[index + 1..index + 1 + count as usize],
+                Table::from_records(
+                    &self.parse_actions.records()[index + 1..index + 1 + count as usize],
+                ),
             ),
             ParseActionEntry::Action(_) => {
                 panic!("parse_actions[{index}] is an action, not the header of a list")
@@ -377,14 +384,19 @@ impl LanguageTables {
         }
     }
 
-    /// Decodes a table blob written by the converter, attaching the grammar's lex
-    /// functions and external scanner.
+    /// Reads a table blob written by the converter, attaching the grammar's lex
+    /// functions and external scanner. The large tables stay in `blob`, and the small
+    /// ones are copied out of it.
+    ///
+    /// It checks the blob's layout, and that each array has the length its counts
+    /// imply, but not the values inside: [`LanguageTables::validate`] does that, and
+    /// each grammar crate's tests run it on the grammar's blob.
     ///
     /// Panics with a message naming the problem when the blob is malformed, was written
     /// for another format version, or disagrees with the functions given (a keyword
     /// lex function or a scanner the tables do not expect, or a missing one).
     pub fn decode(
-        blob: &[u8],
+        blob: &'static [u8],
         lex_fn: LexFn,
         keyword_lex_fn: Option<LexFn>,
         scanner_create: Option<ScannerCreateFn>,
@@ -397,7 +409,7 @@ impl LanguageTables {
 
     /// [`LanguageTables::decode`], returning the problem instead of panicking.
     pub fn try_decode(
-        blob: &[u8],
+        blob: &'static [u8],
         lex_fn: LexFn,
         keyword_lex_fn: Option<LexFn>,
         scanner_create: Option<ScannerCreateFn>,
@@ -445,13 +457,13 @@ impl LanguageTables {
         };
 
         r.tag(b"PTBL")?;
-        let parse_table = r.vec(Reader::u16, 2)?;
+        let parse_table = r.table()?;
         r.tag(b"SPTB")?;
-        let small_parse_table = r.vec(Reader::u16, 2)?;
+        let small_parse_table = r.table()?;
         r.tag(b"SPTM")?;
-        let small_parse_table_map = r.vec(Reader::u32, 4)?;
+        let small_parse_table_map = r.table()?;
         r.tag(b"PACT")?;
-        let parse_actions = r.vec(Reader::action_entry, 8)?;
+        let parse_actions = r.table()?;
         r.tag(b"SYMN")?;
         let symbol_names = r.vec(Reader::string, 4)?;
         r.tag(b"FLDN")?;
@@ -500,21 +512,12 @@ impl LanguageTables {
         r.tag(b"ALSQ")?;
         let alias_sequences = r.vec(Reader::u16, 2)?;
         r.tag(b"LEXM")?;
-        let lex_modes = r.vec(
-            |r| {
-                Ok(LexMode {
-                    lex_state: r.u16()?,
-                    external_lex_state: r.u16()?,
-                    reserved_word_set_id: r.u16()?,
-                })
-            },
-            6,
-        )?;
+        let lex_modes = r.table()?;
         r.tag(b"EXTS")?;
         let external_states = r.vec(Reader::bool, 1)?;
         let external_symbol_map = r.vec(Reader::u16, 2)?;
         r.tag(b"PRIM")?;
-        let primary_state_ids = r.vec(Reader::u16, 2)?;
+        let primary_state_ids = r.table()?;
         r.tag(b"RSVW")?;
         let reserved_words = r.vec(Reader::u16, 2)?;
         r.tag(b"SUPT")?;
@@ -596,16 +599,26 @@ impl LanguageTables {
             supertype_map_slices,
             supertype_map_entries,
         };
-        tables.validate()?;
+        tables.check(false)?;
         Ok(tables)
     }
 
     /// Checks that the tables are consistent: every array has the length its counts
-    /// imply, every offset and index points inside its array, and `parse_actions` is a
-    /// sequence of headers each followed by its actions, with every terminal entry of
-    /// the parse tables pointing at a header. [`LanguageTables::decode`] runs it, so
-    /// the runtime can index the tables the way C does.
+    /// imply, every offset and index points inside its array, every parse action is
+    /// well formed, and `parse_actions` is a sequence of headers each followed by its
+    /// actions, with every terminal entry of the parse tables pointing at a header.
+    /// With consistent tables the runtime can index them the way C does, without
+    /// panicking.
+    ///
+    /// It reads every value of the tables, so it runs in the grammar crates' tests
+    /// rather than each time a program first uses a grammar.
     pub fn validate(&self) -> Result<(), DecodeError> {
+        self.check(true)
+    }
+
+    /// The checks of [`LanguageTables::validate`]: those of the lengths, and with
+    /// `values` those of the values too.
+    fn check(&self, values: bool) -> Result<(), DecodeError> {
         let check = |ok: bool, what: String| if ok { Ok(()) } else { fail(what) };
         if !(14..=15).contains(&self.abi_version) {
             return fail(format!(
@@ -656,110 +669,25 @@ impl LanguageTables {
             self.production_id_count as usize * self.max_alias_sequence_length as usize,
         )?;
         check(
-            self.public_symbol_map
-                .iter()
-                .chain(&self.alias_sequences)
-                .all(|&s| (s as usize) < all_symbols),
-            "public_symbol_map or alias_sequences names an unknown symbol".into(),
-        )?;
-        check(
-            self.primary_state_ids
-                .iter()
-                .all(|&s| (s as usize) < states),
-            "primary_state_ids names an unknown state".into(),
-        )?;
-        check(
             (self.keyword_capture_token as usize) < symbols,
             format!(
                 "keyword_capture_token {} is not a symbol",
                 self.keyword_capture_token
             ),
         )?;
-
-        // Parse actions: headers, each followed by its actions.
-        let mut is_header = vec![false; self.parse_actions.len()];
-        let mut pos = 0;
-        while pos < self.parse_actions.len() {
-            let ParseActionEntry::Header { count, .. } = self.parse_actions[pos] else {
-                return fail(format!("parse_actions[{pos}] should be a header"));
-            };
-            is_header[pos] = true;
-            let end = pos + 1 + count as usize;
-            if end > self.parse_actions.len() {
-                return fail(format!("the action list at {pos} runs past the end"));
-            }
-            for entry in &self.parse_actions[pos + 1..end] {
-                match entry {
-                    ParseActionEntry::Header { .. } => {
-                        return fail(format!("the action list at {pos} holds a header"));
-                    }
-                    ParseActionEntry::Action(ParseAction::Shift { state, .. }) => {
-                        check(
-                            (*state as usize) < states,
-                            format!("the action list at {pos} shifts to unknown state {state}"),
-                        )?;
-                    }
-                    ParseActionEntry::Action(ParseAction::Reduce {
-                        symbol,
-                        production_id,
-                        ..
-                    }) => {
-                        check(
-                            (*symbol as usize) < symbols
-                                && u32::from(*production_id) < self.production_id_count.max(1),
-                            format!("the action list at {pos} reduces out of range"),
-                        )?;
-                    }
-                    ParseActionEntry::Action(_) => {}
-                }
-            }
-            pos = end;
-        }
-        let check_value = |state: usize, symbol: u16, value: u16| {
-            if (symbol as u32) < self.token_count {
-                check(
-                    is_header.get(value as usize).copied().unwrap_or(false),
-                    format!(
-                        "state {state}, terminal {symbol}: {value} is not an action list header"
-                    ),
-                )
-            } else {
-                check(
-                    (value as usize) < states,
-                    format!("state {state}, symbol {symbol}: unknown successor state {value}"),
-                )
-            }
-        };
-        for state in 0..large {
-            for symbol in 0..symbols {
-                let value = self.parse_table[state * symbols + symbol];
-                check_value(state, symbol as u16, value)?;
-            }
-        }
-        let table = &self.small_parse_table;
-        for (i, &offset) in self.small_parse_table_map.iter().enumerate() {
-            let state = large + i;
-            let mut p = offset as usize;
-            let mut read = || {
-                let value = table.get(p).copied();
-                p += 1;
-                value.ok_or_else(|| {
-                    DecodeError(format!("small state {state} runs past small_parse_table"))
-                })
-            };
-            let groups = read()?;
-            for _ in 0..groups {
-                let value = read()?;
-                let count = read()?;
-                for _ in 0..count {
-                    let symbol = read()?;
-                    check(
-                        (symbol as usize) < symbols,
-                        format!("small state {state}: unknown symbol {symbol}"),
-                    )?;
-                    check_value(state, symbol, value)?;
-                }
-            }
+        if values {
+            check(
+                self.public_symbol_map
+                    .iter()
+                    .chain(&self.alias_sequences)
+                    .all(|&s| (s as usize) < all_symbols),
+                "public_symbol_map or alias_sequences names an unknown symbol".into(),
+            )?;
+            check(
+                self.primary_state_ids.iter().all(|s| (s as usize) < states),
+                "primary_state_ids names an unknown state".into(),
+            )?;
+            self.check_parse_tables()?;
         }
 
         // Fields.
@@ -820,7 +748,7 @@ impl LanguageTables {
         match &self.external_scanner {
             None => check(
                 self.external_token_count == 0
-                    && self.lex_modes.iter().all(|m| m.external_lex_state == 0),
+                    && (!values || self.lex_modes.iter().all(|m| m.external_lex_state == 0)),
                 "external tokens or external lex states without an external scanner".into(),
             )?,
             Some(scanner) => {
@@ -840,9 +768,11 @@ impl LanguageTables {
                 )?;
                 let rows = scanner.states.len() / tokens;
                 check(
-                    self.lex_modes
-                        .iter()
-                        .all(|m| (m.external_lex_state as usize) < rows),
+                    !values
+                        || self
+                            .lex_modes
+                            .iter()
+                            .all(|m| (m.external_lex_state as usize) < rows),
                     "a lex mode names an unknown external lex state".into(),
                 )?;
                 check(
@@ -866,13 +796,15 @@ impl LanguageTables {
             )?;
             let sets = self.reserved_words.len() / set_size;
             check(
-                self.lex_modes
-                    .iter()
-                    .all(|m| (m.reserved_word_set_id as usize) < sets),
+                !values
+                    || self
+                        .lex_modes
+                        .iter()
+                        .all(|m| (m.reserved_word_set_id as usize) < sets),
                 "a lex mode names an unknown reserved word set".into(),
             )?;
         }
-        if !abi15 {
+        if !abi15 && values {
             check(
                 self.lex_modes.iter().all(|m| m.reserved_word_set_id == 0),
                 "ABI-14 lex modes with reserved word sets".into(),
@@ -908,16 +840,110 @@ impl LanguageTables {
         )?;
         Ok(())
     }
+
+    /// The values of the parse tables and parse actions.
+    fn check_parse_tables(&self) -> Result<(), DecodeError> {
+        let check = |ok: bool, what: String| if ok { Ok(()) } else { fail(what) };
+        let symbols = self.symbol_count as usize;
+        let states = self.state_count as usize;
+        let large = self.large_state_count as usize;
+
+        // Parse actions: headers, each followed by its actions.
+        let records = self.parse_actions.records();
+        let mut is_header = vec![false; records.len()];
+        let mut pos = 0;
+        while pos < records.len() {
+            let [kind, count, rest @ ..] = records[pos];
+            check(
+                kind == 0 && matches!(rest, [0 | 1, 0, 0, 0, 0, 0]),
+                format!("parse_actions[{pos}] should be a header"),
+            )?;
+            is_header[pos] = true;
+            let end = pos + 1 + count as usize;
+            if end > records.len() {
+                return fail(format!("the action list at {pos} runs past the end"));
+            }
+            for record in &records[pos + 1..end] {
+                let field = |i: usize| u16::from_le_bytes([record[i], record[i + 1]]);
+                let ok = match record[0] {
+                    1 => {
+                        record[1] == 0
+                            && (field(2) as usize) < states
+                            && field(4) <= 1
+                            && field(6) <= 1
+                    }
+                    2 => {
+                        (field(2) as usize) < symbols
+                            && u32::from(field(6)) < self.production_id_count.max(1)
+                    }
+                    3 | 4 => record[1..] == [0; 7],
+                    _ => false,
+                };
+                check(
+                    ok,
+                    format!("the action list at {pos} holds a malformed action {record:?}"),
+                )?;
+            }
+            pos = end;
+        }
+        let check_value = |state: usize, symbol: u16, value: u16| {
+            if (symbol as u32) < self.token_count {
+                check(
+                    is_header.get(value as usize).copied().unwrap_or(false),
+                    format!(
+                        "state {state}, terminal {symbol}: {value} is not an action list header"
+                    ),
+                )
+            } else {
+                check(
+                    (value as usize) < states,
+                    format!("state {state}, symbol {symbol}: unknown successor state {value}"),
+                )
+            }
+        };
+        for state in 0..large {
+            for symbol in 0..symbols {
+                let value = self.parse_table.get(state * symbols + symbol);
+                check_value(state, symbol as u16, value)?;
+            }
+        }
+        let table = self.small_parse_table;
+        for (i, offset) in self.small_parse_table_map.iter().enumerate() {
+            let state = large + i;
+            let mut p = offset as usize;
+            let mut read = || {
+                let value = (p < table.len()).then(|| table.get(p));
+                p += 1;
+                value.ok_or_else(|| {
+                    DecodeError(format!("small state {state} runs past small_parse_table"))
+                })
+            };
+            let groups = read()?;
+            for _ in 0..groups {
+                let value = read()?;
+                let count = read()?;
+                for _ in 0..count {
+                    let symbol = read()?;
+                    check(
+                        (symbol as usize) < symbols,
+                        format!("small state {state}: unknown symbol {symbol}"),
+                    )?;
+                    check_value(state, symbol, value)?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
-/// Reads the little-endian blob format (the host's `blob.rs` writes it).
-struct Reader<'a> {
-    data: &'a [u8],
+/// Reads the little-endian blob format (the converter's `blob.rs` writes it).
+struct Reader {
+    data: &'static [u8],
     pos: usize,
 }
 
-impl<'a> Reader<'a> {
-    fn take(&mut self, n: usize) -> Result<&'a [u8], DecodeError> {
+impl Reader {
+    fn take(&mut self, n: usize) -> Result<&'static [u8], DecodeError> {
         match self.data.get(self.pos..self.pos + n) {
             Some(bytes) => {
                 self.pos += n;
@@ -962,11 +988,26 @@ impl<'a> Reader<'a> {
         Ok(())
     }
 
-    fn string(&mut self) -> Result<String, DecodeError> {
+    fn string(&mut self) -> Result<&'static str, DecodeError> {
         let len = self.u32()? as usize;
         let bytes = self.take(len)?;
-        String::from_utf8(bytes.to_vec())
+        std::str::from_utf8(bytes)
             .or_else(|_| fail(format!("string before byte {} is not UTF-8", self.pos)))
+    }
+
+    /// A `u32` count followed by that many records, left in place.
+    fn table<T: Record>(&mut self) -> Result<Table<T>, DecodeError> {
+        let count = self.u32()? as usize;
+        let size = size_of::<T::Bytes>();
+        match count.checked_mul(size) {
+            Some(len) if len <= self.data.len() - self.pos => {
+                Ok(Table::from_bytes(self.take(len)?))
+            }
+            _ => fail(format!(
+                "array of {count} records at byte {} overruns the blob",
+                self.pos
+            )),
+        }
     }
 
     /// A `u32` count followed by that many items, each at least `min_size` bytes.
@@ -993,41 +1034,6 @@ impl<'a> Reader<'a> {
         Ok(MapSlice {
             index: self.u16()?,
             length: self.u16()?,
-        })
-    }
-
-    /// 8 bytes: kind, then fields by kind (see the host's `blob.rs`).
-    fn action_entry(&mut self) -> Result<ParseActionEntry, DecodeError> {
-        let at = self.pos;
-        let kind = self.u8()?;
-        let a = self.u8()?;
-        let b = self.u16()?;
-        let c = self.u16()?;
-        let d = self.u16()?;
-        let flag = |v: u16| match v {
-            0 => Ok(false),
-            1 => Ok(true),
-            _ => fail(format!("bad flag in the parse action at byte {at}")),
-        };
-        Ok(match kind {
-            0 => ParseActionEntry::Header {
-                count: a,
-                reusable: flag(b)?,
-            },
-            1 => ParseActionEntry::Action(ParseAction::Shift {
-                state: b,
-                extra: flag(c)?,
-                repetition: flag(d)?,
-            }),
-            2 => ParseActionEntry::Action(ParseAction::Reduce {
-                symbol: b,
-                child_count: a,
-                dynamic_precedence: c as i16,
-                production_id: d,
-            }),
-            3 => ParseActionEntry::Action(ParseAction::Accept),
-            4 => ParseActionEntry::Action(ParseAction::Recover),
-            _ => return fail(format!("unknown parse action kind {kind} at byte {at}")),
         })
     }
 }
@@ -1082,7 +1088,7 @@ mod tests {
         );
         let mut blob = BLOB_MAGIC.to_vec();
         blob.extend_from_slice(&99u32.to_le_bytes());
-        let error = LanguageTables::try_decode(&blob, lex, None, None).unwrap_err();
+        let error = LanguageTables::try_decode(blob.leak(), lex, None, None).unwrap_err();
         assert!(error.0.contains("format version 99"), "{error}");
     }
 

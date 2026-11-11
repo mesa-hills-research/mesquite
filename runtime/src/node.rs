@@ -661,7 +661,7 @@ pub(crate) fn ts_node__field_name_from_language(
     );
     for entry in field_map {
         if !entry.inherited && u32::from(entry.child_index) == structural_child_index {
-            return node.tree.language.tables.field_names[usize::from(entry.field_id)].as_deref();
+            return node.tree.language.tables.field_names[usize::from(entry.field_id)];
         }
     }
     None
