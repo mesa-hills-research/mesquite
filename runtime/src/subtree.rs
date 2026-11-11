@@ -836,10 +836,33 @@ pub(crate) fn ts_subtree_compress(
         let grandchild = unique_heap_mut(child_data.children.last_mut().unwrap());
         summarize_children(grandchild, language);
         summarize_children(child_data, language);
-        summarize_children(parent_data, language);
+        if stack.len() > initial_stack_size {
+            // C summarizes this node now and again in the next step, as that
+            // step's child, after its last child is summarized. Nothing reads
+            // it in between. The second summary sets every field again: the
+            // sticky flags from the same children, whose own flags only grew,
+            // and the rest afresh, except that it tests this node's previous
+            // size to tell whether the first child depends on the column. So
+            // only the size is computed now.
+            summarize_size(parent_data);
+        } else {
+            summarize_children(parent_data, language);
+        }
         current = parent;
     }
     *tree = current;
+}
+
+/// The padding and size a summary of the node's children would give it.
+#[inline]
+fn summarize_size(data: &mut SubtreeHeapData) {
+    let children = data.children.as_slice();
+    let mut size = ts_subtree_size(&children[0]);
+    for child in &children[1..] {
+        size = length_add(size, ts_subtree_total_size(child));
+    }
+    data.padding = ts_subtree_padding(&children[0]);
+    data.size = size;
 }
 
 /// The header of a heap subtree that has no other owner.
@@ -2885,6 +2908,129 @@ mod summary_tests {
     use super::*;
     use std::sync::LazyLock;
     use tree_sitter_language::{LanguageTables, SymbolMetadata};
+
+    /// ts_subtree_compress as C writes it, summarizing all three nodes of
+    /// every step.
+    fn compress_like_c(tree: &mut Subtree, count: u32, language: &Language) {
+        let mut stack = Vec::new();
+        let symbol = tree.heap().unwrap().symbol;
+        let mut current = std::mem::take(tree);
+        for _ in 0..count {
+            let rotatable = |tree: &Subtree| {
+                matches!(tree, Subtree::Heap(data)
+                    if Arc::strong_count(data) == 1 && data.children.len() >= 2 && data.symbol == symbol)
+            };
+            if !(rotatable(&current)
+                && rotatable(&ts_subtree_children(&current)[0])
+                && rotatable(&ts_subtree_children(&ts_subtree_children(&current)[0])[0]))
+            {
+                break;
+            }
+            let mut child = std::mem::take(&mut unique_heap_mut(&mut current).children[0]);
+            let mut grandchild = std::mem::take(&mut unique_heap_mut(&mut child).children[0]);
+            let last = std::mem::take(
+                unique_heap_mut(&mut grandchild)
+                    .children
+                    .last_mut()
+                    .unwrap(),
+            );
+            unique_heap_mut(&mut child).children[0] = last;
+            *unique_heap_mut(&mut grandchild)
+                .children
+                .last_mut()
+                .unwrap() = child;
+            stack.push(current);
+            current = grandchild;
+        }
+        while let Some(mut parent) = stack.pop() {
+            unique_heap_mut(&mut parent).children[0] = current;
+            let child = &mut unique_heap_mut(&mut parent).children[0];
+            let grandchild = unique_heap_mut(child).children.last_mut().unwrap();
+            summarize_children(unique_heap_mut(grandchild), language);
+            summarize_children(unique_heap_mut(child), language);
+            summarize_children(unique_heap_mut(&mut parent), language);
+            current = parent;
+        }
+        *tree = current;
+    }
+
+    /// A left-deep repetition with leaves of varied sizes, rows and column
+    /// dependence, from a seed.
+    fn repetition(seed: u64, length: usize, language: &Language) -> Subtree {
+        let mut state = seed;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) as u32
+        };
+        let leaf = |next: &mut dyn FnMut() -> u32| {
+            // Rows are rare, so that sizes on one line, where a summary's
+            // column dependence turns on its previous size, are common.
+            let rows = u32::from(next() % 12 == 0);
+            let bytes = 1 + next() % 300;
+            Subtree::Heap(Arc::new(SubtreeHeapData {
+                symbol: 1,
+                padding: Length {
+                    bytes: next() % 4,
+                    extent: Point {
+                        row: u32::from(next() % 12 == 0),
+                        column: next() % 4,
+                    },
+                },
+                size: Length {
+                    bytes,
+                    extent: Point {
+                        row: rows,
+                        column: bytes,
+                    },
+                },
+                depends_on_column: next() % 3 == 0,
+                fragile_left: next() % 7 == 0,
+                fragile_right: next() % 7 == 0,
+                children: Children::new(),
+                payload: SubtreePayload::Leaf,
+                ..SubtreeHeapData::default()
+            }))
+        };
+        let first = leaf(&mut next);
+        let second = leaf(&mut next);
+        let mut tree = ts_subtree_new_node(2, vec![first, second], 0, language);
+        for _ in 1..length {
+            let mut children = vec![tree, leaf(&mut next)];
+            if next() % 4 == 0 {
+                children.push(leaf(&mut next));
+            }
+            tree = ts_subtree_new_node(2, children, 0, language);
+        }
+        tree
+    }
+
+    #[test]
+    fn compression_matches_summarizing_every_node_as_c_does() {
+        let language = language();
+        for seed in 0..200 {
+            for length in [3, 4, 5, 7, 9, 16, 33] {
+                let mut fast = repetition(seed, length, &language);
+                let mut reference = repetition(seed, length, &language);
+                assert_eq!(format!("{fast:?}"), format!("{reference:?}"));
+                let delta = ts_subtree_repeat_depth(&ts_subtree_children(&fast)[0])
+                    - ts_subtree_repeat_depth(ts_subtree_children(&fast).last().unwrap());
+                let mut i = delta / 2;
+                let mut stack = Vec::new();
+                while i > 0 {
+                    ts_subtree_compress(&mut fast, i, &language, &mut stack);
+                    compress_like_c(&mut reference, i, &language);
+                    i /= 2;
+                }
+                assert_eq!(
+                    format!("{fast:?}"),
+                    format!("{reference:?}"),
+                    "seed {seed}, length {length}"
+                );
+            }
+        }
+    }
 
     fn language() -> Language {
         static TABLES: LazyLock<LanguageTables> = LazyLock::new(|| {
