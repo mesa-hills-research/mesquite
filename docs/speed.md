@@ -1,118 +1,134 @@
 # Speed
 
-Parse time of the port relative to C tree-sitter 0.25.10 with the same grammar versions
-(below 1 is faster). The geometric mean over all 58 grammars is 0.73.
+Parse time of Mesquite relative to C tree-sitter 0.25.10 with the same grammar versions
+(below 1 is faster). C's speed depends on the compiler that builds it, so each column
+names one. The geometric mean over the 58 grammars is 0.71 against C built with GCC 13.4,
+0.72 against Clang 21.1 and 0.53 against GCC 15.2.
 
-| Grammar | Inputs | Port / C | First use |
-|---|---|---:|---:|
-| `astro` | 300 files, 0.2 MB | 0.67 | 0.2 ms |
-| `bash` | 300 files, 1.3 MB | 0.67 | 37 ms |
-| `c` | 300 files, 5.9 MB | 0.64 | 17 ms |
-| `c` (Linux kernel) | 300 files, 3.8 MB | 0.66 |  |
-| `c_sharp` | 300 files, 2.0 MB | 0.68 | 178 ms |
-| `cmake` | 300 files, 0.2 MB | 1.02 | 1 ms |
-| `cpp` | 300 files, 2.8 MB | 0.66 | 112 ms |
-| `css` | 300 files, 2.3 MB | 0.68 | 1 ms |
-| `cuda` | 300 files, 4.3 MB | 0.68 | 236 ms |
-| `dart` | 300 files, 3.5 MB | 0.85 | 41 ms |
-| `diff` | 300 files, 13.1 MB | 0.93 | 0.1 ms |
-| `dtd` | 261 files, 0.3 MB | 0.94 | 0.3 ms |
-| `elixir` | 300 files, 2.5 MB | 0.81 | 48 ms |
-| `elm` | 300 files, 1.9 MB | 0.63 | 4 ms |
-| `embedded_template` | 300 files, 0.2 MB | 1.08 | 0.1 ms |
-| `erlang` | 300 files, 5.3 MB | 0.64 | 12 ms |
-| `fortran` | 300 files, 3.3 MB | 0.74 | 212 ms |
-| `fsharp` | 300 files, 2.2 MB | 0.79 | 379 ms |
-| `glsl` | 300 files, 0.9 MB | 0.59 | 25 ms |
-| `go` | 300 files, 3.3 MB | 0.81 | 5 ms |
-| `graphql` | 300 files, 3.3 MB | 0.40 | 0.5 ms |
-| `haskell` | 300 files, 1.1 MB | 0.88 | 132 ms |
-| `hcl` | 300 files, 0.1 MB | 0.85 | 2 ms |
-| `html` | 300 files, 0.9 MB | 0.59 | 0.2 ms |
-| `java` | 300 files, 1.6 MB | 0.67 | 12 ms |
-| `javascript` | 300 files, 0.2 MB | 0.68 | 12 ms |
-| `jsdoc` | 300 files, 0.05 MB | 0.86 | 0.1 ms |
-| `json` | 300 files, 4.3 MB | 0.86 | 0.1 ms |
-| `julia` | 300 files, 3.5 MB | 0.72 | 196 ms |
-| `kotlin` | 300 files, 0.9 MB | 0.65 | 111 ms |
-| `lua` | 300 files, 2.3 MB | 0.65 | 1 ms |
-| `make` | 300 files, 0.4 MB | 0.70 | 3 ms |
-| `markdown` | 300 files, 1.1 MB | 1.03 | 7 ms |
-| `markdown_inline` | 300 files, 0.6 MB | 1.10 | 7 ms |
-| `objc` | 300 files, 4.7 MB | 0.66 | 179 ms |
-| `ocaml` | 300 files, 1.3 MB | 0.65 | 156 ms |
-| `ocaml_interface` | 300 files, 1.2 MB | 0.61 | 134 ms |
-| `odin` | 300 files, 3.8 MB | 0.76 | 75 ms |
-| `perl` | 300 files, 1.5 MB | 0.75 | 161 ms |
-| `php` | 300 files, 1.8 MB | 0.70 | 33 ms |
-| `php_only` | 300 files, 1.7 MB | 0.67 | 32 ms |
-| `powershell` | 300 files, 2.2 MB | 0.63 | 21 ms |
-| `proto` | 300 files, 0.8 MB | 0.73 | 0.6 ms |
-| `python` | 300 files, 4.6 MB | 0.71 | 13 ms |
-| `r` | 300 files, 1.1 MB | 0.71 | 14 ms |
-| `ruby` | 300 files, 1.6 MB | 0.68 | 71 ms |
-| `rust` | 300 files, 0.7 MB | 0.70 | 35 ms |
-| `scala` | 300 files, 0.4 MB | 0.73 | 117 ms |
-| `solidity` | 300 files, 0.9 MB | 0.78 | 15 ms |
-| `sql` | 300 files, 0.1 MB | 0.48 | 76 ms |
-| `svelte` | 300 files, 0.1 MB | 0.73 | 0.6 ms |
-| `swift` | 300 files, 2.0 MB | 0.91 | 129 ms |
-| `toml` | 300 files, 0.2 MB | 0.86 | 0.3 ms |
-| `tsx` | 300 files, 1.0 MB | 0.71 | 47 ms |
-| `typescript` | 300 files, 2.5 MB | 0.72 | 47 ms |
-| `verilog` | 300 files, 0.4 MB | 0.64 | 619 ms |
-| `xml` | 300 files, 1.6 MB | 1.39 | 0.5 ms |
-| `yaml` | 300 files, 0.3 MB | 0.65 | 4 ms |
-| `zig` | 300 files, 7.2 MB | 0.71 | 24 ms |
+| Grammar | Inputs | GCC 15.2 | GCC 13.4 | Clang 21.1 |
+|---|---|---:|---:|---:|
+| `astro` | 300 files, 0.3 MB | 0.74 | 0.73 | 0.72 |
+| `bash` | 300 files, 1.0 MB | 0.36 | 0.69 | 0.70 |
+| `c` | 300 files, 2.2 MB | 0.39 | 0.58 | 0.68 |
+| `c_sharp` | 300 files, 4.9 MB | 0.36 | 0.65 | 0.71 |
+| `cmake` | 300 files, 0.3 MB | 0.76 | 0.77 | 0.70 |
+| `cpp` | 300 files, 4.1 MB | 0.34 | 0.72 | 0.73 |
+| `css` | 300 files, 1.4 MB | 0.32 | 0.62 | 0.61 |
+| `cuda` | 300 files, 4.3 MB | 0.35 | 0.68 | 0.83 |
+| `dart` | 300 files, 3.6 MB | 0.84 | 0.80 | 0.92 |
+| `diff` | 300 files, 5.3 MB | 0.75 | 0.76 | 0.71 |
+| `dtd` | 49 files, 0.3 MB | 0.82 | 0.83 | 0.78 |
+| `elixir` | 300 files, 4.2 MB | 0.34 | 0.79 | 0.75 |
+| `elm` | 231 files, 3.4 MB | 0.62 | 0.60 | 0.67 |
+| `embedded_template` | 300 files, 0.2 MB | 0.86 | 0.86 | 0.79 |
+| `erlang` | 300 files, 5.1 MB | 0.45 | 0.63 | 0.61 |
+| `fortran` | 300 files, 4.2 MB | 0.13 | 0.74 | 0.73 |
+| `fsharp` | 300 files, 1.7 MB | 0.48 | 0.75 | 0.81 |
+| `glsl` | 300 files, 0.4 MB | 0.34 | 0.64 | 0.69 |
+| `go` | 300 files, 3.6 MB | 0.69 | 0.66 | 0.80 |
+| `graphql` | 300 files, 0.04 MB | 0.29 | 0.66 | 0.61 |
+| `haskell` | 300 files, 1.9 MB | 0.90 | 0.88 | 0.93 |
+| `hcl` | 300 files, 0.2 MB | 0.85 | 0.86 | 0.72 |
+| `html` | 300 files, 6.7 MB | 0.57 | 0.58 | 0.54 |
+| `java` | 300 files, 1.7 MB | 0.68 | 0.66 | 0.79 |
+| `javascript` | 300 files, 0.3 MB | 0.72 | 0.72 | 0.75 |
+| `jsdoc` | 300 files, 0.05 MB | 0.92 | 0.93 | 0.89 |
+| `json` | 300 files, 3.1 MB | 0.72 | 0.74 | 0.62 |
+| `julia` | 300 files, 5.5 MB | 0.47 | 0.67 | 0.67 |
+| `kotlin` | 300 files, 1.2 MB | 0.28 | 0.70 | 0.69 |
+| `lua` | 300 files, 5.6 MB | 0.62 | 0.61 | 0.66 |
+| `make` | 300 files, 0.5 MB | 0.76 | 0.74 | 0.78 |
+| `markdown` | 300 files, 4.1 MB | 0.66 | 0.74 | 0.66 |
+| `markdown_inline` | 300 files, 4.1 MB | 0.60 | 1.09 | 1.06 |
+| `objc` | 300 files, 3.5 MB | 0.27 | 0.69 | 0.77 |
+| `ocaml` | 300 files, 1.8 MB | 0.38 | 0.61 | 0.60 |
+| `ocaml_interface` | 300 files, 1.3 MB | 0.44 | 0.59 | 0.62 |
+| `odin` | 300 files, 4.0 MB | 0.71 | 0.68 | 0.72 |
+| `perl` | 300 files, 2.4 MB | 0.42 | 0.73 | 0.71 |
+| `php` | 300 files, 1.8 MB | 0.65 | 0.64 | 0.68 |
+| `php_only` | 300 files, 1.8 MB | 0.67 | 0.65 | 0.71 |
+| `powershell` | 300 files, 2.3 MB | 0.11 | 0.63 | 0.62 |
+| `proto` | 300 files, 1.0 MB | 0.33 | 0.71 | 0.69 |
+| `python` | 300 files, 2.2 MB | 0.73 | 0.71 | 0.75 |
+| `r` | 300 files, 1.8 MB | 0.71 | 0.68 | 0.72 |
+| `ruby` | 300 files, 1.4 MB | 0.49 | 0.62 | 0.64 |
+| `rust` | 300 files, 1.7 MB | 0.70 | 0.68 | 0.71 |
+| `scala` | 300 files, 0.5 MB | 0.51 | 0.75 | 0.77 |
+| `solidity` | 300 files, 1.4 MB | 0.80 | 0.77 | 0.93 |
+| `sql` | 300 files, 0.2 MB | 0.67 | 0.61 | 0.77 |
+| `svelte` | 300 files, 0.06 MB | 0.86 | 0.85 | 0.84 |
+| `swift` | 300 files, 4.5 MB | 0.18 | 0.92 | 0.89 |
+| `toml` | 300 files, 0.6 MB | 0.69 | 0.69 | 0.64 |
+| `tsx` | 300 files, 1.7 MB | 0.73 | 0.72 | 0.75 |
+| `typescript` | 300 files, 2.8 MB | 0.71 | 0.71 | 0.75 |
+| `verilog` | 300 files, 2.0 MB | 0.58 | 0.65 | 0.71 |
+| `xml` | 300 files, 0.6 MB | 0.74 | 0.76 | 0.62 |
+| `yaml` | 300 files, 1.9 MB | 0.64 | 0.65 | 0.62 |
+| `zig` | 300 files, 5.2 MB | 0.69 | 0.69 | 0.69 |
+| `c` (Linux kernel) | 300 files, 5.7 MB | 0.33 | 0.62 | 0.68 |
 
-The port is faster on 53 grammars. XML, Markdown and its inline grammar, embedded
-templates and CMake are slower.
+Mesquite is faster than all three builds of C on 57 grammars. On Markdown's inline
+grammar it takes 1.09 times as long as C built with GCC 13.4, and 1.06 times Clang's.
 
 ## Method
 
-- **Machine:** AMD EPYC 9354P with Ubuntu 24.04, each job pinned to its own physical
-  core. Astro, diff, GraphQL and JSDoc were timed on an Intel Core i9-13980HX (a 6-core
-  virtual machine with Ubuntu 26.04), pinned to one core.
-- **Builds:** Cargo's release profile (`opt-level = 3`, no LTO) for both. GCC 13.3
-  compiled the C library and grammars, and Rust 1.99 compiled the port (GCC 15.2 and
-  Rust 1.97 for Astro, diff, GraphQL and JSDoc).
-- **Inputs:** up to 300 files per grammar from the grammars' test corpora and real
-  projects in each language, and the Linux 6.17 sources for the kernel row. The JSDoc
-  inputs are doc comments from JavaScript and TypeScript files.
-- **Timing:** parsing alone, with a fresh parser per file. A file's time is its fastest
-  of 15 parses, and a grammar's ratio is the port's total time over C's. The overall
-  figure is the geometric mean of the grammars' ratios, without the kernel row.
+- **Machine:** AMD Ryzen 7 9800X3D (8 cores, 96 MB of L3 cache) with Ubuntu 26.04 and
+  Linux 7.0, running nothing else. Each process is pinned to its own core.
+- **Builds:** Cargo's release profile (`opt-level = 3`, no LTO) for both, with Rust 1.97.1.
+  The C library and grammars are compiled as their crates compile them (`-O3`,
+  assertions on) by GCC 15.2 (Ubuntu's default), GCC 13.4 or Clang 21.1. With
+  `-DNDEBUG`, GCC 15.2's build takes 0.98 times as long.
+- **Inputs:** up to 300 files per grammar, picked by a hash of the path, from the
+  grammars' test corpora and from real projects in each language at fixed commits, and
+  300 files of the Linux 6.17 sources for the kernel row. The JSDoc inputs are doc
+  comments from JavaScript and TypeScript files.
+- **Timing:** parsing alone, with a fresh parser per file. Each round parses every file
+  five times with each library, in a random order of the libraries, from a fresh copy of
+  each binary. A grammar's ratio is the median over 20 rounds of Mesquite's time over C's,
+  each file counting its mean parse time. The overall figure is the median over rounds of
+  the geometric mean of the 58 ratios, without the kernel row. Its 95% interval is within
+  0.003 of it, and C timed against a copy of itself gives 1.00.
 
 ## Memory and startup
 
-The grammar tables are decoded from a compact blob the first time a grammar is used,
-where C links them as static data. The **First use** column is that one-time cost: the
-extra wall time of a grammar's first parse over its second, the median of five runs. It
-ranges from 0.1 ms (JSON) to 619 ms (Verilog), with a median of 19 ms and 3.8 s for all
-58 grammars. In C it stays under 0.2 ms.
+The grammar tables are read in place from the binary, as C reads its static arrays, so
+using a grammar for the first time costs no decoding. The extra time of a grammar's first
+parse over its second is at most 0.10 ms for every grammar, with a median of 0.04 ms. In
+C it is at most 0.06 ms, with a median of 0.03 ms.
 
-Peak memory of a process that parses one small file with each of 54 grammars (all but
-Astro, diff, GraphQL and JSDoc) is 224 MB for the port and 45 MB for C. With one grammar
-(JSON) it is 3.5 MB for the port and 4.0 MB for C.
+A process that parses one small file with each of the 58 grammars peaks at 55 MB with
+Mesquite and at 48 to 66 MB with C, depending on its compiler. Nearly all of it is the
+pages of the binary that the parses read, and anonymous memory is 1.4 MB with Mesquite and
+0.6 MB with C. With one grammar (JSON) both use 4 to 5 MB.
+
+A parsed tree takes 1.3 to 1.5 times the memory of C's. For example, a 1.8 MB JSON file
+makes a tree of 36 MB with Mesquite and 25 MB with C, and a 1.7 MB C file one of 172 MB
+and 115 MB.
+
+## Binary size
+
+The parse tables of a grammar's large states are stored without their zeros, about four
+in five of their entries, where C keeps them as dense arrays. A binary that links all 58
+grammars is 60 MB with Mesquite and 118 MB with C, stripped. Reading the compact tables
+costs about 2% of parse time against dense ones.
 
 ## Reparsing after an append
 
 Text appended at the end of a file, as an editor or a stream adds it, is parsed again
-from the old tree. The time this takes grows with the file for both libraries. Python's
-statements, for example, are reduced while the parser keeps several stack versions,
-which marks the nodes that hold them as unsafe to reuse, so each reparse lexes and
-reduces every statement again.
+from the old tree. The time this takes grows with the file for both libraries.
 
-| Input | C | Port |
-|---|---:|---:|
-| Python, 50 KB | 2.2 ms | 2.6 ms |
-| Python, 200 KB | 10.1 ms | 12.5 ms |
-| JSON, 50 KB | 0.35 ms | 0.49 ms |
-| JSON, 200 KB | 1.5 ms | 2.3 ms |
+| Input | C, GCC 15.2 | C, GCC 13.4 | C, Clang 21.1 | Mesquite |
+|---|---:|---:|---:|---:|
+| Python, 25 KB | 0.67 ms | 0.68 ms | 0.70 ms | 0.58 ms |
+| Python, 100 KB | 2.47 ms | 2.57 ms | 2.62 ms | 2.14 ms |
+| Python, 400 KB | 9.53 ms | 10.05 ms | 10.20 ms | 8.42 ms |
+| JSON, 25 KB | 0.20 ms | 0.21 ms | 0.12 ms | 0.09 ms |
+| JSON, 100 KB | 0.75 ms | 0.77 ms | 0.43 ms | 0.35 ms |
+| JSON, 400 KB | 3.08 ms | 3.09 ms | 1.83 ms | 1.53 ms |
 
-Each time is the average of 750 reparses after 4-byte appends to generated code (one
-assignment per line, or an array of small objects), on the Intel machine above, pinned
-to one core, with Rust 1.97.
+Each time is the mean of 750 reparses after 4-byte appends to generated code (one
+assignment per line, or an array of small objects), each including the edit and freeing
+the old tree, the median of 12 processes per library, on the machine above.
 
 ## Comparing on your own files
 
@@ -152,5 +168,6 @@ fn main() {
 
 Build it with `cargo build --release` (the C side needs a C compiler) and pass it the
 files to parse. Pin it to one core (`taskset -c 2 ...`) and run it a few times for
-steady numbers. Other grammars work the same way, with the crates and constants listed
-in [grammars.md](grammars.md).
+steady numbers. C's time depends on the compiler that builds it (see the table above), and
+`CC=clang cargo build --release` builds the C side with another one. Other grammars work
+the same way, with the crates and constants listed in [grammars.md](grammars.md).

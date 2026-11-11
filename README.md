@@ -26,23 +26,25 @@ The crates, their upstream versions and their constants are listed in
 
 ## Speed
 
-Parse time relative to C tree-sitter 0.25.10 with the same grammars (below 1 is faster).
+Parse time relative to C tree-sitter 0.25.10 with the same grammars (below 1 is faster),
+with C built by GCC 13.4 or Clang 21.1.
 
-| Inputs | Mesquite / C |
-|---|---:|
-| All 58 grammars (geometric mean) | 0.73 |
-| C (Linux kernel) | 0.66 |
-| C++ | 0.66 |
-| Rust | 0.70 |
-| Python | 0.71 |
-| TypeScript | 0.72 |
-| JavaScript | 0.68 |
-| Go | 0.81 |
-| Java | 0.67 |
+| Inputs | GCC 13.4 | Clang 21.1 |
+|---|---:|---:|
+| All 58 grammars (geometric mean) | 0.71 | 0.72 |
+| C (Linux kernel) | 0.62 | 0.68 |
+| C++ | 0.72 | 0.73 |
+| Rust | 0.68 | 0.71 |
+| Python | 0.71 | 0.75 |
+| TypeScript | 0.71 | 0.75 |
+| JavaScript | 0.72 | 0.75 |
+| Go | 0.66 | 0.80 |
+| Java | 0.66 | 0.79 |
 
-Mesquite is faster on 53 of the 58 grammars. Each grammar's tables are decoded the first
-time it is used, which takes a median of 19 ms. Every grammar, the machine, the method and
-how to compare on your own files are in [docs/speed.md](docs/speed.md).
+Mesquite is faster on 57 of the 58 grammars. Its grammar tables are read in place from
+the binary, as C reads its static arrays, so a grammar's first use takes at most 0.1 ms.
+Every grammar, memory, binary size, reparsing, the machine, the method and how to compare
+on your own files are in [docs/speed.md](docs/speed.md).
 
 ## Installation
 
