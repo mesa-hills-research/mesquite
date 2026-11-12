@@ -103,8 +103,8 @@ Mesquite and at 48 to 66 MB with C, depending on its compiler. Nearly all of it 
 pages of the binary that the parses read, and anonymous memory is 1.4 MB with Mesquite and
 0.6 MB with C. With one grammar (JSON) both use 4 to 5 MB.
 
-A parsed tree takes 1.3 to 1.5 times the memory of C's. For example, a 1.8 MB JSON file
-makes a tree of 36 MB with Mesquite and 25 MB with C, and a 1.7 MB C file one of 172 MB
+A parsed tree takes 1.0 to 1.2 times the memory of C's. For example, a 1.8 MB JSON file
+makes a tree of 30 MB with Mesquite and 25 MB with C, and a 1.7 MB C file one of 133 MB
 and 115 MB.
 
 ## Binary size
