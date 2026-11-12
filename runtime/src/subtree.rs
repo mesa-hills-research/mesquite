@@ -669,15 +669,36 @@ fn drop_subtree_children(children: &mut [Subtree]) {
     // worklist allocates only once a dropped node has a heap child of its own.
     let mut pending: Vec<HeapSubtree> = Vec::new();
     queue_unique_children(children, &mut pending);
+    let mut freed: usize = 0;
     while let Some(node) = pending.pop() {
         // Only a weak reference upgraded on another thread can share it
         // again, and then that owner's drop drains it.
         with_node!(node, node => {
             if let Ok(mut node) = Arc::try_unwrap(node) {
                 queue_unique_children(node.children.as_mut(), &mut pending);
+                freed += 1;
             }
         });
     }
+    if freed >= MERGE_FREED_NODES_AT {
+        merge_freed_nodes();
+    }
+}
+
+/// How many nodes a drop frees before it asks the allocator to merge them,
+/// about half a megabyte. The small drops of an incremental reparse stay
+/// below it.
+const MERGE_FREED_NODES_AT: usize = 4096;
+
+/// glibc keeps freed blocks of up to 128 bytes unmerged in its fastbins and
+/// hands them out again newest first, so after a large tree is dropped the
+/// next parse would get its nodes scattered over that tree's memory. A
+/// request of this size makes glibc merge the freed blocks first. Other
+/// allocators serve it and free it.
+#[cold]
+#[inline(never)]
+fn merge_freed_nodes() {
+    drop(std::hint::black_box(Vec::<u8>::with_capacity(1 << 16)));
 }
 
 fn queue_unique_children(children: &mut [Subtree], pending: &mut Vec<HeapSubtree>) {
