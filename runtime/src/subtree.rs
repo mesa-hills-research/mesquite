@@ -82,20 +82,151 @@ pub(crate) const MISSING: u8 = 16;
 pub(crate) const KEYWORD: u8 = 32;
 
 // On 64-bit hosts this fills the padding before a heap pointer without growing
-// the 16-byte handle. Word-sized tag stores avoid partial-store forwarding stalls
-// when stack links move a freshly constructed handle as a whole value.
+// the 16-byte handle. The tag is the heap handle's u64 tag word, whose spare
+// values mark null and inline handles. Word-sized tag stores avoid partial-store
+// forwarding stalls when stack links move a freshly constructed handle as a
+// whole value.
 #[derive(Clone, Debug, Default)]
-#[repr(u64)]
 pub(crate) enum Subtree {
     #[default]
     Null,
     Inline(PackedInlineLeaf),
-    Heap(Arc<SubtreeHeapData>),
+    Heap(HeapSubtree),
 }
-/// A mutable subtree is an owned handle. `Arc::make_mut` before heap mutation.
+/// A mutable subtree is an owned handle. `HeapSubtree::make_mut` before heap
+/// mutation.
 pub(crate) type MutableSubtree = Subtree;
 pub(crate) type SubtreeArray = Vec<Subtree>;
 pub(crate) type MutableSubtreeArray = Vec<Subtree>;
+
+/// A heap subtree's header and its children. Up to three children share the
+/// header's allocation, as in C, which puts a node's children right before its
+/// header, and more are kept in a Vec. The type gives the number of children, so
+/// a leaf has no child slots and a node only as many as it uses.
+#[derive(Clone, Debug, Default)]
+#[repr(C)]
+pub(crate) struct HeapNode<C: AsMut<[Subtree]>> {
+    pub data: SubtreeHeapData,
+    pub children: C,
+}
+
+pub(crate) type LeafNode = HeapNode<[Subtree; 0]>;
+
+/// A handle to a heap subtree. Nodes with up to three children keep them in an
+/// array, and longer lists in a Vec. Nine in ten branch nodes of typical trees
+/// have three children or fewer. A node's child count is fixed when it is made.
+#[derive(Clone, Debug)]
+#[repr(u64)]
+pub(crate) enum HeapSubtree {
+    Leaf(Arc<LeafNode>),
+    One(Arc<HeapNode<[Subtree; 1]>>),
+    Two(Arc<HeapNode<[Subtree; 2]>>),
+    Three(Arc<HeapNode<[Subtree; 3]>>),
+    Many(Arc<HeapNode<Vec<Subtree>>>),
+}
+
+/// Runs `$body` with `$node` bound to the handle's Arc, whatever its child count.
+macro_rules! with_node {
+    ($tree:expr, $node:ident => $body:expr) => {
+        match $tree {
+            HeapSubtree::Leaf($node) => $body,
+            HeapSubtree::One($node) => $body,
+            HeapSubtree::Two($node) => $body,
+            HeapSubtree::Three($node) => $body,
+            HeapSubtree::Many($node) => $body,
+        }
+    };
+}
+
+impl HeapSubtree {
+    /// A node with these children, in the variant that fits their count.
+    #[inline]
+    pub(crate) fn new(data: SubtreeHeapData, mut children: Children) -> Self {
+        children.compact();
+        match children {
+            Children::Inline {
+                len,
+                items: [a, b, c],
+            } => match len {
+                0 => Self::Leaf(Arc::new(HeapNode { data, children: [] })),
+                1 => Self::One(Arc::new(HeapNode {
+                    data,
+                    children: [a],
+                })),
+                2 => Self::Two(Arc::new(HeapNode {
+                    data,
+                    children: [a, b],
+                })),
+                _ => Self::Three(Arc::new(HeapNode {
+                    data,
+                    children: [a, b, c],
+                })),
+            },
+            Children::Heap(children) => Self::Many(Arc::new(HeapNode { data, children })),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn children(&self) -> &[Subtree] {
+        with_node!(self, node => &node.children[..])
+    }
+
+    /// The header, copied first if the node is shared.
+    #[inline]
+    pub(crate) fn make_mut(&mut self) -> &mut SubtreeHeapData {
+        with_node!(self, node => &mut Arc::make_mut(node).data)
+    }
+
+    /// The header and the children, copied first if the node is shared.
+    #[inline]
+    pub(crate) fn make_mut_with_children(&mut self) -> (&mut SubtreeHeapData, &mut [Subtree]) {
+        with_node!(self, node => {
+            let node = Arc::make_mut(node);
+            (&mut node.data, &mut node.children[..])
+        })
+    }
+
+    /// The header and the children, if no other handle shares the node.
+    #[inline]
+    pub(crate) fn get_mut(&mut self) -> Option<(&mut SubtreeHeapData, &mut [Subtree])> {
+        with_node!(self, node => {
+            let node = Arc::get_mut(node)?;
+            Some((&mut node.data, &mut node.children[..]))
+        })
+    }
+
+    #[inline]
+    pub(crate) fn strong_count(&self) -> usize {
+        with_node!(self, node => Arc::strong_count(node))
+    }
+
+    /// The header's address, which identifies the node.
+    #[inline]
+    pub(crate) fn as_ptr(&self) -> *const SubtreeHeapData {
+        &**self
+    }
+
+    /// A new allocation with the same header and retained child handles.
+    pub(crate) fn clone_node(&self) -> Self {
+        match self {
+            Self::Leaf(node) => Self::Leaf(Arc::new((**node).clone())),
+            Self::One(node) => Self::One(Arc::new((**node).clone())),
+            Self::Two(node) => Self::Two(Arc::new((**node).clone())),
+            Self::Three(node) => Self::Three(Arc::new((**node).clone())),
+            Self::Many(node) => Self::Many(Arc::new((**node).clone())),
+        }
+    }
+}
+
+impl std::ops::Deref for HeapSubtree {
+    type Target = SubtreeHeapData;
+
+    #[inline]
+    fn deref(&self) -> &SubtreeHeapData {
+        with_node!(self, node => &node.data)
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SubtreeHeapData {
     pub padding: Length,
@@ -115,17 +246,22 @@ pub(crate) struct SubtreeHeapData {
     pub depends_on_column: bool,
     pub is_missing: bool,
     pub is_keyword: bool,
-    pub children: Children,
     pub payload: SubtreePayload,
 }
 
-/// The number of children kept in a node's own allocation. Nine in ten branch
-/// nodes of typical trees have three children or fewer.
+#[cfg(test)]
+impl SubtreeHeapData {
+    /// A heap subtree with this header and these children.
+    pub(crate) fn with_children(self, children: impl Into<Children>) -> Subtree {
+        Subtree::Heap(HeapSubtree::new(self, children.into()))
+    }
+}
+
+/// The number of children a node keeps in an array in its own allocation.
 pub(crate) const INLINE_CHILD_CAPACITY: usize = 3;
 
-/// A node's children. Up to three live in the header, so most nodes are one
-/// allocation, as in C, which puts a node's children right before its header.
-/// More children are kept in a Vec.
+/// The children of a node being made. Up to three are kept inline and more in
+/// a Vec, as the node will keep them.
 #[derive(Clone)]
 pub(crate) enum Children {
     Inline {
@@ -215,8 +351,7 @@ impl Children {
     }
 
     /// Moves a spilled list that has shrunk to the inline capacity, such as a
-    /// reduction's children after its trailing extras were removed, back into
-    /// the header.
+    /// reduction's children after its trailing extras were removed, back inline.
     #[inline]
     pub(crate) fn compact(&mut self) {
         if let Self::Heap(children) = self
@@ -264,9 +399,9 @@ impl From<Vec<Subtree>> for Children {
 }
 
 impl Children {
-    /// Takes the children out of `children`. Up to three are moved into the
-    /// header and leave the Vec empty with its allocation, for reuse. A longer
-    /// list takes the Vec itself.
+    /// Takes the children out of `children`. Up to three are moved inline and
+    /// leave the Vec empty with its allocation, for reuse. A longer list takes
+    /// the Vec itself.
     #[inline]
     pub(crate) fn take_from_vec(children: &mut Vec<Subtree>) -> Self {
         if children.len() <= INLINE_CHILD_CAPACITY {
@@ -393,56 +528,59 @@ impl Default for ExternalScannerState {
 }
 #[derive(Default, Debug)]
 pub(crate) struct SubtreePool {
-    pub free_trees: Vec<Arc<SubtreeHeapData>>,
+    pub free_trees: Vec<Arc<LeafNode>>,
     pub tree_stack: Vec<Subtree>,
 }
 /// Never recursively destroy an arbitrarily deep syntax tree. Shared children
 /// stay shared; uniquely owned descendants are drained on an explicit worklist.
-impl Drop for SubtreeHeapData {
+impl<C: AsMut<[Subtree]>> Drop for HeapNode<C> {
     #[inline]
     fn drop(&mut self) {
-        // Most headers are leaves or have already been drained by release.
+        // Most nodes are leaves or have already been drained by release.
         // Keep that case inline, without bringing the traversal loop into every
-        // Arc drop and every replacement of a freshly initialized header.
-        if !self.children.is_empty() {
-            drop_subtree_children(std::mem::take(&mut self.children));
+        // Arc drop.
+        let children = self.children.as_mut();
+        if children
+            .iter()
+            .any(|child| matches!(child, Subtree::Heap(_)))
+        {
+            drop_subtree_children(children);
         }
     }
 }
 
-fn drop_subtree_children(mut children: Children) {
+fn drop_subtree_children(children: &mut [Subtree]) {
     // Uniquely owned descendants, whose children are released in turn. The
     // worklist allocates only once a dropped node has a heap child of its own.
-    let mut pending: Vec<Arc<SubtreeHeapData>> = Vec::new();
-    loop {
-        for child in children {
-            let Subtree::Heap(data) = child else {
-                continue;
-            };
-            // A child that is still shared, such as a node a newer tree reuses,
-            // only loses this reference. Dropping it costs one atomic decrement,
-            // where a failed try_unwrap costs a compare-exchange and then the same
-            // decrement. If another thread drops its reference meanwhile, this
-            // drop frees the child, and the child's own drop drains its
-            // descendants without recursion.
-            if Arc::strong_count(&data) > 1 {
-                drop(data);
-            } else {
-                pending.push(data);
+    let mut pending: Vec<HeapSubtree> = Vec::new();
+    queue_unique_children(children, &mut pending);
+    while let Some(node) = pending.pop() {
+        // Only a weak reference upgraded on another thread can share it
+        // again, and then that owner's drop drains it.
+        with_node!(node, node => {
+            if let Ok(mut node) = Arc::try_unwrap(node) {
+                queue_unique_children(node.children.as_mut(), &mut pending);
             }
+        });
+    }
+}
+
+fn queue_unique_children(children: &mut [Subtree], pending: &mut Vec<HeapSubtree>) {
+    for child in children {
+        let Subtree::Heap(node) = std::mem::take(child) else {
+            continue;
+        };
+        // A child that is still shared, such as a node a newer tree reuses,
+        // only loses this reference. Dropping it costs one atomic decrement,
+        // where a failed try_unwrap costs a compare-exchange and then the same
+        // decrement. If another thread drops its reference meanwhile, this
+        // drop frees the child, and the child's own drop drains its
+        // descendants without recursion.
+        if node.strong_count() > 1 {
+            drop(node);
+        } else {
+            pending.push(node);
         }
-        let Some(data) = pending.pop() else {
-            break;
-        };
-        children = match Arc::try_unwrap(data) {
-            Ok(mut data) => std::mem::take(&mut data.children),
-            // Only a weak reference upgraded on another thread can share it
-            // again, and then that owner's drop drains it.
-            Err(data) => {
-                drop(data);
-                Children::new()
-            }
-        };
     }
 }
 
@@ -536,22 +674,21 @@ pub(crate) fn ts_subtree_pool_delete(pool: &mut SubtreePool) {
     pool.tree_stack = Vec::new();
 }
 
-pub(crate) fn ts_subtree_pool_allocate(pool: &mut SubtreePool) -> Arc<SubtreeHeapData> {
+pub(crate) fn ts_subtree_pool_allocate(pool: &mut SubtreePool) -> Arc<LeafNode> {
     pool.free_trees
         .pop()
-        .unwrap_or_else(|| Arc::new(SubtreeHeapData::default()))
+        .unwrap_or_else(|| Arc::new(LeafNode::default()))
 }
 
-pub(crate) fn ts_subtree_pool_free(pool: &mut SubtreePool, tree: Arc<SubtreeHeapData>) {
+pub(crate) fn ts_subtree_pool_free(pool: &mut SubtreePool, tree: Arc<LeafNode>) {
     let mut tree = tree;
     if pool.free_trees.capacity() > 0
         && pool.free_trees.len() < TS_MAX_TREE_POOL_SIZE
-        && let Some(data) = Arc::get_mut(&mut tree)
-        && data.children.is_empty()
+        && let Some(node) = Arc::get_mut(&mut tree)
     {
-        // Only uniquely owned, drained allocations may enter the pool. Clear
-        // the payload as well, so cached headers do not retain scanner states.
-        *data = SubtreeHeapData::default();
+        // Only uniquely owned allocations may enter the pool. Clear the payload
+        // as well, so cached headers do not retain scanner states.
+        node.data = SubtreeHeapData::default();
         pool.free_trees.push(tree);
     }
 }
@@ -630,7 +767,7 @@ pub(crate) fn ts_subtree_new_leaf_with(
             padding_rows_and_lookahead: padding.extent.row as u8 | ((lookahead_bytes as u8) << 4),
         })
     } else {
-        Subtree::Heap(new_heap_leaf(
+        Subtree::Heap(HeapSubtree::Leaf(new_heap_leaf(
             pool,
             symbol,
             padding,
@@ -642,7 +779,7 @@ pub(crate) fn ts_subtree_new_leaf_with(
             is_keyword,
             language,
             initialize,
-        ))
+        )))
     }
 }
 
@@ -662,7 +799,7 @@ fn new_heap_leaf(
     is_keyword: bool,
     language: &Language,
     initialize: impl FnOnce(&mut SubtreeHeapData),
-) -> Arc<SubtreeHeapData> {
+) -> Arc<LeafNode> {
     let metadata = ts_language_symbol_metadata(language, symbol);
     let extra = symbol == BUILTIN_SYM_END;
     let mut header = SubtreeHeapData {
@@ -677,7 +814,6 @@ fn new_heap_leaf(
         has_external_tokens,
         depends_on_column,
         is_keyword,
-        children: Children::new(),
         payload: if has_external_tokens {
             SubtreePayload::External(ExternalScannerState::default())
         } else {
@@ -691,13 +827,18 @@ fn new_heap_leaf(
         is_missing: false,
     };
     initialize(&mut header);
-    if let Some(mut data) = pool.free_trees.pop() {
-        *Arc::get_mut(&mut data).expect("pooled subtrees must be unique") = header;
-        data
+    if let Some(mut node) = pool.free_trees.pop() {
+        Arc::get_mut(&mut node)
+            .expect("pooled subtrees must be unique")
+            .data = header;
+        node
     } else {
         // Initialize fresh allocations directly: no default header to
         // overwrite, and no uniqueness synchronization before first use.
-        Arc::new(header)
+        Arc::new(HeapNode {
+            data: header,
+            children: [],
+        })
     }
 }
 
@@ -714,7 +855,7 @@ pub(crate) fn ts_subtree_set_symbol(tree: &mut Subtree, symbol: Symbol, language
             });
         }
         Subtree::Heap(data) => {
-            let data = Arc::make_mut(data);
+            let data = data.make_mut();
             data.symbol = symbol;
             data.named = metadata.named;
             data.visible = metadata.visible;
@@ -755,14 +896,14 @@ pub(crate) fn ts_subtree_clone(tree: &Subtree) -> Subtree {
     match tree {
         // A new header and child buffer, with retained child handles. Immutable
         // external scanner bytes can remain shared even when the header is not.
-        Subtree::Heap(data) => Subtree::Heap(Arc::new((**data).clone())),
+        Subtree::Heap(data) => Subtree::Heap(data.clone_node()),
         _ => tree.clone(),
     }
 }
 
 pub(crate) fn ts_subtree_make_mut(pool: &mut SubtreePool, tree: Subtree) -> Subtree {
     if let Subtree::Heap(data) = &tree
-        && Arc::strong_count(data) > 1
+        && data.strong_count() > 1
     {
         let result = ts_subtree_clone(&tree);
         ts_subtree_release(pool, tree);
@@ -786,18 +927,18 @@ pub(crate) fn ts_subtree_compress(
         // Inspect without cloning: an extra Arc handle here would change C's
         // ref_count checks and prevent the very rotation we are considering.
         let can_rotate = match &current {
-            Subtree::Heap(data) if Arc::strong_count(data) == 1 && data.children.len() >= 2 => {
-                match &data.children[0] {
+            Subtree::Heap(data) if data.strong_count() == 1 && data.children().len() >= 2 => {
+                match &data.children()[0] {
                     Subtree::Heap(child)
-                        if Arc::strong_count(child) == 1
-                            && child.children.len() >= 2
+                        if child.strong_count() == 1
+                            && child.children().len() >= 2
                             && child.symbol == symbol =>
                     {
                         matches!(
-                            &child.children[0],
+                            &child.children()[0],
                             Subtree::Heap(grandchild)
-                                if Arc::strong_count(grandchild) == 1
-                                    && grandchild.children.len() >= 2
+                                if grandchild.strong_count() == 1
+                                    && grandchild.children().len() >= 2
                                     && grandchild.symbol == symbol
                         )
                     }
@@ -812,14 +953,13 @@ pub(crate) fn ts_subtree_compress(
 
         // Each mutable access proves an Arc unique with an atomic operation, so
         // every node is accessed once on the way down and once on the way up.
-        let mut child = std::mem::take(&mut unique_heap_mut(&mut current).children[0]);
-        let child_data = unique_heap_mut(&mut child);
-        let mut grandchild = std::mem::take(&mut child_data.children[0]);
-        let last = unique_heap_mut(&mut grandchild)
-            .children
-            .last_mut()
-            .unwrap();
-        child_data.children[0] = std::mem::take(last);
+        let (_, children) = unique_heap_mut(&mut current);
+        let mut child = std::mem::take(&mut children[0]);
+        let (_, child_children) = unique_heap_mut(&mut child);
+        let mut grandchild = std::mem::take(&mut child_children[0]);
+        let (_, grandchild_children) = unique_heap_mut(&mut grandchild);
+        let last = grandchild_children.last_mut().unwrap();
+        child_children[0] = std::mem::take(last);
         *last = child;
         // The stack owns the detached ancestors. Their first-child slots are
         // restored on the way back up, avoiding both aliases and recursion.
@@ -829,13 +969,14 @@ pub(crate) fn ts_subtree_compress(
 
     while stack.len() > initial_stack_size {
         let mut parent = stack.pop().unwrap();
-        let parent_data = unique_heap_mut(&mut parent);
-        let child = &mut parent_data.children[0];
+        let (parent_data, parent_children) = unique_heap_mut(&mut parent);
+        let child = &mut parent_children[0];
         *child = current;
-        let child_data = unique_heap_mut(child);
-        let grandchild = unique_heap_mut(child_data.children.last_mut().unwrap());
-        summarize_children(grandchild, language);
-        summarize_children(child_data, language);
+        let (child_data, child_children) = unique_heap_mut(child);
+        let (grandchild_data, grandchild_children) =
+            unique_heap_mut(child_children.last_mut().unwrap());
+        summarize_children(grandchild_data, grandchild_children, language);
+        summarize_children(child_data, child_children, language);
         if stack.len() > initial_stack_size {
             // C summarizes this node now and again in the next step, as that
             // step's child, after its last child is summarized. Nothing reads
@@ -844,9 +985,9 @@ pub(crate) fn ts_subtree_compress(
             // and the rest afresh, except that it tests this node's previous
             // size to tell whether the first child depends on the column. So
             // only the size is computed now.
-            summarize_size(parent_data);
+            summarize_size(parent_data, parent_children);
         } else {
-            summarize_children(parent_data, language);
+            summarize_children(parent_data, parent_children, language);
         }
         current = parent;
     }
@@ -855,8 +996,7 @@ pub(crate) fn ts_subtree_compress(
 
 /// The padding and size a summary of the node's children would give it.
 #[inline]
-fn summarize_size(data: &mut SubtreeHeapData) {
-    let children = data.children.as_slice();
+fn summarize_size(data: &mut SubtreeHeapData, children: &[Subtree]) {
     let mut size = ts_subtree_size(&children[0]);
     for child in &children[1..] {
         size = length_add(size, ts_subtree_total_size(child));
@@ -865,24 +1005,25 @@ fn summarize_size(data: &mut SubtreeHeapData) {
     data.size = size;
 }
 
-/// The header of a heap subtree that has no other owner.
+/// The header and children of a heap subtree that has no other owner.
 #[inline]
-fn unique_heap_mut(tree: &mut Subtree) -> &mut SubtreeHeapData {
+fn unique_heap_mut(tree: &mut Subtree) -> (&mut SubtreeHeapData, &mut [Subtree]) {
     let Subtree::Heap(data) = tree else {
         unreachable!("only heap branches are rotated");
     };
-    Arc::get_mut(data).expect("rotated subtrees are uniquely owned")
+    data.get_mut().expect("rotated subtrees are uniquely owned")
 }
 
 pub(crate) fn ts_subtree_summarize_children(tree: &mut Subtree, language: &Language) {
-    summarize_children(
-        tree.heap_mut().expect("cannot summarize an inline leaf"),
-        language,
-    );
+    let Subtree::Heap(data) = tree else {
+        panic!("cannot summarize an inline leaf");
+    };
+    let (data, children) = data.make_mut_with_children();
+    summarize_children(data, children, language);
 }
 
 // Accumulating a summary does not own the child vector. In particular, fresh
-// reductions can compute it before constructing a header with a Drop impl.
+// reductions can compute it before constructing the node, which has a Drop impl.
 #[cfg_attr(test, derive(Clone, Debug))]
 struct ChildSummary {
     branch: BranchData,
@@ -902,7 +1043,7 @@ struct ChildSummary {
 }
 
 #[inline(always)]
-fn summarize_children(data: &mut SubtreeHeapData, language: &Language) {
+fn summarize_children(data: &mut SubtreeHeapData, children: &[Subtree], language: &Language) {
     let SubtreePayload::Branch(branch) = &mut data.payload else {
         panic!("child summaries require a branch payload");
     };
@@ -927,7 +1068,7 @@ fn summarize_children(data: &mut SubtreeHeapData, language: &Language) {
         visible: data.visible,
         named: data.named,
     };
-    summarize_child_slice(&mut summary, &data.children, language);
+    summarize_child_slice(&mut summary, children, language);
     *branch = summary.branch;
     data.padding = summary.padding;
     data.size = summary.size;
@@ -1001,7 +1142,7 @@ fn summarize_unary(data: &mut ChildSummary, child: &Subtree) {
             )
         }
         Subtree::Heap(child) => {
-            let has_children = !child.children.is_empty();
+            let has_children = !child.children().is_empty();
             summary.first_leaf = FirstLeaf {
                 symbol: child.symbol,
                 parse_state: child.parse_state,
@@ -1171,7 +1312,7 @@ impl ChildTotals<'_> {
                     self.fragile_right = true;
                     self.parse_state = TS_TREE_STATE_NONE;
                 }
-                let has_children = !child.children.is_empty();
+                let has_children = !child.children().is_empty();
                 let mut first_leaf = FirstLeaf {
                     symbol: child.symbol,
                     parse_state: child.parse_state,
@@ -1403,12 +1544,11 @@ pub(crate) fn ts_subtree_new_node_with(
     language: &Language,
     initialize: impl FnOnce(&mut SubtreeHeapData),
 ) -> Subtree {
-    let mut children = children.into();
-    children.compact();
+    let children = children.into();
     let metadata = ts_language_symbol_metadata(language, symbol);
     let fragile = symbol == BUILTIN_SYM_ERROR || symbol == BUILTIN_SYM_ERROR_REPEAT;
     // Finish the non-owning summary first, so the hot loop need not initialize
-    // and repeatedly update an owning, droppable heap header. Keep the children
+    // and repeatedly update an owning, droppable heap node. Keep the children
     // in their original Vec until the final header is ready.
     let mut summary = ChildSummary {
         symbol,
@@ -1445,7 +1585,6 @@ pub(crate) fn ts_subtree_new_node_with(
         depends_on_column: summary.depends_on_column,
         fragile_left: summary.fragile_left,
         fragile_right: summary.fragile_right,
-        children,
         payload: SubtreePayload::Branch(summary.branch),
         extra: false,
         has_changes: false,
@@ -1453,7 +1592,7 @@ pub(crate) fn ts_subtree_new_node_with(
         is_keyword: false,
     };
     initialize(&mut result);
-    Subtree::Heap(Arc::new(result))
+    Subtree::Heap(HeapSubtree::new(result, children))
 }
 
 pub(crate) fn ts_subtree_new_error_node(
@@ -1487,7 +1626,7 @@ pub(crate) fn ts_subtree_new_missing_leaf(
     );
     match &mut result {
         Subtree::Inline(data) => data.set_flag(MISSING, true),
-        Subtree::Heap(data) => Arc::make_mut(data).is_missing = true,
+        Subtree::Heap(data) => data.make_mut().is_missing = true,
         Subtree::Null => unreachable!(),
     }
     result
@@ -1506,28 +1645,34 @@ pub(crate) fn ts_subtree_release(pool: &mut SubtreePool, tree: Subtree) {
     }
 }
 
-fn release_heap(pool: &mut SubtreePool, mut data: Arc<SubtreeHeapData>) {
+fn release_heap(pool: &mut SubtreePool, mut data: HeapSubtree) {
     pool.tree_stack.clear();
     // Shared handles only need Arc's decrement. The initial unique handle can
     // be consumed directly, without a round trip through the worklist.
-    if Arc::strong_count(&data) > 1 {
+    if data.strong_count() > 1 {
         return;
     }
     loop {
         // Queuing only checks the strong count; prove uniqueness once here.
         // Weak observers may prevent pooling, in which case normal Arc Drop
         // still drains the tree iteratively.
-        if let Some(header) = Arc::get_mut(&mut data) {
-            if header.children.is_empty() {
-                if pool.free_trees.capacity() > 0 && pool.free_trees.len() < TS_MAX_TREE_POOL_SIZE {
+        match data {
+            HeapSubtree::Leaf(mut leaf) => {
+                if let Some(node) = Arc::get_mut(&mut leaf)
+                    && pool.free_trees.capacity() > 0
+                    && pool.free_trees.len() < TS_MAX_TREE_POOL_SIZE
+                {
                     // This already-borrowed header is unique. Avoid a second
                     // uniqueness check just to reset it and move it into the pool.
-                    *header = SubtreeHeapData::default();
-                    pool.free_trees.push(data);
+                    node.data = SubtreeHeapData::default();
+                    pool.free_trees.push(leaf);
                 }
-            } else {
-                for child in std::mem::take(&mut header.children) {
-                    subtree_queue_release(&mut pool.tree_stack, child);
+            }
+            mut branch => {
+                if let Some((_, children)) = branch.get_mut() {
+                    for child in children {
+                        subtree_queue_release(&mut pool.tree_stack, std::mem::take(child));
+                    }
                 }
                 // C frees branch allocations, and only pools leaf allocations.
             }
@@ -1545,7 +1690,7 @@ fn subtree_queue_release(stack: &mut Vec<Subtree>, tree: Subtree) {
     // Shared references need only their normal Arc drop. Avoid get_mut's weak
     // counter synchronization unless this could actually be the final owner.
     if let Subtree::Heap(data) = tree
-        && Arc::strong_count(&data) == 1
+        && data.strong_count() == 1
     {
         stack.push(Subtree::Heap(data));
     }
@@ -1581,7 +1726,7 @@ pub(crate) fn ts_subtree_compare(left: &Subtree, right: &Subtree, pool: &mut Sub
 pub(crate) fn ts_subtree_set_has_changes(tree: &mut Subtree) {
     match tree {
         Subtree::Inline(data) => data.set_flag(HAS_CHANGES, true),
-        Subtree::Heap(data) => Arc::make_mut(data).has_changes = true,
+        Subtree::Heap(data) => data.make_mut().has_changes = true,
         Subtree::Null => panic!("cannot mark a null subtree as changed"),
     }
 }
@@ -1651,7 +1796,9 @@ pub(crate) fn ts_subtree_edit(
                 } else {
                     let data = data.fields();
                     let mut heap = ts_subtree_pool_allocate(pool);
-                    *Arc::get_mut(&mut heap).expect("pooled heaps are unique") = SubtreeHeapData {
+                    Arc::get_mut(&mut heap)
+                        .expect("pooled heaps are unique")
+                        .data = SubtreeHeapData {
                         padding,
                         size,
                         lookahead_bytes,
@@ -1662,15 +1809,14 @@ pub(crate) fn ts_subtree_edit(
                         extra: data.flags & EXTRA != 0,
                         is_missing: data.flags & MISSING != 0,
                         is_keyword: data.flags & KEYWORD != 0,
-                        children: Children::new(),
                         payload: SubtreePayload::Leaf,
                         ..SubtreeHeapData::default()
                     };
-                    *tree = Subtree::Heap(heap);
+                    *tree = Subtree::Heap(HeapSubtree::Leaf(heap));
                 }
             }
             Subtree::Heap(data) => {
-                let data = Arc::make_mut(data);
+                let data = data.make_mut();
                 data.padding = padding;
                 data.size = size;
             }
@@ -1679,8 +1825,8 @@ pub(crate) fn ts_subtree_edit(
         ts_subtree_set_has_changes(tree);
 
         let mut child_right = length_zero();
-        if let Some(data) = tree.heap_mut() {
-            for (i, child) in data.children.iter_mut().enumerate() {
+        if let Subtree::Heap(data) = tree {
+            for (i, child) in data.make_mut_with_children().1.iter_mut().enumerate() {
                 let child_size = ts_subtree_total_size(child);
                 let child_left = child_right;
                 child_right = length_add(child_left, child_size);
@@ -2008,9 +2154,11 @@ pub(crate) fn ts_subtree_print_dot_graph(
 }
 
 pub(crate) fn ts_subtree_external_scanner_state(tree: &Subtree) -> Option<&ExternalScannerState> {
-    let data = tree.heap()?;
+    let Subtree::Heap(data) = tree else {
+        return None;
+    };
     if data.has_external_tokens
-        && data.children.is_empty()
+        && data.children().is_empty()
         && let SubtreePayload::External(state) = &data.payload
     {
         Some(state)
@@ -2054,7 +2202,7 @@ impl Subtree {
     }
     pub fn heap_mut(&mut self) -> Option<&mut SubtreeHeapData> {
         if let Self::Heap(data) = self {
-            Some(Arc::make_mut(data))
+            Some(data.make_mut())
         } else {
             None
         }
@@ -2070,7 +2218,7 @@ impl Subtree {
         match (self, other) {
             (Self::Null, Self::Null) => true,
             (Self::Inline(a), Self::Inline(b)) => a == b,
-            (Self::Heap(a), Self::Heap(b)) => Arc::ptr_eq(a, b),
+            (Self::Heap(a), Self::Heap(b)) => std::ptr::eq(a.as_ptr(), b.as_ptr()),
             _ => false,
         }
     }
@@ -2216,7 +2364,10 @@ pub(crate) fn ts_subtree_repeat_depth(tree: &Subtree) -> u32 {
 
 #[inline]
 pub(crate) fn ts_subtree_children(tree: &Subtree) -> &[Subtree] {
-    tree.heap().map_or(&[], |d| d.children.as_slice())
+    match tree {
+        Subtree::Heap(data) => data.children(),
+        _ => &[],
+    }
 }
 #[inline]
 pub(crate) fn ts_subtree_child_count(tree: &Subtree) -> u32 {
@@ -2225,7 +2376,7 @@ pub(crate) fn ts_subtree_child_count(tree: &Subtree) -> u32 {
 pub(crate) fn ts_subtree_set_extra(tree: &mut Subtree, extra: bool) {
     match tree {
         Subtree::Inline(d) => d.set_flag(EXTRA, extra),
-        Subtree::Heap(d) => Arc::make_mut(d).extra = extra,
+        Subtree::Heap(d) => d.make_mut().extra = extra,
         Subtree::Null => panic!("cannot set extra on a null subtree"),
     }
 }
@@ -2299,7 +2450,7 @@ pub(crate) fn ts_subtree_from_mut(tree: MutableSubtree) -> Subtree {
     tree
 }
 // Unlike the C reinterpretation, Rust transfers ownership; subsequent heap mutation
-// still goes through Arc::make_mut. This function needs no unsafe code.
+// still goes through HeapSubtree::make_mut. This function needs no unsafe code.
 pub(crate) fn ts_subtree_to_mut_unsafe(tree: Subtree) -> MutableSubtree {
     tree
 }
@@ -2314,6 +2465,11 @@ mod layout_tests {
         {
             assert_eq!(std::mem::size_of::<Subtree>(), 16);
             assert_eq!(std::mem::size_of::<Option<Subtree>>(), 16);
+            // A node is its header and the child slots it uses.
+            let header = std::mem::size_of::<SubtreeHeapData>();
+            assert_eq!(header, 80);
+            assert_eq!(std::mem::size_of::<LeafNode>(), header);
+            assert_eq!(std::mem::size_of::<HeapNode<[Subtree; 3]>>(), header + 48);
         }
     }
     #[test]
@@ -2358,11 +2514,12 @@ mod layout_tests {
 
     #[test]
     fn heap_mutation_is_shallow_copy_on_write() {
-        let child = Subtree::Heap(Arc::new(SubtreeHeapData::default()));
-        let mut data = SubtreeHeapData::default();
-        data.children.push(child);
-        data.payload = SubtreePayload::Branch(BranchData::default());
-        let original = Subtree::Heap(Arc::new(data));
+        let child = SubtreeHeapData::default().with_children(Children::new());
+        let original = SubtreeHeapData {
+            payload: SubtreePayload::Branch(BranchData::default()),
+            ..SubtreeHeapData::default()
+        }
+        .with_children(vec![child]);
         let mut edited = original.clone();
         assert!(edited.ptr_eq(&original));
         edited.heap_mut().unwrap().symbol = 17;
@@ -2377,14 +2534,15 @@ mod layout_tests {
         std::thread::Builder::new()
             .stack_size(128 * 1024)
             .spawn(|| {
-                let leaf = Arc::new(SubtreeHeapData::default());
+                let leaf = Arc::new(LeafNode::default());
                 let weak = Arc::downgrade(&leaf);
-                let mut tree = Subtree::Heap(leaf);
+                let mut tree = Subtree::Heap(HeapSubtree::Leaf(leaf));
                 for _ in 0..50_000 {
-                    let mut data = SubtreeHeapData::default();
-                    data.children.push(tree);
-                    data.payload = SubtreePayload::Branch(BranchData::default());
-                    tree = Subtree::Heap(Arc::new(data));
+                    tree = SubtreeHeapData {
+                        payload: SubtreePayload::Branch(BranchData::default()),
+                        ..SubtreeHeapData::default()
+                    }
+                    .with_children(vec![tree]);
                 }
                 drop(tree);
                 assert!(weak.upgrade().is_none());
@@ -2399,17 +2557,19 @@ mod layout_tests {
         std::thread::Builder::new()
             .stack_size(128 * 1024)
             .spawn(|| {
-                let shared_leaf = Subtree::Heap(Arc::new(SubtreeHeapData::default()));
+                let shared_leaf = SubtreeHeapData::default().with_children(Children::new());
                 let mut tree = shared_leaf.clone();
                 let mut observers = Vec::new();
                 for _ in 0..20_000 {
-                    let data = Arc::new(SubtreeHeapData {
-                        children: vec![tree].into(),
-                        payload: SubtreePayload::Branch(BranchData::default()),
-                        ..SubtreeHeapData::default()
+                    let data = Arc::new(HeapNode {
+                        data: SubtreeHeapData {
+                            payload: SubtreePayload::Branch(BranchData::default()),
+                            ..SubtreeHeapData::default()
+                        },
+                        children: [tree],
                     });
                     observers.push(Arc::downgrade(&data));
-                    tree = Subtree::Heap(data);
+                    tree = Subtree::Heap(HeapSubtree::One(data));
                 }
                 let mut pool = ts_subtree_pool_new(32);
                 ts_subtree_release(&mut pool, tree);
@@ -2419,7 +2579,7 @@ mod layout_tests {
                 let Subtree::Heap(data) = shared_leaf else {
                     unreachable!()
                 };
-                assert_eq!(Arc::strong_count(&data), 1);
+                assert_eq!(data.strong_count(), 1);
             })
             .unwrap()
             .join()
@@ -2471,15 +2631,16 @@ mod construction_tests {
 
     #[test]
     fn release_fast_paths_preserve_scratch_and_shared_ownership() {
-        let shared = Arc::new(SubtreeHeapData::default());
+        let shared = Arc::new(LeafNode::default());
         let mut pool = ts_subtree_pool_new(32);
-        pool.tree_stack.push(Subtree::Heap(shared.clone()));
+        pool.tree_stack
+            .push(Subtree::Heap(HeapSubtree::Leaf(shared.clone())));
         ts_subtree_release(&mut pool, Subtree::Null);
         ts_subtree_release(&mut pool, leaf(1, false));
         assert_eq!(pool.tree_stack.len(), 1);
         assert_eq!(Arc::strong_count(&shared), 2);
 
-        ts_subtree_release(&mut pool, Subtree::Heap(shared.clone()));
+        ts_subtree_release(&mut pool, Subtree::Heap(HeapSubtree::Leaf(shared.clone())));
         assert!(pool.tree_stack.is_empty());
         assert!(pool.free_trees.is_empty());
         assert_eq!(Arc::strong_count(&shared), 1);
@@ -2517,7 +2678,7 @@ mod construction_tests {
     #[test]
     fn arrays_retain_handles_and_move_trailing_extras_in_order() {
         let mut trees = vec![
-            Subtree::Heap(Arc::new(SubtreeHeapData::default())),
+            SubtreeHeapData::default().with_children(Children::new()),
             leaf(1, false),
             leaf(2, true),
             leaf(3, true),
@@ -2559,12 +2720,12 @@ mod construction_tests {
         let mut pool = ts_subtree_pool_new(1);
         let mut allocation = ts_subtree_pool_allocate(&mut pool);
         let address = Arc::as_ptr(&allocation);
-        Arc::get_mut(&mut allocation).unwrap().symbol = 12;
+        Arc::get_mut(&mut allocation).unwrap().data.symbol = 12;
         ts_subtree_pool_free(&mut pool, allocation);
         assert_eq!(pool.free_trees.len(), 1);
         let reused = ts_subtree_pool_allocate(&mut pool);
         assert_eq!(Arc::as_ptr(&reused), address);
-        assert_eq!(reused.symbol, 0);
+        assert_eq!(reused.data.symbol, 0);
         assert!(pool.free_trees.is_empty());
 
         // A still-live owner prevents the allocation from entering the pool.
@@ -2572,7 +2733,7 @@ mod construction_tests {
         assert!(pool.free_trees.is_empty());
         ts_subtree_pool_free(&mut pool, reused);
         for _ in 0..40 {
-            ts_subtree_pool_free(&mut pool, Arc::new(SubtreeHeapData::default()));
+            ts_subtree_pool_free(&mut pool, Arc::new(LeafNode::default()));
         }
         assert_eq!(pool.free_trees.len(), TS_MAX_TREE_POOL_SIZE);
         ts_subtree_pool_delete(&mut pool);
@@ -2626,12 +2787,12 @@ mod construction_tests {
     #[test]
     fn cloning_copies_the_header_but_retains_child_and_scanner_handles() {
         let state = ts_external_scanner_state_init(&[42; 25]);
-        let child = Subtree::Heap(Arc::new(SubtreeHeapData {
+        let child = SubtreeHeapData {
             has_external_tokens: true,
             payload: SubtreePayload::External(state),
-            children: Children::new(),
             ..SubtreeHeapData::default()
-        }));
+        }
+        .with_children(Children::new());
         let copied_child = ts_subtree_clone(&child);
         assert!(!copied_child.ptr_eq(&child));
         let SubtreePayload::External(original) = &child.heap().unwrap().payload else {
@@ -2645,43 +2806,43 @@ mod construction_tests {
             ts_external_scanner_state_data(copied)
         );
 
-        let parent = Subtree::Heap(Arc::new(SubtreeHeapData {
-            children: vec![child].into(),
+        let parent = SubtreeHeapData {
             payload: SubtreePayload::Branch(BranchData::default()),
             ..SubtreeHeapData::default()
-        }));
+        }
+        .with_children(vec![child]);
         let copied_parent = ts_subtree_clone(&parent);
         assert!(!copied_parent.ptr_eq(&parent));
         assert!(ts_subtree_children(&copied_parent)[0].ptr_eq(&ts_subtree_children(&parent)[0]));
         let mut pool = ts_subtree_pool_new(0);
         let address = if let Subtree::Heap(data) = &parent {
-            Arc::as_ptr(data)
+            data.as_ptr()
         } else {
             unreachable!()
         };
         let unique = ts_subtree_make_mut(&mut pool, parent);
         assert_eq!(
-            Arc::as_ptr(match &unique {
-                Subtree::Heap(data) => data,
+            match &unique {
+                Subtree::Heap(data) => data.as_ptr(),
                 _ => unreachable!(),
-            }),
+            },
             address
         );
     }
 
     #[test]
     fn empty_reductions_are_leaves_for_header_accessors() {
-        let tree = Subtree::Heap(Arc::new(SubtreeHeapData {
+        let tree = SubtreeHeapData {
             symbol: 73,
             parse_state: 12,
-            children: Children::new(),
             payload: SubtreePayload::Branch(BranchData {
                 production_id: 4,
                 dynamic_precedence: 10,
                 ..BranchData::default()
             }),
             ..SubtreeHeapData::default()
-        }));
+        }
+        .with_children(Children::new());
         assert_eq!(ts_subtree_leaf_symbol(&tree), 73);
         assert_eq!(ts_subtree_leaf_parse_state(&tree), 12);
         assert_eq!(ts_subtree_production_id(&tree), 0);
@@ -2706,15 +2867,15 @@ mod operation_tests {
         let size = children.iter().fold(length_zero(), |size, child| {
             length_add(size, ts_subtree_total_size(child))
         });
-        Subtree::Heap(Arc::new(SubtreeHeapData {
+        SubtreeHeapData {
             symbol,
             size,
-            children: children.into(),
             visible: true,
             named: true,
             payload: SubtreePayload::Branch(BranchData::default()),
             ..SubtreeHeapData::default()
-        }))
+        }
+        .with_children(children)
     }
 
     #[test]
@@ -2746,7 +2907,7 @@ mod operation_tests {
         assert_eq!(ts_subtree_compare(&leaf(1, 1), &left, &mut pool), -1);
         assert_eq!(ts_subtree_compare(&leaf(1, 2), &leaf(1, 30), &mut pool), 0);
         assert_eq!(
-            Arc::strong_count(match &left {
+            HeapSubtree::strong_count(match &left {
                 Subtree::Heap(d) => d,
                 _ => unreachable!(),
             }),
@@ -2761,7 +2922,7 @@ mod operation_tests {
         let mut pool = SubtreePool::default();
         ts_subtree_release(&mut pool, parent);
         assert_eq!(
-            Arc::strong_count(match &child {
+            HeapSubtree::strong_count(match &child {
                 Subtree::Heap(d) => d,
                 _ => unreachable!(),
             }),
@@ -2840,12 +3001,12 @@ mod operation_tests {
     #[test]
     fn scanner_state_equality_handles_identity_distinct_heaps_and_empty_states() {
         let external = |bytes: &[u8]| {
-            Subtree::Heap(Arc::new(SubtreeHeapData {
+            SubtreeHeapData {
                 has_external_tokens: true,
                 payload: SubtreePayload::External(ts_external_scanner_state_init(bytes)),
-                children: Children::new(),
                 ..SubtreeHeapData::default()
-            }))
+            }
+            .with_children(Children::new())
         };
         let token = external(&[1, 2, 3]);
         let retained = token.clone();
@@ -2918,7 +3079,7 @@ mod summary_tests {
         for _ in 0..count {
             let rotatable = |tree: &Subtree| {
                 matches!(tree, Subtree::Heap(data)
-                    if Arc::strong_count(data) == 1 && data.children.len() >= 2 && data.symbol == symbol)
+                    if data.strong_count() == 1 && data.children().len() >= 2 && data.symbol == symbol)
             };
             if !(rotatable(&current)
                 && rotatable(&ts_subtree_children(&current)[0])
@@ -2926,29 +3087,24 @@ mod summary_tests {
             {
                 break;
             }
-            let mut child = std::mem::take(&mut unique_heap_mut(&mut current).children[0]);
-            let mut grandchild = std::mem::take(&mut unique_heap_mut(&mut child).children[0]);
-            let last = std::mem::take(
-                unique_heap_mut(&mut grandchild)
-                    .children
-                    .last_mut()
-                    .unwrap(),
-            );
-            unique_heap_mut(&mut child).children[0] = last;
-            *unique_heap_mut(&mut grandchild)
-                .children
-                .last_mut()
-                .unwrap() = child;
+            let mut child = std::mem::take(&mut unique_heap_mut(&mut current).1[0]);
+            let mut grandchild = std::mem::take(&mut unique_heap_mut(&mut child).1[0]);
+            let last = std::mem::take(unique_heap_mut(&mut grandchild).1.last_mut().unwrap());
+            unique_heap_mut(&mut child).1[0] = last;
+            *unique_heap_mut(&mut grandchild).1.last_mut().unwrap() = child;
             stack.push(current);
             current = grandchild;
         }
         while let Some(mut parent) = stack.pop() {
-            unique_heap_mut(&mut parent).children[0] = current;
-            let child = &mut unique_heap_mut(&mut parent).children[0];
-            let grandchild = unique_heap_mut(child).children.last_mut().unwrap();
-            summarize_children(unique_heap_mut(grandchild), language);
-            summarize_children(unique_heap_mut(child), language);
-            summarize_children(unique_heap_mut(&mut parent), language);
+            unique_heap_mut(&mut parent).1[0] = current;
+            let child = &mut unique_heap_mut(&mut parent).1[0];
+            let grandchild = unique_heap_mut(child).1.last_mut().unwrap();
+            let (data, children) = unique_heap_mut(grandchild);
+            summarize_children(data, children, language);
+            let (data, children) = unique_heap_mut(child);
+            summarize_children(data, children, language);
+            let (data, children) = unique_heap_mut(&mut parent);
+            summarize_children(data, children, language);
             current = parent;
         }
         *tree = current;
@@ -2969,7 +3125,7 @@ mod summary_tests {
             // column dependence turns on its previous size, are common.
             let rows = u32::from(next().is_multiple_of(12));
             let bytes = 1 + next() % 300;
-            Subtree::Heap(Arc::new(SubtreeHeapData {
+            SubtreeHeapData {
                 symbol: 1,
                 padding: Length {
                     bytes: next() % 4,
@@ -2988,10 +3144,10 @@ mod summary_tests {
                 depends_on_column: next().is_multiple_of(3),
                 fragile_left: next().is_multiple_of(7),
                 fragile_right: next().is_multiple_of(7),
-                children: Children::new(),
                 payload: SubtreePayload::Leaf,
                 ..SubtreeHeapData::default()
-            }))
+            }
+            .with_children(Children::new())
         };
         let first = leaf(&mut next);
         let second = leaf(&mut next);
@@ -3167,7 +3323,6 @@ mod summary_tests {
                 &language,
                 |header| {
                     assert!(header.has_external_tokens);
-                    assert!(header.children.is_empty());
                     header.payload =
                         SubtreePayload::External(ts_external_scanner_state_init(&bytes));
                     header.has_external_scanner_state_change = true;
@@ -3179,7 +3334,8 @@ mod summary_tests {
             let Subtree::Heap(header) = &tree else {
                 panic!("external tokens are heap leaves")
             };
-            assert_eq!(Arc::strong_count(header), 1);
+            assert_eq!(header.strong_count(), 1);
+            assert!(header.children().is_empty());
             assert!(header.has_external_scanner_state_change && header.depends_on_column);
             assert_eq!(header.parse_state, 7);
             assert_eq!(
@@ -3224,14 +3380,13 @@ mod summary_tests {
                         named: metadata.named,
                         fragile_left: fragile,
                         fragile_right: fragile,
-                        children: children[..count].to_vec().into(),
                         payload: SubtreePayload::Branch(BranchData {
                             production_id,
                             ..BranchData::default()
                         }),
                         ..SubtreeHeapData::default()
                     };
-                    summarize_children(&mut expected, &language);
+                    summarize_children(&mut expected, &children[..count], &language);
                     let fresh = ts_subtree_new_node(
                         symbol,
                         children[..count].to_vec(),
@@ -3241,8 +3396,12 @@ mod summary_tests {
                     // Debug compares every header/payload field and the child
                     // contents, not the Arc allocation's address.
                     assert_eq!(
-                        format!("{:?}", fresh.heap().unwrap()),
-                        format!("{expected:?}"),
+                        format!(
+                            "{:?} {:?}",
+                            fresh.heap().unwrap(),
+                            ts_subtree_children(&fresh)
+                        ),
+                        format!("{expected:?} {:?}", &children[..count]),
                         "count={count}, symbol={symbol}, production_id={production_id}",
                     );
                 }
@@ -3274,47 +3433,49 @@ mod summary_tests {
         for symbol in [0, 1, 2, BUILTIN_SYM_ERROR, BUILTIN_SYM_ERROR_REPEAT] {
             for flags in 0..32 {
                 for has_children in [false, true] {
-                    children.push(Subtree::Heap(Arc::new(SubtreeHeapData {
-                        symbol,
-                        parse_state: 27,
-                        visible: flags & 1 != 0,
-                        named: flags & 2 != 0,
-                        extra: flags & 4 != 0,
-                        is_missing: flags & 8 != 0,
-                        fragile_left: flags & 16 != 0,
-                        fragile_right: flags & 16 == 0,
-                        depends_on_column: true,
-                        has_external_tokens: true,
-                        has_external_scanner_state_change: true,
-                        padding: Length {
-                            bytes: u32::MAX - 3,
-                            extent: Point { row: 2, column: 4 },
-                        },
-                        size: Length {
-                            bytes: 17,
-                            extent: Point { row: 1, column: 3 },
-                        },
-                        lookahead_bytes: u32::MAX - 7,
-                        error_cost: 97,
-                        children: if has_children {
-                            vec![Subtree::inline(InlineLeaf::default())].into()
-                        } else {
-                            Vec::new().into()
-                        },
-                        payload: SubtreePayload::Branch(BranchData {
-                            visible_child_count: 3,
-                            named_child_count: 2,
-                            visible_descendant_count: u32::MAX,
-                            dynamic_precedence: -11,
-                            repeat_depth: 9,
-                            production_id: 1,
-                            first_leaf: FirstLeaf {
-                                symbol: 2,
-                                parse_state: 13,
+                    children.push(
+                        SubtreeHeapData {
+                            symbol,
+                            parse_state: 27,
+                            visible: flags & 1 != 0,
+                            named: flags & 2 != 0,
+                            extra: flags & 4 != 0,
+                            is_missing: flags & 8 != 0,
+                            fragile_left: flags & 16 != 0,
+                            fragile_right: flags & 16 == 0,
+                            depends_on_column: true,
+                            has_external_tokens: true,
+                            has_external_scanner_state_change: true,
+                            padding: Length {
+                                bytes: u32::MAX - 3,
+                                extent: Point { row: 2, column: 4 },
                             },
+                            size: Length {
+                                bytes: 17,
+                                extent: Point { row: 1, column: 3 },
+                            },
+                            lookahead_bytes: u32::MAX - 7,
+                            error_cost: 97,
+                            payload: SubtreePayload::Branch(BranchData {
+                                visible_child_count: 3,
+                                named_child_count: 2,
+                                visible_descendant_count: u32::MAX,
+                                dynamic_precedence: -11,
+                                repeat_depth: 9,
+                                production_id: 1,
+                                first_leaf: FirstLeaf {
+                                    symbol: 2,
+                                    parse_state: 13,
+                                },
+                            }),
+                            ..SubtreeHeapData::default()
+                        }
+                        .with_children(if has_children {
+                            vec![Subtree::inline(InlineLeaf::default())]
+                        } else {
+                            Vec::new()
                         }),
-                        ..SubtreeHeapData::default()
-                    })));
+                    );
                 }
             }
         }
@@ -3380,7 +3541,7 @@ mod summary_tests {
             size_bytes: 3,
             padding_rows_and_lookahead: 7 << 4,
         });
-        let external = Subtree::Heap(Arc::new(SubtreeHeapData {
+        let external = SubtreeHeapData {
             symbol: 2,
             visible: true,
             extra: true,
@@ -3397,11 +3558,11 @@ mod summary_tests {
             has_external_tokens: true,
             has_external_scanner_state_change: true,
             depends_on_column: true,
-            children: Children::new(),
             payload: SubtreePayload::External(ExternalScannerState::default()),
             ..SubtreeHeapData::default()
-        }));
-        let hidden = Subtree::Heap(Arc::new(SubtreeHeapData {
+        }
+        .with_children(Children::new());
+        let hidden = SubtreeHeapData {
             symbol: 3,
             padding: Length {
                 bytes: 2,
@@ -3413,7 +3574,6 @@ mod summary_tests {
             },
             lookahead_bytes: 1,
             error_cost: 7,
-            children: vec![missing.clone()].into(),
             payload: SubtreePayload::Branch(BranchData {
                 visible_child_count: 2,
                 named_child_count: 1,
@@ -3422,8 +3582,9 @@ mod summary_tests {
                 ..BranchData::default()
             }),
             ..SubtreeHeapData::default()
-        }));
-        let error = Subtree::Heap(Arc::new(SubtreeHeapData {
+        }
+        .with_children(vec![missing.clone()]);
+        let error = SubtreeHeapData {
             symbol: BUILTIN_SYM_ERROR,
             visible: true,
             named: true,
@@ -3432,10 +3593,10 @@ mod summary_tests {
                 extent: Point { row: 0, column: 1 },
             },
             error_cost: 11,
-            children: Children::new(),
             payload: SubtreePayload::Error(0),
             ..SubtreeHeapData::default()
-        }));
+        }
+        .with_children(Children::new());
         let tree = ts_subtree_new_node(
             BUILTIN_SYM_ERROR,
             vec![missing, external, hidden, error],
@@ -3477,17 +3638,17 @@ mod summary_tests {
 
     #[test]
     fn resummarizing_uses_old_rows_and_empty_reductions_have_leaf_precedence() {
-        let child = Subtree::Heap(Arc::new(SubtreeHeapData {
+        let child = SubtreeHeapData {
             symbol: 2,
             parse_state: 23,
             depends_on_column: true,
-            children: Children::new(),
             payload: SubtreePayload::Branch(BranchData {
                 dynamic_precedence: 99,
                 ..BranchData::default()
             }),
             ..SubtreeHeapData::default()
-        }));
+        }
+        .with_children(Children::new());
         let mut data = SubtreeHeapData {
             symbol: 3,
             size: Length {
@@ -3498,17 +3659,17 @@ mod summary_tests {
             fragile_left: true,
             has_external_tokens: true,
             has_external_scanner_state_change: true,
-            children: vec![child].into(),
             payload: SubtreePayload::Branch(BranchData::default()),
             ..SubtreeHeapData::default()
         };
-        summarize_children(&mut data, &language());
+        let children = [child];
+        summarize_children(&mut data, &children, &language());
         assert!(!data.depends_on_column);
         assert!(!data.has_external_tokens && !data.has_external_scanner_state_change);
         assert_eq!(data.size, length_zero());
         assert!(data.fragile_left);
         assert_eq!(data.parse_state, 9);
-        summarize_children(&mut data, &language());
+        summarize_children(&mut data, &children, &language());
         assert!(data.depends_on_column);
         let SubtreePayload::Branch(summary) = &data.payload else {
             unreachable!()
@@ -3561,7 +3722,7 @@ mod children_tests {
     }
 
     #[test]
-    fn up_to_three_children_live_in_the_header() {
+    fn up_to_three_children_are_kept_inline() {
         for count in 0..=5u8 {
             let children = Children::from((1..=count).map(leaf).collect::<Vec<_>>());
             assert_eq!(
@@ -3618,11 +3779,11 @@ mod children_tests {
     fn dropping_a_deep_tree_of_inline_children_does_not_recurse() {
         let mut tree = leaf(1);
         for _ in 0..200_000 {
-            tree = Subtree::Heap(Arc::new(SubtreeHeapData {
-                children: vec![tree, leaf(2)].into(),
+            tree = SubtreeHeapData {
                 payload: SubtreePayload::Branch(BranchData::default()),
                 ..SubtreeHeapData::default()
-            }));
+            }
+            .with_children(vec![tree, leaf(2)]);
         }
         let shared = tree.clone();
         drop(tree);

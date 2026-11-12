@@ -1011,8 +1011,8 @@ pub(crate) fn ts_parser__select_children(
     children: &[Subtree],
 ) -> bool {
     // C builds a non-owning header at the end of its scratch array. Rust owns
-    // these temporary child handles. A few fit in the header itself, and more
-    // go in the scratch Vec, whose allocation is recovered for reuse.
+    // these temporary child handles. A few fit in the node itself, and more go
+    // in the scratch Vec, whose allocation is recovered for reuse.
     let children = if children.len() <= INLINE_CHILD_CAPACITY {
         Children::from(children)
     } else {
@@ -1027,9 +1027,10 @@ pub(crate) fn ts_parser__select_children(
         parser.language.as_ref().unwrap(),
     );
     let result = ts_parser__select_tree(parser, left, &scratch_tree);
-    if let Children::Heap(mut children) =
-        std::mem::take(&mut scratch_tree.heap_mut().unwrap().children)
+    if let Subtree::Heap(HeapSubtree::Many(node)) = &mut scratch_tree
+        && let Some(node) = Arc::get_mut(node)
     {
+        let mut children = std::mem::take(&mut node.children);
         children.clear();
         parser.scratch_trees = children;
     }
@@ -1292,8 +1293,8 @@ fn ts_parser__reduce_general(
         };
         // Alternative children are compared using their summarized precedence,
         // before adding this reduction's precedence, just as in C.
-        // A few children move into the parent's header, and the stack keeps
-        // their emptied array for its next pop.
+        // A few children move into the parent node, and the stack keeps their
+        // emptied array for its next pop.
         let node_children = Children::take_from_vec(&mut children);
         ts_stack_recycle_subtree_array(&mut parser.stack, children);
         let parent = if pop.peek().is_some_and(|next| next.version == slice.version) {
@@ -2803,7 +2804,7 @@ impl<'tree> BalanceCursor<'tree> {
     fn is_unique_branch(tree: &Subtree) -> bool {
         #[cfg(test)]
         BALANCE_CURSOR_STEPS.with(|steps| steps.set(steps.get() + 1));
-        matches!(tree, Subtree::Heap(data) if !data.children.is_empty() && Arc::strong_count(data) == 1)
+        matches!(tree, Subtree::Heap(data) if !data.children().is_empty() && data.strong_count() == 1)
     }
 
     fn children_mut(tree: &mut Subtree) -> &mut [Subtree] {
@@ -2812,10 +2813,9 @@ impl<'tree> BalanceCursor<'tree> {
         let Subtree::Heap(data) = tree else {
             unreachable!("only heap branches are balanced");
         };
-        Arc::get_mut(data)
+        data.get_mut()
             .expect("balancing only visits uniquely owned branches")
-            .children
-            .as_mut_slice()
+            .1
     }
 
     /// The walk resumes at the node at `path`.
@@ -2909,12 +2909,12 @@ mod tests {
     }
 
     fn branch(symbol: Symbol, children: Vec<Subtree>) -> Subtree {
-        Subtree::Heap(Arc::new(SubtreeHeapData {
+        SubtreeHeapData {
             symbol,
-            children: children.into(),
             payload: SubtreePayload::Branch(BranchData::default()),
             ..SubtreeHeapData::default()
-        }))
+        }
+        .with_children(children)
     }
 
     fn reduction_language() -> Language {
@@ -2934,13 +2934,13 @@ mod tests {
     #[test]
     fn borrowed_cache_updates_match_owning_updates_and_keep_snapshot_identity() {
         fn external(symbol: Symbol, bytes: &[u8]) -> Subtree {
-            Subtree::Heap(Arc::new(SubtreeHeapData {
+            SubtreeHeapData {
                 symbol,
                 has_external_tokens: true,
                 payload: SubtreePayload::External(ts_external_scanner_state_init(bytes)),
-                children: Children::new(),
                 ..SubtreeHeapData::default()
-            }))
+            }
+            .with_children(Children::new())
         }
 
         fn run(borrowed: bool) -> Vec<(String, Vec<usize>, usize)> {
@@ -2997,7 +2997,7 @@ mod tests {
                     snapshots
                         .iter()
                         .map(|tree| match tree {
-                            Subtree::Heap(data) => Arc::strong_count(data),
+                            Subtree::Heap(data) => data.strong_count(),
                             _ => 0,
                         })
                         .collect(),
@@ -3045,8 +3045,8 @@ mod tests {
                 let Subtree::Heap(data) = tree else {
                     panic!("reduced branch")
                 };
-                assert_eq!(std::sync::Arc::strong_count(data), 1);
-                assert_eq!(data.children.len(), usize::from(i > 0));
+                assert_eq!(data.strong_count(), 1);
+                assert_eq!(data.children().len(), usize::from(i > 0));
             }
             ts_parser_reset(&mut parser);
             assert!(parser.stack.slices.is_empty());
@@ -3106,7 +3106,7 @@ mod tests {
                 .unwrap()
                 .subtree;
             let data = tree.heap().unwrap();
-            assert_eq!(data.children.len(), 1);
+            assert_eq!(ts_subtree_child_count(tree), 1);
             assert_eq!(data.size.bytes, 3);
             assert_eq!(ts_subtree_dynamic_precedence(tree), 4);
             assert_eq!(data.fragile_left, fragile);
@@ -3476,12 +3476,12 @@ mod tests {
             if force_general {
                 parser.logger = Some(Box::new(|_, _| {}));
             }
-            let external = Subtree::Heap(Arc::new(SubtreeHeapData {
+            let external = SubtreeHeapData {
                 has_external_tokens: true,
-                children: Children::new(),
                 payload: SubtreePayload::External(ExternalScannerState::default()),
                 ..SubtreeHeapData::default()
-            }));
+            }
+            .with_children(Children::new());
             let head = &mut parser.stack.heads[0];
             head.last_external_token = external.clone();
             head.node_count_at_last_error = 17;
@@ -3716,10 +3716,10 @@ mod tests {
                 ),
             ],
         );
-        let root_address = Arc::as_ptr(match &tree {
-            Subtree::Heap(data) => data,
+        let root_address = match &tree {
+            Subtree::Heap(data) => data.as_ptr(),
             _ => unreachable!(),
-        });
+        };
         let mut cursor = BalanceCursor::new(&mut tree, Vec::new());
         let mut symbols = Vec::new();
         while let Some(tree) = cursor.next() {
@@ -3732,10 +3732,10 @@ mod tests {
         let Subtree::Heap(root) = &tree else {
             unreachable!()
         };
-        assert_eq!(Arc::as_ptr(root), root_address);
-        assert!(root.children[1].ptr_eq(&shared));
-        assert_eq!(ts_subtree_symbol(&root.children[0]), 2);
-        assert_eq!(ts_subtree_symbol(&root.children[2]), 3);
+        assert_eq!(root.as_ptr(), root_address);
+        assert!(root.children()[1].ptr_eq(&shared));
+        assert_eq!(ts_subtree_symbol(&root.children()[0]), 2);
+        assert_eq!(ts_subtree_symbol(&root.children()[2]), 3);
     }
 
     #[test]

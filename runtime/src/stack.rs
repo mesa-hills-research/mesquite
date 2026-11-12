@@ -134,8 +134,8 @@ pub(crate) struct Stack {
     pub arena: StackArena,
     pub base_node: StackNodeId,
     /// Emptied child arrays of earlier pops, for the next pops to fill. Most
-    /// reductions move their few children into the parent's header and give
-    /// the array back, so a pop seldom allocates.
+    /// reductions move their few children into the parent node and give the
+    /// array back, so a pop seldom allocates.
     pub spare_subtree_arrays: Vec<Vec<Subtree>>,
 }
 
@@ -1001,7 +1001,7 @@ pub(crate) fn ts_stack_reduce_many_for_version(
         slot = predecessor;
         predecessor = link.node;
     }
-    // Up to three children go straight into the parent's header.
+    // Up to three children go straight into the parent node.
     let mut children = Children::with_capacity(subtree_count);
     if count > 0 {
         let mut node = stack.heads[version as usize].node;
@@ -1697,20 +1697,20 @@ mod version_tests {
                 let child = match child_kind {
                     0 => Subtree::Null,
                     1 => leaf(11),
-                    _ => Subtree::Heap(Arc::new(SubtreeHeapData {
+                    _ => SubtreeHeapData {
                         size: Length {
                             bytes: 17,
                             extent: crate::point::Point { row: 2, column: 9 },
                         },
                         error_cost: 4,
-                        children: Children::new(),
                         payload: SubtreePayload::Branch(BranchData {
                             dynamic_precedence: -5,
                             visible_child_count: 3,
                             ..BranchData::default()
                         }),
                         ..SubtreeHeapData::default()
-                    })),
+                    }
+                    .with_children(Children::new()),
                 };
                 ts_stack_push(&mut stack, &mut pool, 0, child, true, 4);
                 stack.heads[0].node_count_at_last_error = 37;
@@ -1727,7 +1727,7 @@ mod version_tests {
                     // Deliberately different summaries: the replacement must
                     // use predecessor + parent, not preserve the child's totals.
                     (
-                        Subtree::Heap(Arc::new(SubtreeHeapData {
+                        SubtreeHeapData {
                             size: Length {
                                 bytes: 39,
                                 extent: crate::point::Point { row: 3, column: 8 },
@@ -1743,9 +1743,9 @@ mod version_tests {
                                 visible_descendant_count: 5,
                                 ..BranchData::default()
                             }),
-                            children,
                             ..SubtreeHeapData::default()
-                        })),
+                        }
+                        .with_children(children),
                         6,
                     )
                 };
@@ -1793,7 +1793,7 @@ mod version_tests {
                     let build = |children: Children, state| {
                         assert_eq!(state, 1);
                         (
-                            Subtree::Heap(Arc::new(SubtreeHeapData {
+                            SubtreeHeapData {
                                 size: Length {
                                     bytes: 45,
                                     extent: crate::point::Point { row: 4, column: 6 },
@@ -1803,9 +1803,9 @@ mod version_tests {
                                     visible_descendant_count: 7,
                                     ..BranchData::default()
                                 }),
-                                children,
                                 ..SubtreeHeapData::default()
-                            })),
+                            }
+                            .with_children(children),
                             3,
                         )
                     };
@@ -1836,19 +1836,26 @@ mod version_tests {
     fn unary_reduction_moves_child_without_retaining_it() {
         let mut pool = SubtreePool::default();
         let mut stack = ts_stack_new();
-        let child = Arc::new(SubtreeHeapData::default());
+        let child = Arc::new(LeafNode::default());
         let weak = Arc::downgrade(&child);
-        ts_stack_push(&mut stack, &mut pool, 0, Subtree::Heap(child), false, 2);
+        ts_stack_push(
+            &mut stack,
+            &mut pool,
+            0,
+            Subtree::Heap(HeapSubtree::Leaf(child)),
+            false,
+            2,
+        );
         assert_eq!(
             ts_stack_reduce_unary(&mut stack, |children, _| {
                 assert_eq!(weak.strong_count(), 1);
                 assert_eq!(children.len(), 1);
                 (
-                    Subtree::Heap(Arc::new(SubtreeHeapData {
-                        children,
+                    SubtreeHeapData {
                         payload: SubtreePayload::Branch(BranchData::default()),
                         ..SubtreeHeapData::default()
-                    })),
+                    }
+                    .with_children(children),
                     3,
                 )
             }),
@@ -1919,12 +1926,12 @@ mod version_tests {
         let mut pool = SubtreePool::default();
         let mut stack = ts_stack_new();
         let base = stack.base_node;
-        let heap = Arc::new(SubtreeHeapData::default());
+        let heap = Arc::new(LeafNode::default());
         ts_stack_push(
             &mut stack,
             &mut pool,
             0,
-            Subtree::Heap(heap.clone()),
+            Subtree::Heap(HeapSubtree::Leaf(heap.clone())),
             false,
             2,
         );
@@ -2065,12 +2072,12 @@ mod version_tests {
 
     #[test]
     fn error_callback_pops_only_the_first_error_path() {
-        let error = Subtree::Heap(Arc::new(SubtreeHeapData {
+        let error = SubtreeHeapData {
             symbol: tree_sitter_language::BUILTIN_SYM_ERROR,
-            children: Children::new(),
             payload: SubtreePayload::Leaf,
             ..SubtreeHeapData::default()
-        }));
+        }
+        .with_children(Children::new());
         let mut iter = iterator(0, true);
         let mut found_error = false;
         assert_eq!(
@@ -2154,7 +2161,7 @@ mod version_tests {
     fn pause_resume_transfers_lookahead_and_updates_baseline() {
         let mut stack = stack();
         let mut pool = SubtreePool::default();
-        let lookahead = Subtree::Heap(Arc::new(SubtreeHeapData::default()));
+        let lookahead = SubtreeHeapData::default().with_children(Children::new());
         assert!(ts_stack_is_active(&stack, 0));
         ts_stack_pause(&mut stack, &mut pool, 0, lookahead.clone());
         assert!(ts_stack_is_paused(&stack, 0));
@@ -2232,7 +2239,7 @@ mod tests {
         assert!(ts_stack_last_external_token(&stack, 0).is_null());
         assert_eq!(stack.arena.node(stack.base_node).ref_count, 2);
 
-        let token = Subtree::Heap(Arc::new(SubtreeHeapData::default()));
+        let token = SubtreeHeapData::default().with_children(Children::new());
         ts_stack_set_last_external_token(&mut stack, &mut pool, 0, token.clone());
         stack.heads[0].node_count_at_last_error = 17;
         stack.heads[0].summary = Some(Vec::new());
@@ -2250,7 +2257,7 @@ mod tests {
         assert!(head.lookahead_when_paused.is_null());
         assert!(head.last_external_token.ptr_eq(&token));
         assert_eq!(
-            Arc::strong_count(match &token {
+            HeapSubtree::strong_count(match &token {
                 Subtree::Heap(d) => d,
                 _ => unreachable!(),
             }),
@@ -2294,7 +2301,7 @@ mod tests {
         let base = stack_node_new(&mut arena, None, Subtree::Null, false, 1);
         let parent = stack_node_new(&mut arena, Some(base), leaf(1, VISIBLE), false, 2);
         stack_node_retain(&mut arena, parent);
-        let tree = Subtree::Heap(Arc::new(SubtreeHeapData {
+        let tree = SubtreeHeapData {
             padding: Length {
                 bytes: 2,
                 ..Length::default()
@@ -2305,14 +2312,14 @@ mod tests {
             },
             error_cost: 13,
             visible: true,
-            children: vec![leaf(3, VISIBLE)].into(),
             payload: SubtreePayload::Branch(BranchData {
                 visible_descendant_count: 9,
                 dynamic_precedence: 11,
                 ..BranchData::default()
             }),
             ..SubtreeHeapData::default()
-        }));
+        }
+        .with_children(vec![leaf(3, VISIBLE)]);
         let top = stack_node_new(&mut arena, Some(parent), tree, true, 3);
         let header = arena.node(top);
         assert_eq!(header.position.bytes, 7);
@@ -2365,13 +2372,15 @@ mod tests {
     #[test]
     fn branched_release_pools_subtrees_in_c_order() {
         let heap = |symbol| {
-            let data = Arc::new(SubtreeHeapData {
-                symbol,
-                children: Children::new(),
-                payload: SubtreePayload::Leaf,
-                ..SubtreeHeapData::default()
+            let data = Arc::new(HeapNode {
+                data: SubtreeHeapData {
+                    symbol,
+                    payload: SubtreePayload::Leaf,
+                    ..SubtreeHeapData::default()
+                },
+                children: [],
             });
-            (Arc::as_ptr(&data), Subtree::Heap(data))
+            (Arc::as_ptr(&data), Subtree::Heap(HeapSubtree::Leaf(data)))
         };
         let mut arena = StackArena::default();
         let mut pool = ts_subtree_pool_new(32);
@@ -2452,7 +2461,7 @@ mod tests {
                 extent: Point { row: 1, column: 3 }
             }
         );
-        let error = Subtree::Heap(Arc::new(SubtreeHeapData {
+        let error = SubtreeHeapData {
             symbol: BUILTIN_SYM_ERROR_REPEAT,
             padding: Length {
                 bytes: 1,
@@ -2463,14 +2472,14 @@ mod tests {
                 extent: Point { row: 2, column: 2 },
             },
             error_cost: 23,
-            children: vec![leaf(2, VISIBLE)].into(),
             payload: SubtreePayload::Branch(BranchData {
                 visible_descendant_count: 3,
                 dynamic_precedence: -7,
                 ..BranchData::default()
             }),
             ..SubtreeHeapData::default()
-        }));
+        }
+        .with_children(vec![leaf(2, VISIBLE)]);
         assert_eq!(stack__subtree_node_count(&error), 4);
         let second = stack_node_new(&mut arena, Some(first), error, false, 3);
         let data = arena.node(second);
@@ -2524,21 +2533,21 @@ mod tests {
             arena
         }
 
-        let heap = Subtree::Heap(Arc::new(SubtreeHeapData {
+        let heap = SubtreeHeapData {
             symbol: BUILTIN_SYM_ERROR_REPEAT,
             size: Length {
                 bytes: 4,
                 extent: Point { row: 2, column: 3 },
             },
             error_cost: 23,
-            children: vec![leaf(2, VISIBLE)].into(),
             payload: SubtreePayload::Branch(BranchData {
                 visible_descendant_count: 3,
                 dynamic_precedence: -5,
                 ..BranchData::default()
             }),
             ..SubtreeHeapData::default()
-        }));
+        }
+        .with_children(vec![leaf(2, VISIBLE)]);
         for tree in [Subtree::Null, leaf(3, VISIBLE), leaf(4, MISSING), heap] {
             for pending in [false, true] {
                 let fresh = construct(tree.clone(), pending, false);
@@ -2562,13 +2571,13 @@ mod tests {
         assert!(stack__subtree_is_equivalent(&a, &a.clone()));
         assert!(!stack__subtree_is_equivalent(&a, &Subtree::Null));
         assert!(!stack__subtree_is_equivalent(&a, &b));
-        let error = Subtree::Heap(Arc::new(SubtreeHeapData {
+        let error = SubtreeHeapData {
             symbol: 9,
             error_cost: 1,
-            children: Children::new(),
             payload: SubtreePayload::Leaf,
             ..SubtreeHeapData::default()
-        }));
+        }
+        .with_children(Children::new());
         let mut other = error.clone();
         other.heap_mut().unwrap().error_cost = 10;
         other.heap_mut().unwrap().extra = true;
@@ -2862,17 +2871,17 @@ mod tests {
 
     #[test]
     fn in_place_pop_matches_pop_then_renumber() {
-        let heap = Subtree::Heap(Arc::new(SubtreeHeapData {
+        let heap = SubtreeHeapData {
             symbol: 3,
             visible: true,
-            children: Children::new(),
             payload: SubtreePayload::Leaf,
             size: Length {
                 bytes: 3,
                 extent: Point { row: 0, column: 3 },
             },
             ..SubtreeHeapData::default()
-        }));
+        }
+        .with_children(Children::new());
         for count in 0..=4 {
             let build = || {
                 let mut stack = ts_stack_new();
@@ -2910,14 +2919,14 @@ mod tests {
             let mut optimized = build();
             let mut pool = SubtreePool::default();
             let original_top = optimized.heads[0].node;
-            let original_refs = Arc::strong_count(match &heap {
+            let original_refs = HeapSubtree::strong_count(match &heap {
                 Subtree::Heap(data) => data,
                 _ => unreachable!(),
             });
             let fast = ts_stack_pop_count_in_place(&mut optimized, count);
             // Moving the handles preserves the subtree reference counts.
             assert_eq!(
-                Arc::strong_count(match &heap {
+                HeapSubtree::strong_count(match &heap {
                     Subtree::Heap(data) => data,
                     _ => unreachable!(),
                 }),
@@ -2958,13 +2967,13 @@ mod tests {
 
     #[test]
     fn single_child_pop_moves_null_inline_and_heap_links() {
-        let heap = Subtree::Heap(Arc::new(SubtreeHeapData {
+        let heap = SubtreeHeapData {
             symbol: 3,
             visible: true,
-            children: Children::new(),
             payload: SubtreePayload::Leaf,
             ..SubtreeHeapData::default()
-        }));
+        }
+        .with_children(Children::new());
         for tree in [Subtree::Null, leaf(2, VISIBLE), heap.clone()] {
             for pending in [false, true] {
                 let build = || {
@@ -2983,13 +2992,13 @@ mod tests {
                 let mut ordinary = build();
                 let mut optimized = build();
                 let mut pool = SubtreePool::default();
-                let references = Arc::strong_count(match &heap {
+                let references = HeapSubtree::strong_count(match &heap {
                     Subtree::Heap(data) => data,
                     _ => unreachable!(),
                 });
                 let fast = ts_stack_pop_count_in_place(&mut optimized, 1).unwrap();
                 assert_eq!(
-                    Arc::strong_count(match &heap {
+                    HeapSubtree::strong_count(match &heap {
                         Subtree::Heap(data) => data,
                         _ => unreachable!(),
                     }),
