@@ -116,7 +116,7 @@ fn child_iterator_tracks_padding_extents_and_structural_aliases() {
     let extra = SubtreeHeapData {
         padding: length(2, 1, 1),
         size: length(4, 1, 2),
-        extra: true,
+        flags: HeapFlags::default().with_extra(true),
         payload: SubtreePayload::Leaf,
         ..SubtreeHeapData::default()
     }

@@ -235,18 +235,68 @@ pub(crate) struct SubtreeHeapData {
     pub error_cost: u32,
     pub symbol: Symbol,
     pub parse_state: StateId,
-    pub visible: bool,
-    pub named: bool,
-    pub extra: bool,
-    pub fragile_left: bool,
-    pub fragile_right: bool,
-    pub has_changes: bool,
-    pub has_external_tokens: bool,
-    pub has_external_scanner_state_change: bool,
-    pub depends_on_column: bool,
-    pub is_missing: bool,
-    pub is_keyword: bool,
+    pub flags: HeapFlags,
     pub payload: SubtreePayload,
+}
+
+/// The header's boolean fields, packed into two bytes as C packs them into
+/// bitfields. Eleven bytes of booleans would push every node into the next
+/// block size of glibc's allocator.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct HeapFlags(u16);
+
+macro_rules! heap_flags {
+    ($($bit:literal $name:ident $set:ident $with:ident),* $(,)?) => {
+        impl HeapFlags {
+            $(
+                #[inline]
+                pub(crate) const fn $name(self) -> bool {
+                    self.0 & (1 << $bit) != 0
+                }
+
+                #[inline]
+                pub(crate) const fn $with(self, value: bool) -> Self {
+                    Self(if value { self.0 | (1 << $bit) } else { self.0 & !(1 << $bit) })
+                }
+            )*
+        }
+
+        impl SubtreeHeapData {
+            $(
+                #[inline]
+                pub(crate) const fn $name(&self) -> bool {
+                    self.flags.$name()
+                }
+
+                #[inline]
+                pub(crate) fn $set(&mut self, value: bool) {
+                    self.flags = self.flags.$with(value);
+                }
+            )*
+        }
+
+        impl std::fmt::Debug for HeapFlags {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("HeapFlags")
+                    $(.field(stringify!($name), &self.$name()))*
+                    .finish()
+            }
+        }
+    };
+}
+
+heap_flags! {
+    0 visible set_visible with_visible,
+    1 named set_named with_named,
+    2 extra set_extra with_extra,
+    3 fragile_left set_fragile_left with_fragile_left,
+    4 fragile_right set_fragile_right with_fragile_right,
+    5 has_changes set_has_changes with_has_changes,
+    6 has_external_tokens set_has_external_tokens with_has_external_tokens,
+    7 has_external_scanner_state_change set_has_external_scanner_state_change with_has_external_scanner_state_change,
+    8 depends_on_column set_depends_on_column with_depends_on_column,
+    9 is_missing set_is_missing with_is_missing,
+    10 is_keyword set_is_keyword with_is_keyword,
 }
 
 #[cfg(test)]
@@ -808,23 +858,19 @@ fn new_heap_leaf(
         lookahead_bytes,
         symbol,
         parse_state,
-        visible: metadata.visible,
-        named: metadata.named,
-        extra,
-        has_external_tokens,
-        depends_on_column,
-        is_keyword,
+        flags: HeapFlags::default()
+            .with_visible(metadata.visible)
+            .with_named(metadata.named)
+            .with_extra(extra)
+            .with_has_external_tokens(has_external_tokens)
+            .with_depends_on_column(depends_on_column)
+            .with_is_keyword(is_keyword),
         payload: if has_external_tokens {
             SubtreePayload::External(ExternalScannerState::default())
         } else {
             SubtreePayload::Leaf
         },
         error_cost: 0,
-        fragile_left: false,
-        fragile_right: false,
-        has_changes: false,
-        has_external_scanner_state_change: false,
-        is_missing: false,
     };
     initialize(&mut header);
     if let Some(mut node) = pool.free_trees.pop() {
@@ -857,8 +903,8 @@ pub(crate) fn ts_subtree_set_symbol(tree: &mut Subtree, symbol: Symbol, language
         Subtree::Heap(data) => {
             let data = data.make_mut();
             data.symbol = symbol;
-            data.named = metadata.named;
-            data.visible = metadata.visible;
+            data.set_named(metadata.named);
+            data.set_visible(metadata.visible);
         }
         Subtree::Null => panic!("cannot set the symbol of a null subtree"),
     }
@@ -886,8 +932,8 @@ pub(crate) fn ts_subtree_new_error(
         language,
     );
     let data = result.heap_mut().expect("error symbols cannot be inline");
-    data.fragile_left = true;
-    data.fragile_right = true;
+    data.set_fragile_left(true);
+    data.set_fragile_right(true);
     data.payload = SubtreePayload::Error(lookahead_char);
     result
 }
@@ -1062,11 +1108,11 @@ fn summarize_children(data: &mut SubtreeHeapData, children: &[Subtree], language
         has_external_tokens: false,
         has_external_scanner_state_change: false,
         depends_on_column: false,
-        fragile_left: data.fragile_left,
-        fragile_right: data.fragile_right,
+        fragile_left: data.flags.fragile_left(),
+        fragile_right: data.flags.fragile_right(),
         symbol: data.symbol,
-        visible: data.visible,
-        named: data.named,
+        visible: data.flags.visible(),
+        named: data.flags.named(),
     };
     summarize_child_slice(&mut summary, children, language);
     *branch = summary.branch;
@@ -1075,11 +1121,11 @@ fn summarize_children(data: &mut SubtreeHeapData, children: &[Subtree], language
     data.lookahead_bytes = summary.lookahead_bytes;
     data.error_cost = summary.error_cost;
     data.parse_state = summary.parse_state;
-    data.has_external_tokens = summary.has_external_tokens;
-    data.has_external_scanner_state_change = summary.has_external_scanner_state_change;
-    data.depends_on_column = summary.depends_on_column;
-    data.fragile_left = summary.fragile_left;
-    data.fragile_right = summary.fragile_right;
+    data.set_has_external_tokens(summary.has_external_tokens);
+    data.set_has_external_scanner_state_change(summary.has_external_scanner_state_change);
+    data.set_depends_on_column(summary.depends_on_column);
+    data.set_fragile_left(summary.fragile_left);
+    data.set_fragile_right(summary.fragile_right);
 }
 
 #[inline(always)]
@@ -1152,26 +1198,26 @@ fn summarize_unary(data: &mut ChildSummary, child: &Subtree) {
                 if has_children {
                     summary.first_leaf = branch.first_leaf;
                     summary.dynamic_precedence = branch.dynamic_precedence;
-                    if !child.visible {
+                    if !child.visible() {
                         summary.visible_child_count = branch.visible_child_count;
                         summary.named_child_count = branch.named_child_count;
                     }
                 }
             }
-            if child.visible {
+            if child.visible() {
                 summary.visible_child_count = 1;
-                summary.named_child_count = u32::from(child.named);
+                summary.named_child_count = u32::from(child.named());
                 summary.visible_descendant_count = summary.visible_descendant_count.wrapping_add(1);
             }
             let error_cost = if child.symbol == BUILTIN_SYM_ERROR_REPEAT {
                 0
-            } else if child.is_missing {
+            } else if child.is_missing() {
                 ERROR_COST_PER_MISSING_TREE + ERROR_COST_PER_RECOVERY
             } else {
                 child.error_cost
             };
-            fragile_left |= child.fragile_left;
-            fragile_right |= child.fragile_right;
+            fragile_left |= child.fragile_left();
+            fragile_right |= child.fragile_right();
             if child.symbol == BUILTIN_SYM_ERROR {
                 fragile_left = true;
                 fragile_right = true;
@@ -1182,9 +1228,9 @@ fn summarize_unary(data: &mut ChildSummary, child: &Subtree) {
                 child.size,
                 child.lookahead_bytes,
                 error_cost,
-                data.size.extent.row == 0 && child.depends_on_column,
-                child.has_external_tokens,
-                child.has_external_scanner_state_change,
+                data.size.extent.row == 0 && child.depends_on_column(),
+                child.has_external_tokens(),
+                child.has_external_scanner_state_change(),
             )
         }
         Subtree::Null => (length_zero(), length_zero(), 0, 0, false, false, false),
@@ -1295,13 +1341,13 @@ impl ChildTotals<'_> {
             Subtree::Heap(child) => {
                 // C checks the existing size before replacing it for the
                 // first child, including when re-summarizing a rotation.
-                if self.size.extent.row == 0 && child.depends_on_column {
+                if self.size.extent.row == 0 && child.depends_on_column() {
                     self.depends_on_column = true;
                 }
-                self.has_external_scanner_state_change |= child.has_external_scanner_state_change;
-                self.has_external_tokens |= child.has_external_tokens;
+                self.has_external_scanner_state_change |= child.has_external_scanner_state_change();
+                self.has_external_tokens |= child.has_external_tokens();
                 if child.symbol != BUILTIN_SYM_ERROR_REPEAT {
-                    self.error_cost = self.error_cost.wrapping_add(if child.is_missing {
+                    self.error_cost = self.error_cost.wrapping_add(if child.is_missing() {
                         ERROR_COST_PER_MISSING_TREE + ERROR_COST_PER_RECOVERY
                     } else {
                         child.error_cost
@@ -1347,20 +1393,20 @@ impl ChildTotals<'_> {
                     self.first_leaf = first_leaf;
                     self.first_symbol = child.symbol;
                     self.first_repeat_depth = repeat_depth;
-                    self.fragile_left |= child.fragile_left;
+                    self.fragile_left |= child.fragile_left();
                 }
                 if is_last {
                     self.last_repeat_depth = repeat_depth;
-                    self.fragile_right |= child.fragile_right;
+                    self.fragile_right |= child.fragile_right();
                 }
                 (
                     child.padding,
                     child.size,
                     child.lookahead_bytes,
                     child.symbol,
-                    child.visible,
-                    child.named,
-                    child.extra,
+                    child.visible(),
+                    child.named(),
+                    child.extra(),
                     has_children,
                     child_visible_child_count,
                     child_named_child_count,
@@ -1573,23 +1619,20 @@ pub(crate) fn ts_subtree_new_node_with(
     // Explicit fields also avoid constructing a dropping default temporary.
     let mut result = SubtreeHeapData {
         symbol,
-        visible: metadata.visible,
-        named: metadata.named,
+        flags: HeapFlags::default()
+            .with_visible(metadata.visible)
+            .with_named(metadata.named)
+            .with_has_external_tokens(summary.has_external_tokens)
+            .with_has_external_scanner_state_change(summary.has_external_scanner_state_change)
+            .with_depends_on_column(summary.depends_on_column)
+            .with_fragile_left(summary.fragile_left)
+            .with_fragile_right(summary.fragile_right),
         padding: summary.padding,
         size: summary.size,
         lookahead_bytes: summary.lookahead_bytes,
         error_cost: summary.error_cost,
         parse_state: summary.parse_state,
-        has_external_tokens: summary.has_external_tokens,
-        has_external_scanner_state_change: summary.has_external_scanner_state_change,
-        depends_on_column: summary.depends_on_column,
-        fragile_left: summary.fragile_left,
-        fragile_right: summary.fragile_right,
         payload: SubtreePayload::Branch(summary.branch),
-        extra: false,
-        has_changes: false,
-        is_missing: false,
-        is_keyword: false,
     };
     initialize(&mut result);
     Subtree::Heap(HeapSubtree::new(result, children))
@@ -1601,7 +1644,7 @@ pub(crate) fn ts_subtree_new_error_node(
     language: &Language,
 ) -> Subtree {
     let mut result = ts_subtree_new_node(BUILTIN_SYM_ERROR, children, 0, language);
-    result.heap_mut().unwrap().extra = extra;
+    result.heap_mut().unwrap().set_extra(extra);
     result
 }
 
@@ -1626,7 +1669,7 @@ pub(crate) fn ts_subtree_new_missing_leaf(
     );
     match &mut result {
         Subtree::Inline(data) => data.set_flag(MISSING, true),
-        Subtree::Heap(data) => data.make_mut().is_missing = true,
+        Subtree::Heap(data) => data.make_mut().set_is_missing(true),
         Subtree::Null => unreachable!(),
     }
     result
@@ -1726,7 +1769,7 @@ pub(crate) fn ts_subtree_compare(left: &Subtree, right: &Subtree, pool: &mut Sub
 pub(crate) fn ts_subtree_set_has_changes(tree: &mut Subtree) {
     match tree {
         Subtree::Inline(data) => data.set_flag(HAS_CHANGES, true),
-        Subtree::Heap(data) => data.make_mut().has_changes = true,
+        Subtree::Heap(data) => data.make_mut().set_has_changes(true),
         Subtree::Null => panic!("cannot mark a null subtree as changed"),
     }
 }
@@ -1804,11 +1847,12 @@ pub(crate) fn ts_subtree_edit(
                         lookahead_bytes,
                         symbol: data.symbol as Symbol,
                         parse_state: data.parse_state,
-                        visible: data.flags & VISIBLE != 0,
-                        named: data.flags & NAMED != 0,
-                        extra: data.flags & EXTRA != 0,
-                        is_missing: data.flags & MISSING != 0,
-                        is_keyword: data.flags & KEYWORD != 0,
+                        flags: HeapFlags::default()
+                            .with_visible(data.flags & VISIBLE != 0)
+                            .with_named(data.flags & NAMED != 0)
+                            .with_extra(data.flags & EXTRA != 0)
+                            .with_is_missing(data.flags & MISSING != 0)
+                            .with_is_keyword(data.flags & KEYWORD != 0),
                         payload: SubtreePayload::Leaf,
                         ..SubtreeHeapData::default()
                     };
@@ -2157,7 +2201,7 @@ pub(crate) fn ts_subtree_external_scanner_state(tree: &Subtree) -> Option<&Exter
     let Subtree::Heap(data) = tree else {
         return None;
     };
-    if data.has_external_tokens
+    if data.has_external_tokens()
         && data.children().is_empty()
         && let SubtreePayload::External(state) = &data.payload
     {
@@ -2228,7 +2272,7 @@ impl Subtree {
 pub(crate) fn ts_subtree_visible(tree: &Subtree) -> bool {
     match tree {
         Subtree::Inline(d) => d.fields().flags & VISIBLE != 0,
-        Subtree::Heap(d) => d.visible,
+        Subtree::Heap(d) => d.visible(),
         Subtree::Null => false,
     }
 }
@@ -2237,7 +2281,7 @@ pub(crate) fn ts_subtree_visible(tree: &Subtree) -> bool {
 pub(crate) fn ts_subtree_named(tree: &Subtree) -> bool {
     match tree {
         Subtree::Inline(d) => d.fields().flags & NAMED != 0,
-        Subtree::Heap(d) => d.named,
+        Subtree::Heap(d) => d.named(),
         Subtree::Null => false,
     }
 }
@@ -2246,7 +2290,7 @@ pub(crate) fn ts_subtree_named(tree: &Subtree) -> bool {
 pub(crate) fn ts_subtree_extra(tree: &Subtree) -> bool {
     match tree {
         Subtree::Inline(d) => d.fields().flags & EXTRA != 0,
-        Subtree::Heap(d) => d.extra,
+        Subtree::Heap(d) => d.extra(),
         Subtree::Null => false,
     }
 }
@@ -2254,7 +2298,7 @@ pub(crate) fn ts_subtree_extra(tree: &Subtree) -> bool {
 pub(crate) fn ts_subtree_has_changes(tree: &Subtree) -> bool {
     match tree {
         Subtree::Inline(d) => d.fields().flags & HAS_CHANGES != 0,
-        Subtree::Heap(d) => d.has_changes,
+        Subtree::Heap(d) => d.has_changes(),
         Subtree::Null => false,
     }
 }
@@ -2262,7 +2306,7 @@ pub(crate) fn ts_subtree_has_changes(tree: &Subtree) -> bool {
 pub(crate) fn ts_subtree_missing(tree: &Subtree) -> bool {
     match tree {
         Subtree::Inline(d) => d.fields().flags & MISSING != 0,
-        Subtree::Heap(d) => d.is_missing,
+        Subtree::Heap(d) => d.is_missing(),
         Subtree::Null => false,
     }
 }
@@ -2270,7 +2314,7 @@ pub(crate) fn ts_subtree_missing(tree: &Subtree) -> bool {
 pub(crate) fn ts_subtree_is_keyword(tree: &Subtree) -> bool {
     match tree {
         Subtree::Inline(d) => d.fields().flags & KEYWORD != 0,
-        Subtree::Heap(d) => d.is_keyword,
+        Subtree::Heap(d) => d.is_keyword(),
         Subtree::Null => false,
     }
 }
@@ -2301,24 +2345,24 @@ pub(crate) fn ts_subtree_lookahead_bytes(tree: &Subtree) -> u32 {
 }
 
 pub(crate) fn ts_subtree_fragile_left(tree: &Subtree) -> bool {
-    tree.heap().is_some_and(|d| d.fragile_left)
+    tree.heap().is_some_and(|d| d.fragile_left())
 }
 
 pub(crate) fn ts_subtree_fragile_right(tree: &Subtree) -> bool {
-    tree.heap().is_some_and(|d| d.fragile_right)
+    tree.heap().is_some_and(|d| d.fragile_right())
 }
 
 pub(crate) fn ts_subtree_has_external_tokens(tree: &Subtree) -> bool {
-    tree.heap().is_some_and(|d| d.has_external_tokens)
+    tree.heap().is_some_and(|d| d.has_external_tokens())
 }
 
 pub(crate) fn ts_subtree_has_external_scanner_state_change(tree: &Subtree) -> bool {
     tree.heap()
-        .is_some_and(|d| d.has_external_scanner_state_change)
+        .is_some_and(|d| d.has_external_scanner_state_change())
 }
 
 pub(crate) fn ts_subtree_depends_on_column(tree: &Subtree) -> bool {
-    tree.heap().is_some_and(|d| d.depends_on_column)
+    tree.heap().is_some_and(|d| d.depends_on_column())
 }
 
 pub(crate) fn ts_subtree_visible_child_count(tree: &Subtree) -> u32 {
@@ -2376,7 +2420,7 @@ pub(crate) fn ts_subtree_child_count(tree: &Subtree) -> u32 {
 pub(crate) fn ts_subtree_set_extra(tree: &mut Subtree, extra: bool) {
     match tree {
         Subtree::Inline(d) => d.set_flag(EXTRA, extra),
-        Subtree::Heap(d) => d.make_mut().extra = extra,
+        Subtree::Heap(d) => d.make_mut().set_extra(extra),
         Subtree::Null => panic!("cannot set extra on a null subtree"),
     }
 }
@@ -2467,7 +2511,7 @@ mod layout_tests {
             assert_eq!(std::mem::size_of::<Option<Subtree>>(), 16);
             // A node is its header and the child slots it uses.
             let header = std::mem::size_of::<SubtreeHeapData>();
-            assert_eq!(header, 80);
+            assert_eq!(header, 72);
             assert_eq!(std::mem::size_of::<LeafNode>(), header);
             assert_eq!(std::mem::size_of::<HeapNode<[Subtree; 3]>>(), header + 48);
         }
@@ -2788,7 +2832,7 @@ mod construction_tests {
     fn cloning_copies_the_header_but_retains_child_and_scanner_handles() {
         let state = ts_external_scanner_state_init(&[42; 25]);
         let child = SubtreeHeapData {
-            has_external_tokens: true,
+            flags: HeapFlags::default().with_has_external_tokens(true),
             payload: SubtreePayload::External(state),
             ..SubtreeHeapData::default()
         }
@@ -2870,8 +2914,7 @@ mod operation_tests {
         SubtreeHeapData {
             symbol,
             size,
-            visible: true,
-            named: true,
+            flags: HeapFlags::default().with_visible(true).with_named(true),
             payload: SubtreePayload::Branch(BranchData::default()),
             ..SubtreeHeapData::default()
         }
@@ -2984,12 +3027,12 @@ mod operation_tests {
     fn last_external_token_uses_rightmost_external_descendant() {
         let mut external = branch(3, Vec::new());
         let data = external.heap_mut().unwrap();
-        data.has_external_tokens = true;
+        data.set_has_external_tokens(true);
         data.payload = SubtreePayload::External(ExternalScannerState::default());
         let mut internal = branch(2, vec![external.clone(), leaf(4, 1)]);
-        internal.heap_mut().unwrap().has_external_tokens = true;
+        internal.heap_mut().unwrap().set_has_external_tokens(true);
         let mut root = branch(1, vec![external.clone(), internal.clone(), leaf(5, 1)]);
-        root.heap_mut().unwrap().has_external_tokens = true;
+        root.heap_mut().unwrap().set_has_external_tokens(true);
         let last = ts_subtree_last_external_token(&root);
         assert!(last.ptr_eq(&external));
         assert!(ts_subtree_last_external_token(&leaf(1, 1)).is_null());
@@ -3002,7 +3045,7 @@ mod operation_tests {
     fn scanner_state_equality_handles_identity_distinct_heaps_and_empty_states() {
         let external = |bytes: &[u8]| {
             SubtreeHeapData {
-                has_external_tokens: true,
+                flags: HeapFlags::default().with_has_external_tokens(true),
                 payload: SubtreePayload::External(ts_external_scanner_state_init(bytes)),
                 ..SubtreeHeapData::default()
             }
@@ -3141,9 +3184,10 @@ mod summary_tests {
                         column: bytes,
                     },
                 },
-                depends_on_column: next().is_multiple_of(3),
-                fragile_left: next().is_multiple_of(7),
-                fragile_right: next().is_multiple_of(7),
+                flags: HeapFlags::default()
+                    .with_depends_on_column(next().is_multiple_of(3))
+                    .with_fragile_left(next().is_multiple_of(7))
+                    .with_fragile_right(next().is_multiple_of(7)),
                 payload: SubtreePayload::Leaf,
                 ..SubtreeHeapData::default()
             }
@@ -3322,10 +3366,10 @@ mod summary_tests {
                 false,
                 &language,
                 |header| {
-                    assert!(header.has_external_tokens);
+                    assert!(header.has_external_tokens());
                     header.payload =
                         SubtreePayload::External(ts_external_scanner_state_init(&bytes));
-                    header.has_external_scanner_state_change = true;
+                    header.set_has_external_scanner_state_change(true);
                     initialized = true;
                 },
             );
@@ -3336,7 +3380,7 @@ mod summary_tests {
             };
             assert_eq!(header.strong_count(), 1);
             assert!(header.children().is_empty());
-            assert!(header.has_external_scanner_state_change && header.depends_on_column);
+            assert!(header.has_external_scanner_state_change() && header.depends_on_column());
             assert_eq!(header.parse_state, 7);
             assert_eq!(
                 ts_external_scanner_state_data(ts_subtree_external_scanner_state(&tree).unwrap()),
@@ -3361,10 +3405,10 @@ mod summary_tests {
         });
         let mut external = ts_subtree_new_node(2, Vec::new(), 0, &language);
         let data = external.heap_mut().unwrap();
-        data.extra = true;
-        data.has_external_tokens = true;
-        data.has_external_scanner_state_change = true;
-        data.depends_on_column = true;
+        data.set_extra(true);
+        data.set_has_external_tokens(true);
+        data.set_has_external_scanner_state_change(true);
+        data.set_depends_on_column(true);
         data.payload = SubtreePayload::External(ts_external_scanner_state_init(&[1, 2]));
         let hidden = ts_subtree_new_node(2, vec![inline.clone()], 0, &language);
         let children = [inline, external, hidden];
@@ -3376,10 +3420,11 @@ mod summary_tests {
                     let fragile = symbol == BUILTIN_SYM_ERROR || symbol == BUILTIN_SYM_ERROR_REPEAT;
                     let mut expected = SubtreeHeapData {
                         symbol,
-                        visible: metadata.visible,
-                        named: metadata.named,
-                        fragile_left: fragile,
-                        fragile_right: fragile,
+                        flags: HeapFlags::default()
+                            .with_visible(metadata.visible)
+                            .with_named(metadata.named)
+                            .with_fragile_left(fragile)
+                            .with_fragile_right(fragile),
                         payload: SubtreePayload::Branch(BranchData {
                             production_id,
                             ..BranchData::default()
@@ -3437,15 +3482,16 @@ mod summary_tests {
                         SubtreeHeapData {
                             symbol,
                             parse_state: 27,
-                            visible: flags & 1 != 0,
-                            named: flags & 2 != 0,
-                            extra: flags & 4 != 0,
-                            is_missing: flags & 8 != 0,
-                            fragile_left: flags & 16 != 0,
-                            fragile_right: flags & 16 == 0,
-                            depends_on_column: true,
-                            has_external_tokens: true,
-                            has_external_scanner_state_change: true,
+                            flags: HeapFlags::default()
+                                .with_visible(flags & 1 != 0)
+                                .with_named(flags & 2 != 0)
+                                .with_extra(flags & 4 != 0)
+                                .with_is_missing(flags & 8 != 0)
+                                .with_fragile_left(flags & 16 != 0)
+                                .with_fragile_right(flags & 16 == 0)
+                                .with_depends_on_column(true)
+                                .with_has_external_tokens(true)
+                                .with_has_external_scanner_state_change(true),
                             padding: Length {
                                 bytes: u32::MAX - 3,
                                 extent: Point { row: 2, column: 4 },
@@ -3468,7 +3514,6 @@ mod summary_tests {
                                     parse_state: 13,
                                 },
                             }),
-                            ..SubtreeHeapData::default()
                         }
                         .with_children(if has_children {
                             vec![Subtree::inline(InlineLeaf::default())]
@@ -3543,8 +3588,12 @@ mod summary_tests {
         });
         let external = SubtreeHeapData {
             symbol: 2,
-            visible: true,
-            extra: true,
+            flags: HeapFlags::default()
+                .with_visible(true)
+                .with_extra(true)
+                .with_has_external_tokens(true)
+                .with_has_external_scanner_state_change(true)
+                .with_depends_on_column(true),
             padding: Length {
                 bytes: 1,
                 extent: Point { row: 0, column: 1 },
@@ -3555,9 +3604,6 @@ mod summary_tests {
             },
             lookahead_bytes: 2,
             error_cost: 5,
-            has_external_tokens: true,
-            has_external_scanner_state_change: true,
-            depends_on_column: true,
             payload: SubtreePayload::External(ExternalScannerState::default()),
             ..SubtreeHeapData::default()
         }
@@ -3586,8 +3632,7 @@ mod summary_tests {
         .with_children(vec![missing.clone()]);
         let error = SubtreeHeapData {
             symbol: BUILTIN_SYM_ERROR,
-            visible: true,
-            named: true,
+            flags: HeapFlags::default().with_visible(true).with_named(true),
             size: Length {
                 bytes: 1,
                 extent: Point { row: 0, column: 1 },
@@ -3622,11 +3667,11 @@ mod summary_tests {
         assert_eq!(data.lookahead_bytes, 0);
         assert_eq!(data.error_cost, 1479);
         assert!(
-            data.has_external_tokens
-                && data.has_external_scanner_state_change
-                && data.depends_on_column
+            data.has_external_tokens()
+                && data.has_external_scanner_state_change()
+                && data.depends_on_column()
         );
-        assert!(data.fragile_left && data.fragile_right);
+        assert!(data.fragile_left() && data.fragile_right());
         assert_eq!(data.parse_state, TS_TREE_STATE_NONE);
         assert_eq!(summary.dynamic_precedence, -4);
         assert_eq!(summary.visible_child_count, 5);
@@ -3641,7 +3686,7 @@ mod summary_tests {
         let child = SubtreeHeapData {
             symbol: 2,
             parse_state: 23,
-            depends_on_column: true,
+            flags: HeapFlags::default().with_depends_on_column(true),
             payload: SubtreePayload::Branch(BranchData {
                 dynamic_precedence: 99,
                 ..BranchData::default()
@@ -3656,21 +3701,22 @@ mod summary_tests {
                 extent: Point { row: 3, column: 0 },
             },
             parse_state: 9,
-            fragile_left: true,
-            has_external_tokens: true,
-            has_external_scanner_state_change: true,
+            flags: HeapFlags::default()
+                .with_fragile_left(true)
+                .with_has_external_tokens(true)
+                .with_has_external_scanner_state_change(true),
             payload: SubtreePayload::Branch(BranchData::default()),
             ..SubtreeHeapData::default()
         };
         let children = [child];
         summarize_children(&mut data, &children, &language());
-        assert!(!data.depends_on_column);
-        assert!(!data.has_external_tokens && !data.has_external_scanner_state_change);
+        assert!(!data.depends_on_column());
+        assert!(!data.has_external_tokens() && !data.has_external_scanner_state_change());
         assert_eq!(data.size, length_zero());
-        assert!(data.fragile_left);
+        assert!(data.fragile_left());
         assert_eq!(data.parse_state, 9);
         summarize_children(&mut data, &children, &language());
-        assert!(data.depends_on_column);
+        assert!(data.depends_on_column());
         let SubtreePayload::Branch(summary) = &data.payload else {
             unreachable!()
         };

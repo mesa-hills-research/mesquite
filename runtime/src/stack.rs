@@ -1736,7 +1736,7 @@ mod version_tests {
                                 bytes: 2,
                                 extent: crate::point::Point { row: 1, column: 1 },
                             },
-                            visible: true,
+                            flags: HeapFlags::default().with_visible(true),
                             error_cost: 12,
                             payload: SubtreePayload::Branch(BranchData {
                                 dynamic_precedence: -9,
@@ -2311,7 +2311,7 @@ mod tests {
                 ..Length::default()
             },
             error_cost: 13,
-            visible: true,
+            flags: HeapFlags::default().with_visible(true),
             payload: SubtreePayload::Branch(BranchData {
                 visible_descendant_count: 9,
                 dynamic_precedence: 11,
@@ -2580,7 +2580,7 @@ mod tests {
         .with_children(Children::new());
         let mut other = error.clone();
         other.heap_mut().unwrap().error_cost = 10;
-        other.heap_mut().unwrap().extra = true;
+        other.heap_mut().unwrap().set_extra(true);
         other.heap_mut().unwrap().size.bytes = 100;
         assert!(!error.ptr_eq(&other));
         assert!(stack__subtree_is_equivalent(&error, &other));
@@ -2873,7 +2873,7 @@ mod tests {
     fn in_place_pop_matches_pop_then_renumber() {
         let heap = SubtreeHeapData {
             symbol: 3,
-            visible: true,
+            flags: HeapFlags::default().with_visible(true),
             payload: SubtreePayload::Leaf,
             size: Length {
                 bytes: 3,
@@ -2969,7 +2969,7 @@ mod tests {
     fn single_child_pop_moves_null_inline_and_heap_links() {
         let heap = SubtreeHeapData {
             symbol: 3,
-            visible: true,
+            flags: HeapFlags::default().with_visible(true),
             payload: SubtreePayload::Leaf,
             ..SubtreeHeapData::default()
         }

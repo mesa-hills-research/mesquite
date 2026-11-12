@@ -707,7 +707,7 @@ pub(crate) fn ts_parser__lex<const LOGGING: bool>(
                     data.payload = SubtreePayload::External(ts_external_scanner_state_init(
                         &parser.scanner_buffer[..external_scanner_state_len as usize],
                     ));
-                    data.has_external_scanner_state_change = external_scanner_state_changed;
+                    data.set_has_external_scanner_state_change(external_scanner_state_changed);
                 }
             },
         )
@@ -1103,11 +1103,11 @@ pub(crate) fn ts_parser__reduce(
                 &language,
                 |data| {
                     if end_of_non_terminal_extra && next_state == state {
-                        data.extra = true;
+                        data.set_extra(true);
                     }
                     if is_fragile || version_count > 1 {
-                        data.fragile_left = true;
-                        data.fragile_right = true;
+                        data.set_fragile_left(true);
+                        data.set_fragile_right(true);
                         data.parse_state = TS_TREE_STATE_NONE;
                     } else {
                         data.parse_state = state;
@@ -1154,11 +1154,11 @@ pub(crate) fn ts_parser__reduce(
                     &language,
                     |data| {
                         if end_of_non_terminal_extra && next_state == state {
-                            data.extra = true;
+                            data.set_extra(true);
                         }
                         if is_fragile || version_count > 1 {
-                            data.fragile_left = true;
-                            data.fragile_right = true;
+                            data.set_fragile_left(true);
+                            data.set_fragile_right(true);
                             data.parse_state = TS_TREE_STATE_NONE;
                         } else {
                             data.parse_state = state;
@@ -1277,11 +1277,11 @@ fn ts_parser__reduce_general(
             .next_state(&language, state, symbol);
         let initialize = |data: &mut SubtreeHeapData| {
             if end_of_non_terminal_extra && next_state == state {
-                data.extra = true;
+                data.set_extra(true);
             }
             if is_fragile || pop_size > 1 || initial_version_count > 1 {
-                data.fragile_left = true;
-                data.fragile_right = true;
+                data.set_fragile_left(true);
+                data.set_fragile_right(true);
                 data.parse_state = TS_TREE_STATE_NONE;
             } else {
                 data.parse_state = state;
@@ -2936,7 +2936,7 @@ mod tests {
         fn external(symbol: Symbol, bytes: &[u8]) -> Subtree {
             SubtreeHeapData {
                 symbol,
-                has_external_tokens: true,
+                flags: HeapFlags::default().with_has_external_tokens(true),
                 payload: SubtreePayload::External(ts_external_scanner_state_init(bytes)),
                 ..SubtreeHeapData::default()
             }
@@ -3109,8 +3109,8 @@ mod tests {
             assert_eq!(ts_subtree_child_count(tree), 1);
             assert_eq!(data.size.bytes, 3);
             assert_eq!(ts_subtree_dynamic_precedence(tree), 4);
-            assert_eq!(data.fragile_left, fragile);
-            assert_eq!(data.fragile_right, fragile);
+            assert_eq!(data.fragile_left(), fragile);
+            assert_eq!(data.fragile_right(), fragile);
             assert_eq!(
                 data.parse_state,
                 if fragile { TS_TREE_STATE_NONE } else { 1 }
@@ -3240,8 +3240,8 @@ mod tests {
                                         0,
                                         &language,
                                         |data| {
-                                            data.fragile_left = true;
-                                            data.fragile_right = true;
+                                            data.set_fragile_left(true);
+                                            data.set_fragile_right(true);
                                             data.parse_state = TS_TREE_STATE_NONE;
                                             let SubtreePayload::Branch(branch) = &mut data.payload
                                             else {
@@ -3477,7 +3477,7 @@ mod tests {
                 parser.logger = Some(Box::new(|_, _| {}));
             }
             let external = SubtreeHeapData {
-                has_external_tokens: true,
+                flags: HeapFlags::default().with_has_external_tokens(true),
                 payload: SubtreePayload::External(ExternalScannerState::default()),
                 ..SubtreeHeapData::default()
             }

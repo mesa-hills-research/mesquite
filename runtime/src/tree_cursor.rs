@@ -881,7 +881,7 @@ mod tests {
                         SubtreeHeapData {
                             size: length(3, 1, 2),
                             padding: length(2, 0, 2),
-                            extra: index % 2 == 0,
+                            flags: HeapFlags::default().with_extra(index % 2 == 0),
                             payload: SubtreePayload::Leaf,
                             ..SubtreeHeapData::default()
                         }
@@ -1042,7 +1042,7 @@ mod tests {
             SubtreeHeapData {
                 padding: length(3, 1, 1),
                 size: length(1, 0, 1),
-                visible: true,
+                flags: HeapFlags::default().with_visible(true),
                 payload: SubtreePayload::Leaf,
                 ..SubtreeHeapData::default()
             }
@@ -1151,7 +1151,7 @@ mod tests {
         };
         let token = || leaf(1, 0, VISIBLE | NAMED);
         let mut extra = branch(2, vec![token()], 0);
-        extra.heap_mut().unwrap().extra = true;
+        extra.heap_mut().unwrap().set_extra(true);
         let wrapper = branch(
             2,
             vec![
