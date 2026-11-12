@@ -178,13 +178,36 @@ impl HeapSubtree {
                     children: [a, b, c],
                 })),
             },
-            Children::Heap(children) => Self::Many(Arc::new(HeapNode { data, children })),
+            Children::Heap(children) => {
+                debug_assert!(children.len() > INLINE_CHILD_CAPACITY);
+                Self::Many(Arc::new(HeapNode { data, children }))
+            }
         }
     }
 
     #[inline]
     pub(crate) fn children(&self) -> &[Subtree] {
         with_node!(self, node => &node.children[..])
+    }
+
+    /// Whether the node has children. It compares the tag once, where
+    /// `children` branches on every variant. A `Many` node always has more
+    /// than three children, since `new` moves shorter lists into arrays.
+    #[inline]
+    pub(crate) fn has_children(&self) -> bool {
+        !matches!(self, Self::Leaf(_))
+    }
+
+    /// The number of children, without a load for the arrays.
+    #[inline]
+    pub(crate) fn child_count(&self) -> usize {
+        match self {
+            Self::Leaf(_) => 0,
+            Self::One(_) => 1,
+            Self::Two(_) => 2,
+            Self::Three(_) => 3,
+            Self::Many(node) => node.children.len(),
+        }
     }
 
     /// The header, copied first if the node is shared.
@@ -998,18 +1021,18 @@ pub(crate) fn ts_subtree_compress(
         // Inspect without cloning: an extra Arc handle here would change C's
         // ref_count checks and prevent the very rotation we are considering.
         let can_rotate = match &current {
-            Subtree::Heap(data) if data.strong_count() == 1 && data.children().len() >= 2 => {
+            Subtree::Heap(data) if data.strong_count() == 1 && data.child_count() >= 2 => {
                 match &data.children()[0] {
                     Subtree::Heap(child)
                         if child.strong_count() == 1
-                            && child.children().len() >= 2
+                            && child.child_count() >= 2
                             && child.symbol == symbol =>
                     {
                         matches!(
                             &child.children()[0],
                             Subtree::Heap(grandchild)
                                 if grandchild.strong_count() == 1
-                                    && grandchild.children().len() >= 2
+                                    && grandchild.child_count() >= 2
                                     && grandchild.symbol == symbol
                         )
                     }
@@ -1213,7 +1236,7 @@ fn summarize_unary(data: &mut ChildSummary, child: &Subtree) {
             )
         }
         Subtree::Heap(child) => {
-            let has_children = !child.children().is_empty();
+            let has_children = child.has_children();
             summary.first_leaf = FirstLeaf {
                 symbol: child.symbol,
                 parse_state: child.parse_state,
@@ -1383,7 +1406,7 @@ impl ChildTotals<'_> {
                     self.fragile_right = true;
                     self.parse_state = TS_TREE_STATE_NONE;
                 }
-                let has_children = !child.children().is_empty();
+                let has_children = child.has_children();
                 let mut first_leaf = FirstLeaf {
                     symbol: child.symbol,
                     parse_state: child.parse_state,
@@ -2227,7 +2250,7 @@ pub(crate) fn ts_subtree_external_scanner_state(tree: &Subtree) -> Option<&Exter
         return None;
     };
     if data.has_external_tokens()
-        && data.children().is_empty()
+        && !data.has_children()
         && let SubtreePayload::External(state) = &data.payload
     {
         Some(state)
@@ -2449,7 +2472,10 @@ pub(crate) fn ts_subtree_children(tree: &Subtree) -> &[Subtree] {
 }
 #[inline]
 pub(crate) fn ts_subtree_child_count(tree: &Subtree) -> u32 {
-    ts_subtree_children(tree).len() as u32
+    match tree {
+        Subtree::Heap(data) => data.child_count() as u32,
+        _ => 0,
+    }
 }
 pub(crate) fn ts_subtree_set_extra(tree: &mut Subtree, extra: bool) {
     match tree {

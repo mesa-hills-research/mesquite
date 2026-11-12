@@ -2805,7 +2805,7 @@ impl<'tree> BalanceCursor<'tree> {
     fn is_unique_branch(tree: &Subtree) -> bool {
         #[cfg(test)]
         BALANCE_CURSOR_STEPS.with(|steps| steps.set(steps.get() + 1));
-        matches!(tree, Subtree::Heap(data) if !data.children().is_empty() && data.strong_count() == 1)
+        matches!(tree, Subtree::Heap(data) if data.has_children() && data.strong_count() == 1)
     }
 
     #[inline]
