@@ -2851,12 +2851,17 @@ impl<'tree> BalanceCursor<'tree> {
 
     fn push_children(&mut self, tree: &'tree mut Subtree) {
         // Most branches have only leaves or shared nodes below them, and those need
-        // no mutable borrow.
-        if !ts_subtree_children(tree).iter().any(Self::is_unique_branch) {
+        // no mutable borrow. One branch on the node's arity covers both.
+        let Subtree::Heap(data) = tree else {
             return;
-        }
+        };
+        let Some(children) = data.children_mut_if_any(Self::is_unique_branch) else {
+            return;
+        };
+        #[cfg(test)]
+        BALANCE_CURSOR_STEPS.with(|steps| steps.set(steps.get() + 1));
         let depth = self.path.len() + 1;
-        for (index, child) in Self::children_mut(tree).iter_mut().enumerate() {
+        for (index, child) in children.iter_mut().enumerate() {
             if Self::is_unique_branch(child) {
                 self.pending.push((child, depth, index));
             }

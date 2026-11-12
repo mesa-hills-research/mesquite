@@ -234,6 +234,23 @@ impl HeapSubtree {
         })
     }
 
+    /// The children, mutably, if one of them passes `wanted`. One branch on
+    /// the arity covers the test and the borrow. The node must have no other
+    /// handle.
+    #[inline]
+    pub(crate) fn children_mut_if_any(
+        &mut self,
+        wanted: impl Fn(&Subtree) -> bool,
+    ) -> Option<&mut [Subtree]> {
+        with_node!(self, node => {
+            if !node.children[..].iter().any(&wanted) {
+                return None;
+            }
+            let node = Arc::get_mut(node).expect("the node has no other handle");
+            Some(&mut node.children[..])
+        })
+    }
+
     #[inline]
     pub(crate) fn strong_count(&self) -> usize {
         with_node!(self, node => Arc::strong_count(node))
