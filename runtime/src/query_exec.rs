@@ -553,16 +553,18 @@ mod tests {
 
     fn tree(repetition: bool, symbol: Symbol) -> Tree {
         Tree {
-            root: Box::new(Subtree::Heap(Arc::new(SubtreeHeapData {
-                symbol,
-                payload: SubtreePayload::Leaf,
-                children: if repetition {
-                    vec![Subtree::inline(InlineLeaf::default())].into()
+            root: Box::new(
+                SubtreeHeapData {
+                    symbol,
+                    payload: SubtreePayload::Leaf,
+                    ..SubtreeHeapData::default()
+                }
+                .with_children(if repetition {
+                    vec![Subtree::inline(InlineLeaf::default())]
                 } else {
-                    Vec::new().into()
-                },
-                ..SubtreeHeapData::default()
-            }))),
+                    Vec::new()
+                }),
+            ),
             language: language(),
             included_ranges: Vec::new(),
         }

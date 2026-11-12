@@ -52,7 +52,7 @@ Add the runtime and a grammar crate for each language you parse:
 
 ```toml
 [dependencies]
-mesquite = "0.26.0"
+mesquite = "0.26.1"
 mesquite_rust = "0.2.0"
 ```
 
@@ -61,7 +61,7 @@ lines stay as they are. To keep upstream's dependency names as well, rename the 
 
 ```toml
 [dependencies]
-tree-sitter = { package = "mesquite", version = "0.26.0" }
+tree-sitter = { package = "mesquite", version = "0.26.1" }
 tree-sitter-rust = { package = "mesquite_rust", version = "0.2.0" }
 ```
 

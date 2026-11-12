@@ -70,11 +70,11 @@ fn leaf(symbol: u8, size: u8, padding: u8, flags: u8) -> Subtree {
 }
 
 fn branch(children: Vec<Subtree>) -> Subtree {
-    Subtree::Heap(Arc::new(SubtreeHeapData {
-        children: children.into(),
+    SubtreeHeapData {
         payload: SubtreePayload::Branch(BranchData::default()),
         ..SubtreeHeapData::default()
-    }))
+    }
+    .with_children(children)
 }
 
 #[test]
@@ -113,14 +113,14 @@ fn constructors_and_leaf_navigation() {
 
 #[test]
 fn child_iterator_tracks_padding_extents_and_structural_aliases() {
-    let extra = Subtree::Heap(Arc::new(SubtreeHeapData {
+    let extra = SubtreeHeapData {
         padding: length(2, 1, 1),
         size: length(4, 1, 2),
-        extra: true,
-        children: vec![].into(),
+        flags: HeapFlags::default().with_extra(true),
         payload: SubtreePayload::Leaf,
         ..SubtreeHeapData::default()
-    }));
+    }
+    .with_children(Children::new());
     let tree = tree(branch(vec![
         leaf(1, 3, 7, VISIBLE),
         extra,
@@ -174,15 +174,17 @@ fn relevance_and_cached_child_counts() {
         assert!(ts_node__is_relevant(aliased, true));
     }
 
-    let tree = tree(Subtree::Heap(Arc::new(SubtreeHeapData {
-        children: vec![leaf(1, 1, 0, VISIBLE)].into(),
-        payload: SubtreePayload::Branch(BranchData {
-            visible_child_count: 9,
-            named_child_count: 4,
-            ..BranchData::default()
-        }),
-        ..SubtreeHeapData::default()
-    })));
+    let tree = tree(
+        SubtreeHeapData {
+            payload: SubtreePayload::Branch(BranchData {
+                visible_child_count: 9,
+                named_child_count: 4,
+                ..BranchData::default()
+            }),
+            ..SubtreeHeapData::default()
+        }
+        .with_children(vec![leaf(1, 1, 0, VISIBLE)]),
+    );
     let node = ts_node_new(&tree, &tree.root, length_zero(), 0);
     assert_eq!(ts_node__relevant_child_count(node, true), 9);
     assert_eq!(ts_node__relevant_child_count(node, false), 4);

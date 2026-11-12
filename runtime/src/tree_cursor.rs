@@ -800,11 +800,11 @@ mod tests {
     }
 
     fn parent(children: Vec<Subtree>) -> Subtree {
-        Subtree::Heap(Arc::new(SubtreeHeapData {
-            children: children.into(),
+        SubtreeHeapData {
             payload: SubtreePayload::Leaf,
             ..SubtreeHeapData::default()
-        }))
+        }
+        .with_children(children)
     }
 
     fn iterator<'tree>(
@@ -825,15 +825,15 @@ mod tests {
 
     #[test]
     fn forward_iteration_counts_aliases_extras_and_hidden_descendants() {
-        let hidden = Subtree::Heap(Arc::new(SubtreeHeapData {
+        let hidden = SubtreeHeapData {
             size: length(3, 0, 3),
-            children: Children::new(),
             payload: SubtreePayload::Branch(BranchData {
                 visible_descendant_count: 2,
                 ..BranchData::default()
             }),
             ..SubtreeHeapData::default()
-        }));
+        }
+        .with_children(Children::new());
         let parent = parent(vec![hidden, leaf(1, 2, EXTRA), leaf(2, 3, 0)]);
         let mut iterator = iterator(&parent, &[0, 8]);
         iterator.position = length(10, 1, 5);
@@ -877,29 +877,31 @@ mod tests {
             for selected in 0..6 {
                 let mut children = Vec::new();
                 for index in 0..skipped_count {
-                    children.push(Subtree::Heap(Arc::new(SubtreeHeapData {
-                        size: length(3, 1, 2),
-                        padding: length(2, 0, 2),
-                        extra: index % 2 == 0,
-                        children: Children::new(),
-                        payload: SubtreePayload::Leaf,
-                        ..SubtreeHeapData::default()
-                    })));
+                    children.push(
+                        SubtreeHeapData {
+                            size: length(3, 1, 2),
+                            padding: length(2, 0, 2),
+                            flags: HeapFlags::default().with_extra(index % 2 == 0),
+                            payload: SubtreePayload::Leaf,
+                            ..SubtreeHeapData::default()
+                        }
+                        .with_children(Children::new()),
+                    );
                 }
                 children.push(match selected {
                     0 => leaf(1, 2, VISIBLE),
                     1 => leaf(1, 2, 0), // Made visible by an alias below.
-                    2 => Subtree::Heap(Arc::new(SubtreeHeapData {
+                    2 => SubtreeHeapData {
                         size: length(4, 2, 1),
                         padding: length(2, 1, 1),
-                        children: Children::new(),
                         payload: SubtreePayload::Branch(BranchData {
                             visible_child_count: 2,
                             visible_descendant_count: 3,
                             ..BranchData::default()
                         }),
                         ..SubtreeHeapData::default()
-                    })),
+                    }
+                    .with_children(Children::new()),
                     3 => leaf(1, 2, EXTRA | VISIBLE),
                     4 => leaf(1, 2, EXTRA),
                     _ => leaf(1, 2, 0),
@@ -1037,14 +1039,14 @@ mod tests {
 
         let parent = parent(vec![
             leaf(2, 0, VISIBLE),
-            Subtree::Heap(Arc::new(SubtreeHeapData {
+            SubtreeHeapData {
                 padding: length(3, 1, 1),
                 size: length(1, 0, 1),
-                visible: true,
-                children: Children::new(),
+                flags: HeapFlags::default().with_visible(true),
                 payload: SubtreePayload::Leaf,
                 ..SubtreeHeapData::default()
-            })),
+            }
+            .with_children(Children::new()),
         ]);
         let mut iterator = iterator(&parent, &[]);
         iterator.child_index = 1;
@@ -1149,7 +1151,7 @@ mod tests {
         };
         let token = || leaf(1, 0, VISIBLE | NAMED);
         let mut extra = branch(2, vec![token()], 0);
-        extra.heap_mut().unwrap().extra = true;
+        extra.heap_mut().unwrap().set_extra(true);
         let wrapper = branch(
             2,
             vec![

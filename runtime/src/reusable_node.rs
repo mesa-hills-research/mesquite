@@ -173,13 +173,14 @@ mod tests {
 
     fn branch(children: Vec<Subtree>) -> Subtree {
         let bytes = children.iter().map(ts_subtree_total_bytes).sum();
-        let mut data = SubtreeHeapData::default();
-        data.size = Length {
-            bytes,
-            ..Length::default()
-        };
-        data.children = children.into();
-        Subtree::Heap(Arc::new(data))
+        SubtreeHeapData {
+            size: Length {
+                bytes,
+                ..Length::default()
+            },
+            ..SubtreeHeapData::default()
+        }
+        .with_children(children)
     }
 
     fn cursor<'t>(root: &'t Subtree, saved: &mut ReusableNode) -> ReuseCursor<'t> {
