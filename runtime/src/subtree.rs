@@ -115,14 +115,19 @@ pub(crate) type LeafNode = HeapNode<[Subtree; 0]>;
 /// A handle to a heap subtree. Nodes with up to three children keep them in an
 /// array, and longer lists in a Vec. Nine in ten branch nodes of typical trees
 /// have three children or fewer. A node's child count is fixed when it is made.
+///
+/// The tags sit at the top of the u64 range, and the null and inline handles
+/// take the two values below them. Then a match on a `Subtree` compares the
+/// tag with constants. With tags 0 to 4, every match first turned the tag into
+/// a variant index with a subtraction and a conditional move.
 #[derive(Clone, Debug)]
 #[repr(u64)]
 pub(crate) enum HeapSubtree {
-    Leaf(Arc<LeafNode>),
-    One(Arc<HeapNode<[Subtree; 1]>>),
-    Two(Arc<HeapNode<[Subtree; 2]>>),
-    Three(Arc<HeapNode<[Subtree; 3]>>),
-    Many(Arc<HeapNode<Vec<Subtree>>>),
+    Leaf(Arc<LeafNode>) = u64::MAX - 4,
+    One(Arc<HeapNode<[Subtree; 1]>>) = u64::MAX - 3,
+    Two(Arc<HeapNode<[Subtree; 2]>>) = u64::MAX - 2,
+    Three(Arc<HeapNode<[Subtree; 3]>>) = u64::MAX - 1,
+    Many(Arc<HeapNode<Vec<Subtree>>>) = u64::MAX,
 }
 
 /// Runs `$body` with `$node` bound to the handle's Arc, whatever its child count.
@@ -140,23 +145,34 @@ macro_rules! with_node {
 
 impl HeapSubtree {
     /// A node with these children, in the variant that fits their count.
-    #[inline]
+    #[inline(always)]
     pub(crate) fn new(data: SubtreeHeapData, mut children: Children) -> Self {
         children.compact();
         match children {
+            // The slots past `len` are null, so forgetting them skips three
+            // calls to `Subtree`'s drop and leaks nothing.
             Children::Inline {
                 len,
                 items: [a, b, c],
             } => match len {
-                0 => Self::Leaf(Arc::new(HeapNode { data, children: [] })),
-                1 => Self::One(Arc::new(HeapNode {
-                    data,
-                    children: [a],
-                })),
-                2 => Self::Two(Arc::new(HeapNode {
-                    data,
-                    children: [a, b],
-                })),
+                0 => {
+                    std::mem::forget([a, b, c]);
+                    Self::Leaf(Arc::new(HeapNode { data, children: [] }))
+                }
+                1 => {
+                    std::mem::forget([b, c]);
+                    Self::One(Arc::new(HeapNode {
+                        data,
+                        children: [a],
+                    }))
+                }
+                2 => {
+                    std::mem::forget(c);
+                    Self::Two(Arc::new(HeapNode {
+                        data,
+                        children: [a, b],
+                    }))
+                }
                 _ => Self::Three(Arc::new(HeapNode {
                     data,
                     children: [a, b, c],
@@ -373,17 +389,26 @@ impl Children {
     pub(crate) fn push(&mut self, tree: Subtree) {
         match self {
             Self::Inline { len, items } if usize::from(*len) < INLINE_CHILD_CAPACITY => {
-                items[usize::from(*len)] = tree;
+                items[usize::from(*len)].fill(tree);
                 *len += 1;
             }
-            Self::Inline { items, .. } => {
-                let mut children = Vec::with_capacity(INLINE_CHILD_CAPACITY * 2);
-                children.extend(items.iter_mut().map(std::mem::take));
-                children.push(tree);
-                *self = Self::Heap(children);
-            }
+            Self::Inline { .. } => self.spill(tree),
             Self::Heap(children) => children.push(tree),
         }
+    }
+
+    /// Moves a full inline list into a Vec, followed by `tree`. Reductions
+    /// size their list from the child count, so this is rare, and kept out of
+    /// line so that `push` stays small enough to inline.
+    #[cold]
+    #[inline(never)]
+    fn spill(&mut self, tree: Subtree) {
+        let mut children = Vec::with_capacity(INLINE_CHILD_CAPACITY * 2);
+        if let Self::Inline { items, .. } = self {
+            children.extend(items.iter_mut().map(std::mem::take));
+        }
+        children.push(tree);
+        *self = Self::Heap(children);
     }
 
     #[inline]
@@ -2236,6 +2261,15 @@ impl Subtree {
 
     pub fn is_null(&self) -> bool {
         matches!(self, Self::Null)
+    }
+
+    /// Moves `tree` into this handle, which must be null. An assignment would
+    /// drop the null handle first, and that drop is a call, since the compiler
+    /// doesn't inline `Subtree`'s drop with five Arc types behind a heap handle.
+    #[inline]
+    pub(crate) fn fill(&mut self, tree: Subtree) {
+        debug_assert!(self.is_null(), "only a null subtree is filled");
+        std::mem::forget(std::mem::replace(self, tree));
     }
     pub fn heap(&self) -> Option<&SubtreeHeapData> {
         if let Self::Heap(data) = self {

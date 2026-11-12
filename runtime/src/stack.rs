@@ -948,7 +948,8 @@ fn stack_node_replace_subtree(
     // A single-link prefix has never allocated overflow links.
     debug_assert!(data.links.rest.is_none());
     let link = data.links.first.as_mut().unwrap();
-    link.subtree = parent;
+    // The reduction took this link's subtree out.
+    link.subtree.fill(parent);
     link.is_pending = false;
 }
 
@@ -1007,18 +1008,26 @@ pub(crate) fn ts_stack_reduce_many_for_version(
         let mut node = stack.heads[version as usize].node;
         loop {
             let data = stack.arena.node_mut(node);
-            let link = data.links.first.as_mut().expect("initialized stack link");
-            let next = link.node;
-            let child = std::mem::replace(&mut link.subtree, Subtree::Null);
+            if node == slot {
+                // The last slot keeps its link, for the parent.
+                let link = data.links.first.as_mut().expect("initialized stack link");
+                let child = std::mem::take(&mut link.subtree);
+                if !child.is_null() {
+                    children.push(child);
+                }
+                break;
+            }
+            // Moving the link out leaves nothing to drop in the freed slot.
+            let StackLink {
+                node: next,
+                subtree: child,
+                ..
+            } = data.links.first.take().expect("initialized stack link");
             if !child.is_null() {
                 children.push(child);
             }
-            if node == slot {
-                break;
-            }
             data.ref_count = 0;
             data.link_count = 0;
-            data.links.first = None;
             debug_assert!(data.links.rest.is_none());
             stack.arena.free.push(node);
             node = next;

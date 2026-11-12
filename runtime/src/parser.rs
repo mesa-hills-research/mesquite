@@ -1982,19 +1982,20 @@ pub(crate) fn ts_parser__advance<const LOGGING: bool>(
     }
     if lookahead.is_null() {
         did_reuse = false;
-        lookahead = ts_parser__get_cached_token(
+        lookahead.fill(ts_parser__get_cached_token(
             parser,
             state,
             position as usize,
             ts_stack_last_external_token(&parser.stack, version),
             &mut table_entry,
-        );
+        ));
     }
     let mut needs_lex = lookahead.is_null();
     loop {
         if needs_lex {
             needs_lex = false;
-            lookahead = ts_parser__lex::<LOGGING>(parser, context, version, state);
+            // The lookahead is null whenever a lex is needed.
+            lookahead.fill(ts_parser__lex::<LOGGING>(parser, context, version, state));
             if parser.has_scanner_error {
                 return false;
             }
@@ -2807,6 +2808,7 @@ impl<'tree> BalanceCursor<'tree> {
         matches!(tree, Subtree::Heap(data) if !data.children().is_empty() && data.strong_count() == 1)
     }
 
+    #[inline]
     fn children_mut(tree: &mut Subtree) -> &mut [Subtree] {
         #[cfg(test)]
         BALANCE_CURSOR_STEPS.with(|steps| steps.set(steps.get() + 1));
