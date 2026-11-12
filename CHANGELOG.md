@@ -11,11 +11,13 @@ A node now takes a block sized for its children. Leaves take 96-byte blocks of g
 | a 1.8 MB JSON file | 36.0 MB | 30.2 MB | 24.5 MB |
 | a 1.7 MB C file | 172.1 MB | 132.7 MB | 114.8 MB |
 
-On an AMD EPYC 4345P, parsing takes 0.98 of 0.26.0's time in the geometric mean over the 58 grammars, and walking a tree with a cursor 0.76 to 0.92 of it on Rust, Markdown and Go files. Julia takes 1.05 times as long as with 0.26.0, and JSON 1.03.
+On an AMD EPYC 4345P, parsing takes 0.98 of 0.26.0's time in the geometric mean over the 58 grammars, and walking a tree with a cursor 0.86 to 0.93 of it on Rust, Markdown and Go files. Julia takes 1.05 times as long as with 0.26.0, and JSON 1.03.
+
+On the same machine, reparsing Python after a 4-byte append takes 1.04 times 0.26.0's time at 100 and 200 KB, 0.96 at 300 KB and 0.86 to 0.97 from 400 to 800 KB. Reparsing 400 KB of JSON takes 0.92 of it. Mesquite reparses faster than C at every size.
 
 glibc keeps freed blocks of up to 128 bytes in its fastbins, unmerged, and hands out the newest first. After a large tree was dropped, the next parse got its nodes scattered over that tree's memory, and merged them at its first large request. Dropping a tree that frees 4,096 nodes or more, and shares none of its nodes with another tree, now makes one 64 KB request, which merges them at the drop. The old tree of a reparse shares most of its nodes with the new one, so its drop makes no request, and the next reparse reuses its blocks as they are. Other allocators serve the request and free it.
 
-Verilog's and Julia's parse times depend on where the linker places a few hot functions (error recovery's table lookup for Verilog, the lexer and Julia's scanner for Julia). The same code, placed differently, takes up to 8% longer on Verilog's largest file and 15% longer on Julia's two largest. With every function aligned to 64 bytes, 0.26.0 and 0.26.1 parse these files within about 1% of each other on an Intel i9-13980HX. A program that links Mesquite gets placements of its own, so its times on these grammars can differ either way.
+Verilog's and Julia's parse times depend on where the linker places a few hot functions (error recovery's table lookup for Verilog, the lexer and Julia's scanner for Julia). On an Intel i9-13980HX, the same code placed differently takes up to 8% longer on Verilog's largest file and 15% longer on Julia's two largest, and with every function aligned to 64 bytes 0.26.0 and 0.26.1 parse these files within about 1% of each other. A program that links Mesquite gets placements of its own, so its times on these grammars can differ either way.
 
 ## 0.26.0
 
